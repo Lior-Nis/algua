@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import ast
 import errno
+import gc
 import importlib.util
 import sys
+import tracemalloc
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 
@@ -232,18 +234,23 @@ class _Alive:
     straight-line run of N creations costs O(N) in total, not the O(N^2) that unioning a growing
     `frozenset` on every one of them would. Iterating it, or comparing it for equality (needed for
     a loop's fixpoint check, since two differently-built sets of the same ids must still compare
-    equal), instead flattens it: computed once per distinct node and cached, and walked with an
-    explicit stack rather than recursed into, since a long straight-line chain would otherwise
-    recurse one Python frame per id and exceed the recursion limit.
+    equal), flattens it: walked with an explicit stack rather than recursed into (a long
+    straight-line chain would otherwise recurse one Python frame per id and exceed the recursion
+    limit), and deduplicated by node identity within one walk (so a DAG reachable through more
+    than one join is still visited once). Deliberately UNCACHED: caching the flattened set on
+    every node a walk visits, not only the one asked for, once made a single flatten of an
+    n-object chain retain O(n) separate, ever-larger frozenset copies (sizes 1..n) forever, not
+    the O(n) a persistent set actually needs -- about 1.38 GB at 8,000 objects. Materializing
+    costs memory only for the flatten actually requested, freed once that call returns.
 
-    Deliberately not a `frozenset` subclass: `set(x)`, `frozenset(x)` and `set.update(x)` all
-    special-case an actual `frozenset` (or subclass) instance and copy its underlying hash table
-    directly in C, bypassing any Python-level `__iter__` override -- confirmed empirically before
-    this design was chosen -- so a lazily-flattened node would read as empty through those. Being
-    a genuinely different type, checked with `isinstance` at the few places `Bindings` reads or
-    writes ALIVE, is what keeps this sound."""
+    Deliberately not a `frozenset` subclass either: `set(x)`, `frozenset(x)` and `set.update(x)`
+    all special-case an actual `frozenset` (or subclass) instance and copy its underlying hash
+    table directly in C, bypassing any Python-level `__iter__` override -- confirmed empirically
+    before this design was chosen -- so a lazily-flattened node would read as empty through
+    those. Being a genuinely different type, checked with `isinstance` at the few places
+    `Bindings` reads or writes ALIVE, is what keeps this sound."""
 
-    __slots__ = ("_oid", "_left", "_right", "_flat")
+    __slots__ = ("_oid", "_left", "_right")
 
     def __init__(
         self, oid: str | None = None, left: frozenset[str] | _Alive | None = None,
@@ -252,34 +259,32 @@ class _Alive:
         self._oid = oid
         self._left = left
         self._right = right
-        self._flat: frozenset[str] | None = None
 
     def added(self, oid: str) -> _Alive:
         return _Alive(oid=oid, left=self)
 
     def flattened(self) -> frozenset[str]:
-        """``self``'s set, computed and cached once per distinct node: a straight run of N
-        `added` calls chains N nodes deep, so this walks that chain with an explicit stack (each
-        node visited once, children before their parent) rather than recursing, which would
-        raise ``RecursionError`` well before N reaches the default recursion limit. A child link
-        already holding an ordinary, already-materialized `frozenset` (rather than another
-        `_Alive` node still to flatten) is used as-is."""
-        if self._flat is not None:
-            return self._flat
-        stack: list[tuple[_Alive, bool]] = [(self, False)]
+        """``self``'s set, recomputed on every call (never cached -- see the class docstring),
+        with an explicit stack rather than recursion, and node-identity deduplication within
+        this one walk."""
+        result: set[str] = set()
+        stack: list[frozenset[str] | _Alive | None] = [self]
+        visited: set[int] = set()
         while stack:
-            node, expanded = stack.pop()
-            if node._flat is not None:
+            node = stack.pop()
+            if node is None:
                 continue
-            if expanded:
-                own = frozenset((node._oid,)) if node._oid is not None else frozenset()
-                node._flat = _flat_of(node._left) | _flat_of(node._right) | own
+            if isinstance(node, _Alive):
+                if id(node) in visited:
+                    continue
+                visited.add(id(node))
+                if node._oid is not None:
+                    result.add(node._oid)
+                stack.append(node._left)
+                stack.append(node._right)
             else:
-                stack.append((node, True))
-                for child in (node._left, node._right):
-                    if isinstance(child, _Alive) and child._flat is None:
-                        stack.append((child, False))
-        return _flat_of(self)
+                result |= node
+        return frozenset(result)
 
     def __iter__(self) -> Iterator[str]:
         return iter(self.flattened())
@@ -290,19 +295,6 @@ class _Alive:
         if isinstance(other, frozenset):
             return self.flattened() == other
         return NotImplemented
-
-
-def _flat_of(node: frozenset[str] | _Alive | None) -> frozenset[str]:
-    """A child link's already-materialized set: `_Alive`'s own cached flatten if it is one
-    (guaranteed populated -- `flattened` visits every child before its parent), the plain
-    `frozenset` itself if it is already one, or nothing at all for `None`."""
-    if node is None:
-        return frozenset()
-    if isinstance(node, _Alive):
-        flat = node._flat
-        assert flat is not None
-        return flat
-    return node
 
 
 def _alive_add(alive: frozenset[str] | _Alive | None, oid: str) -> _Alive:
@@ -535,18 +527,24 @@ def _locals(function: Function) -> frozenset[str]:
     return frozenset(names) - _declared(function)
 
 
-def _values(node: ast.expr | None) -> set[ast.AST]:
-    """The expressions making the objects ``node``'s value may be, or hold as a display does.
+def _values(node: ast.expr | None) -> set[ast.AST] | None:
+    """The expressions making the objects ``node``'s value may be, or hold as a display does, or
+    ``None`` if MAX_IFEXP_CHAIN is exhausted before the whole structure is visited.
 
     Walked iteratively, with an explicit worklist bounded by MAX_IFEXP_CHAIN nodes visited,
     rather than recursed into: a deeply right-nested ternary chain -- `a if c else b if c else
     ...`, exactly the shape a comprehension result may hold -- would otherwise recurse one Python
     frame per `else` and exceed the recursion limit well under a chain of hundreds of levels.
+    Exhausting the bound with more of the structure left unvisited returns ``None`` instead of
+    the incomplete set visited so far, so a caller fails closed (treats everything as possibly
+    escaping) rather than silently acting on an unsound, truncated result.
     """
     made: set[ast.AST] = set()
     stack: list[ast.expr | None] = [node]
     visited = 0
-    while stack and visited < MAX_IFEXP_CHAIN:
+    while stack:
+        if visited >= MAX_IFEXP_CHAIN:
+            return None
         visited += 1
         current = stack.pop()
         if isinstance(current, (ast.Call, ast.GeneratorExp)):
@@ -571,22 +569,58 @@ def _values(node: ast.expr | None) -> set[ast.AST]:
     return made
 
 
-def _escaping(node: ast.ListComp | ast.SetComp | ast.DictComp) -> set[ast.AST]:
+def _shadowed_non_retaining(bindings: Bindings) -> frozenset[str]:
+    """Which of ``NON_RETAINING_CALLS`` are shadowed at this point: bound to something other than
+    the true builtin (a `def`, an assignment, an import -- anything that rebinds the name at
+    all). None of these are ever seeded into ``Bindings`` themselves, so a name's mere presence as
+    a key is proof enough that the source shadows it."""
+    return frozenset(name for name in NON_RETAINING_CALLS if name in bindings)
+
+
+def _non_retaining_argument_values(call: ast.Call, shadowed: frozenset[str]) -> list[ast.expr]:
+    """The arguments of ``call`` that a narrow, unshadowed ``NON_RETAINING_CALLS`` exemption
+    still leaves retaining: none, for `bool`/`any`/`all` (their one argument is only constructed
+    and tested), but `next`'s own second (default) argument, since `next` may itself return that
+    value verbatim, un-advanced, if the iterable is exhausted -- only its first (iterable)
+    argument is genuinely just advanced."""
+    if not isinstance(call.func, ast.Name) or call.func.id in shadowed:
+        return [*call.args, *(keyword.value for keyword in call.keywords)]
+    if call.func.id not in NON_RETAINING_CALLS:
+        return [*call.args, *(keyword.value for keyword in call.keywords)]
+    if call.func.id == "next":
+        # `next` takes its default positionally only; any keyword argument here is already
+        # invalid Python, so it is passed through as retaining rather than guessed at
+        return [*call.args[1:], *(keyword.value for keyword in call.keywords)]
+    return []
+
+
+def _escaping(
+    node: ast.ListComp | ast.SetComp | ast.DictComp, bindings: Bindings,
+) -> set[ast.AST] | None:
     """The expressions whose objects outlive comprehension ``node``: those its result holds, a
     walrus binds (in the enclosing scope), or a call is handed, since an unknown callee (a method
-    call or a plain call of a name that is not statically known) may keep it reachable. The
-    narrow, explicit exceptions in ``NON_RETAINING_CALLS`` are calls known to only construct and
-    test their argument, never store or return it; passing an object to one of them, and nothing
-    else, leaves it a temporary of the comprehension."""
+    call, or a plain call of a name that is not statically known to be an unshadowed builtin) may
+    keep it reachable. The narrow, explicit, binding- and argument-position-aware exceptions in
+    ``NON_RETAINING_CALLS`` (via `_non_retaining_argument_values`) are calls known to only
+    construct and test their argument, never store or return it; passing an object to one of
+    them, and nothing else, leaves it a temporary of the comprehension. ``None`` (MAX_IFEXP_CHAIN
+    exhausted for some sub-expression) propagates out, since a caller must then fail closed."""
     kept = _values(node)
+    if kept is None:
+        return None
+    shadowed = _shadowed_non_retaining(bindings)
     for inner in _own_nodes([node]):
         if isinstance(inner, ast.NamedExpr):
-            kept |= _values(inner.value)
-        elif isinstance(inner, ast.Call) and not (
-            isinstance(inner.func, ast.Name) and inner.func.id in NON_RETAINING_CALLS
-        ):
-            for argument in (*inner.args, *(keyword.value for keyword in inner.keywords)):
-                kept |= _values(argument)
+            more = _values(inner.value)
+            if more is None:
+                return None
+            kept |= more
+        elif isinstance(inner, ast.Call):
+            for argument in _non_retaining_argument_values(inner, shadowed):
+                more = _values(argument)
+                if more is None:
+                    return None
+                kept |= more
     return kept
 
 
@@ -688,13 +722,20 @@ class _WalkReferences:
         self._seen: dict[str, Bindings] = {}  # in the current scope, every state each object saw
         # in a class body: the lexical names it runs from, and the lazy objects it makes
         self._enclosing: tuple[Bindings, list[str]] | None = None
-        # the locals of every function scope currently being resolved, innermost last: a call
-        # from within one of them to a function defined elsewhere never sees a name it shadows
+        # the locals of every function (or lambda) scope currently being resolved, innermost
+        # last: a cross-scope call forwards a name only from at or above the callee's OWN
+        # nesting depth (`_defined_depth`), since anything deeper is some intermediate caller's
+        # own local, never what the callee's free reference resolves to -- the callee's own
+        # ancestry, however deep, must still reach it unfiltered
         self._shadow: list[frozenset[str]] = []
+        # the `len(self._shadow)` at the moment each function/lambda was itself defined: how many
+        # enclosing function scopes lexically surround it
+        self._defined_depth: dict[Deferred, int] = {}
         # syntax summaries, computed once per node
         self._later: dict[Deferred, bool] = {}
-        self._escapes: dict[ast.AST, set[ast.AST]] = {}
+        self._escapes: dict[tuple[ast.AST, frozenset[str]], set[ast.AST] | None] = {}
         self._reads: dict[Function, frozenset[str]] = {}
+        self._transitive: dict[Function, frozenset[str]] = {}
         self._returns: dict[tuple[Function, frozenset[tuple[str, frozenset[str]]]], list[Returned]]
         self._returns = {}
         # the targets a call of a function may leave a global or nonlocal name of its own
@@ -711,10 +752,19 @@ class _WalkReferences:
         seen, self._seen = self._seen, {}
         deferred: list[Deferred] = []
         self._block(body, bindings, deferred)
-        # a sibling defined earlier may be called from another sibling's body, discovered only
-        # once that sibling is itself resolved; a second round sees every such call recorded by
-        # the first (duplicate self.uses lines from the retry are deduplicated on return)
-        for _ in range(2):
+        # a sibling defined earlier may be called from another sibling's body, possibly
+        # transitively through several more (each hop discovered only once its own caller is
+        # itself resolved): repeat until a full pass changes no sibling's own resolved entry, a
+        # true fixpoint, bounded by one round per sibling -- enough for any acyclic chain among
+        # them -- so a call cycle still terminates instead of looping forever. Re-walking a
+        # sibling whose entry has not actually changed is skipped: re-walking it unconditionally
+        # would re-discover the very same call sites every round (each nested `_scope` call
+        # starts its own object bookkeeping fresh), making every round look like progress and
+        # defeating the fixpoint check (duplicate self.uses lines from a genuine retry are
+        # deduplicated on return regardless).
+        resolved: dict[Deferred, frozenset[tuple[str, frozenset[str]]]] = {}
+        for _ in range(len(deferred) + 1):
+            changed = False
             for function in deferred:
                 calls = self._calls.get(function, [])
                 # a lazy body runs only while one of its objects exists, so from what those
@@ -722,18 +772,28 @@ class _WalkReferences:
                 # final names
                 reached = calls if calls and self._runs_later(function) else [bindings, *calls]
                 entry = _lexical(_join(*reached))
+                snapshot = frozenset(entry.items())
+                if resolved.get(function) == snapshot:
+                    continue
+                resolved[function] = snapshot
+                changed = True
                 if isinstance(function, ast.GeneratorExp):
                     self._comprehension(function, entry, deferred)
                     continue
                 local = {k: v for k, v in entry.items() if k not in _parameters(function)}
-                if isinstance(function, ast.Lambda):
-                    self._expression(function.body, local, deferred)
-                else:
-                    self._shadow.append(_locals(function))
-                    try:
+                # a lambda shares its enclosing scope's deferred list, but still owns its own
+                # locals: it must push them too, so a cross-scope call made from inside it
+                # excludes exactly what a `def` in the same position would
+                self._shadow.append(_locals(function))
+                try:
+                    if isinstance(function, ast.Lambda):
+                        self._expression(function.body, local, deferred)
+                    else:
                         self._scope(function.body, local)
-                    finally:
-                        self._shadow.pop()
+                finally:
+                    self._shadow.pop()
+            if not changed:
+                break
         self._seen = seen
 
     def _block(
@@ -821,12 +881,81 @@ class _WalkReferences:
                 if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load))
         return self._reads[function]
 
+    def _transitive_reads(
+        self, function: Function, visiting: frozenset[Function] = frozenset(),
+    ) -> frozenset[str]:
+        """``_read_names(function)``, widened with the reads of every function it calls by a
+        plain name in its own top-level code, transitively: a helper that only forwards to
+        another (reading nothing by name itself) must still see everything the forwarded-to
+        function needs seeded, or a transitively composed effect (see `_ReturnFlow._called`)
+        would starve for names ``_entry`` projected away one level too early. Bounded against a
+        call cycle by ``visiting`` (the functions already being expanded on this path); the
+        top-level result (an empty ``visiting``) is cached, since it does not depend on it."""
+        if not visiting and function in self._transitive:
+            return self._transitive[function]
+        if function in visiting:
+            return frozenset()
+        own = self._read_names(function)
+        result = own
+        if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            called = frozenset(
+                node.func.id for node in _own_nodes(_own_body(function))
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name))
+            if called:
+                deeper = visiting | {function}
+                for callee in set(self._defined.values()):
+                    if (
+                        isinstance(callee, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and callee.name in called
+                    ):
+                        result |= self._transitive_reads(callee, deeper)
+        if not visiting:
+            self._transitive[function] = result
+        return result
+
+    def _bind_arguments(
+        self, function: Function, site: ast.Call | None, bindings: Bindings,
+    ) -> Bindings:
+        """The targets each of ``function``'s parameters may hold when called at ``site``: a
+        plain positional or keyword argument's own resolved value, or an unspecified parameter's
+        own default, each resolved from ``bindings`` at the call. `*args`/`**kwargs` on either
+        side, and a call with no single site (a transitively composed effect with none of its
+        own), are not modeled -- a parameter one of those would fill is simply left unbound,
+        never guessed."""
+        bound: Bindings = {}
+        if site is None or isinstance(function, ast.Lambda):
+            return bound
+        arguments = function.args
+        positional = [*arguments.posonlyargs, *arguments.args]
+        if not any(isinstance(a, ast.Starred) for a in site.args):
+            for parameter, argument in zip(positional, site.args, strict=False):
+                self._bind(parameter.arg, self._resolved(argument, bindings), bound)
+        if not any(keyword.arg is None for keyword in site.keywords):
+            for keyword in site.keywords:
+                assert keyword.arg is not None
+                self._bind(keyword.arg, self._resolved(keyword.value, bindings), bound)
+        defaulted = positional[len(positional) - len(arguments.defaults):]
+        for parameter, default in zip(defaulted, arguments.defaults, strict=True):
+            if parameter.arg not in bound:
+                self._bind(parameter.arg, self._resolved(default, bindings), bound)
+        for parameter, default in zip(arguments.kwonlyargs, arguments.kw_defaults, strict=True):
+            if parameter.arg not in bound and default is not None:
+                self._bind(parameter.arg, self._resolved(default, bindings), bound)
+        return bound
+
     def _entry(self, function: Function, state: Bindings) -> Bindings:
-        """``state`` projected to the names ``function`` may actually read: its parameters are
-        its own, freshly bound at the call, and any name it never reads cannot affect what it
-        does, so neither belongs in what a cache keys its summary or effect on."""
-        reads = self._read_names(function)
-        return {k: v for k, v in state.items() if k in reads and k not in _parameters(function)}
+        """``state`` projected to the names ``function`` (or a same-scope function it calls by a
+        plain name, transitively -- `_transitive_reads`, so a forwarding helper's own call still
+        seeds what the forwarded-to function needs) may actually read: every name it owns (not
+        only its parameters, but any other name it locally binds -- an import, a loop or
+        `with`/`except`/match target, a nested `def`/`class`, anywhere in its own top-level code)
+        is its own, never the caller's, and any name nothing in this chain reads cannot affect
+        what it does, so neither belongs in what a cache keys its summary or effect on. A name it
+        declares `global` or `nonlocal` is excluded from its own locals (`_locals`), so a genuine
+        read of one still comes through."""
+        reads = self._transitive_reads(function)
+        owned = _locals(function)
+        return {k: v for k, v in state.items() if k in reads and k not in owned}
 
     def _returned(self, function: Function, state: Bindings) -> list[Returned]:
         """The lazy objects a call of ``function`` from ``state`` may hand back."""
@@ -854,32 +983,51 @@ class _WalkReferences:
             for lazy in made
         ]
 
-    def _effect(self, function: Function, state: Bindings) -> Bindings:
-        """The targets a call of ``function`` from ``state`` may leave one of its own declared
-        global or nonlocal names holding, from every feasible exit of its own code alone (falling
-        through the end, or any `return`). A call ``function`` makes is never followed -- this
-        bounds the work to ``function``'s own body regardless of how deep a call graph it sits in
-        -- so a directly or mutually recursive helper summarizes its own in-flight call as having
-        no effect, closing the recursion; the real answer, from its own code, is still cached
-        once computed."""
-        entry = self._entry(function, state)
-        key = (function, frozenset(entry.items()))
+    def _effect(
+        self, function: Function, state: Bindings, site: ast.Call | None = None,
+    ) -> Bindings:
+        """The targets a call of ``function`` from ``state`` (with ``site``'s positional, keyword
+        and default arguments bound to its parameters) may leave one of its own declared global
+        or nonlocal names holding, from every feasible exit of its own code alone (falling
+        through the end, or any `return`). A same-scope call it makes to ANOTHER declared-effect
+        function composes that function's own effect in too (see `_ReturnFlow._called`), so a
+        helper's helper's write is still seen; a directly or mutually recursive helper's own
+        in-flight call summarizes as having no effect (the shared ``_summarizing`` guard), closing
+        the recursion, and the real answer, from its own code, is still cached once computed. A
+        declared name assigned somewhere in its own code but absent from every feasible exit was
+        definitely reassigned to something not followed (or deleted): that is propagated as a
+        definite clear (an explicit empty target set), not silence, so a stale caller alias
+        cannot survive the call unexamined."""
+        seed = {**self._entry(function, state), **self._bind_arguments(function, site, state)}
+        key = (function, frozenset(seed.items()))
         if key in self._effects:
             return self._effects[key]
         if function in self._summarizing:
             return {}
         declared = _declared(function)
-        if not declared:
+        # a function with no declared name of its own and no call of any kind has nothing to
+        # compose either, so the flow below is skipped entirely for the common case; one with a
+        # call but no declared name of its own may still COMPOSE one transitively (see
+        # `_ReturnFlow._called`), so it is not skipped just for that
+        has_calls = any(isinstance(n, ast.Call) for n in _own_nodes(_own_body(function)))
+        if not declared and not has_calls:
             effect: Bindings = {}
         else:
             self._summarizing.add(function)
             try:
-                flow = _ReturnFlow(self)
-                work = dict(entry)
+                flow = _ReturnFlow(self, declared)
+                work = dict(seed)
                 falls = flow._block(_own_body(function), work, [])
                 exits = ([work] if falls else []) + [s for s, _ in flow.returns]
                 merged = _lexical(_join(*exits)) if exits else {}
-                effect = {name: targets for name, targets in merged.items() if name in declared}
+                effect = {
+                    name: targets for name, targets in merged.items() if name in flow.relevant}
+                assigned = {
+                    node.id for node in _own_nodes(_own_body(function))
+                    if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))}
+                for name in declared:
+                    if name not in effect and name in assigned:
+                        effect[name] = frozenset()
             finally:
                 self._summarizing.discard(function)
         self._effects[key] = effect
@@ -891,14 +1039,19 @@ class _WalkReferences:
         """Record a call of ``function`` at ``site``: a call in the scope that defines it, or one
         made from another function's body, is followed; one from a class body is not (its own
         names never leak to what it calls, and neither does the reverse). A call from another
-        function only ever forwards the names that function does not shadow with locals of its
-        own, since a local of that name is never the one the callee's free reference resolves to.
+        function resolves ``function`` from ITS OWN defining lexical environment, not the
+        caller's: only the names shadowed by some scope strictly deeper than where ``function``
+        was itself defined are excluded (a caller's own local, or one belonging to any
+        intermediate scope between the call site and ``function``'s ancestry, is never what its
+        free reference resolves to); anything at or above that depth is part of ``function``'s
+        own lexical ancestry and must reach it unfiltered, however many scopes it climbs through.
         """
         if function not in deferred:
             if self._enclosing or not self._shadow:
                 return
-            shadow = self._shadow[-1]
-            bindings = {k: v for k, v in bindings.items() if k == ALIVE or k not in shadow}
+            depth = self._defined_depth.get(function, 0)
+            exclude: frozenset[str] = frozenset().union(*self._shadow[depth:])
+            bindings = {k: v for k, v in bindings.items() if k == ALIVE or k not in exclude}
         # a class body runs at once, but what it calls reads the lexical names
         state = self._enclosing[0] if self._enclosing else _lexical(bindings)
         made: list[Returned]
@@ -908,7 +1061,8 @@ class _WalkReferences:
             self._calls.setdefault(function, []).append(dict(state))
             made = self._returned(function, state)  # the lazy objects the call hands back
             if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                for name, targets in self._effect(function, state).items():
+                call_site = site if isinstance(site, ast.Call) else None
+                for name, targets in self._effect(function, state, call_site).items():
                     self._set(name, targets, bindings)
         for lazy, closure in made:
             oid = f"{id(lazy)}@{id(site)}"  # one object per function and expression making it
@@ -1016,6 +1170,7 @@ class _WalkReferences:
             for default in (*node.args.defaults, *node.args.kw_defaults):
                 self._expression(default, bindings, deferred)
             self._defined[_marker(node)] = node
+            self._defined_depth[node] = len(self._shadow)
             deferred.append(node)
             return
         if isinstance(node, ast.GeneratorExp):
@@ -1027,11 +1182,16 @@ class _WalkReferences:
         if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp)):
             already = set(bindings.get(ALIVE, frozenset()))
             made = self._comprehension(node, bindings, deferred) - already
-            escaping = self._escapes.get(node)
-            if escaping is None:
-                escaping = self._escapes[node] = _escaping(node)
+            shadowed = _shadowed_non_retaining(bindings)
+            key = (node, shadowed)
+            if key in self._escapes:
+                escaping = self._escapes[key]
+            else:
+                escaping = self._escapes[key] = _escaping(node, bindings)
             for oid in made:
-                if self._lazy[oid][2] in escaping:
+                # MAX_IFEXP_CHAIN exhausted (`escaping is None`): fail closed, nothing here is a
+                # temporary rather than silently trusting an incomplete, unsound result
+                if escaping is None or self._lazy[oid][2] in escaping:
                     self._made(oid, bindings)  # made inside, it outlives the comprehension
             return
         if isinstance(node, ast.NamedExpr):
@@ -1190,6 +1350,7 @@ class _WalkReferences:
             for part in (*node.decorator_list, *arguments.defaults, *arguments.kw_defaults):
                 self._expression(part, bindings, deferred)
             self._defined[_marker(node)] = node  # the name now refers to this function
+            self._defined_depth[node] = len(self._shadow)
             self._set(node.name, frozenset({_marker(node)}), bindings)
             deferred.append(node)
         elif isinstance(node, ast.ClassDef):
@@ -1263,18 +1424,37 @@ class _ReturnFlow(_WalkReferences):
     nothing is reported and no call in it is followed, and a name may also hold an object made
     in it (by the expression that made it and its function)."""
 
-    def __init__(self, caller: _WalkReferences) -> None:
+    def __init__(self, caller: _WalkReferences, declared: frozenset[str] = frozenset()) -> None:
         super().__init__(caller._package)
+        self._caller = caller
         self._defined = dict(caller._defined)
         self._later = caller._later
+        self._defined_depth = caller._defined_depth
         self.returns: list[tuple[Bindings, frozenset[str]]] = []
         self._exits = [self.returns]
         self.objects: dict[str, Deferred] = {}  # each object target by its function
+        # the names an effect actually reports: the callee's own declared names, seeded up
+        # front, plus whatever a composed call (below) adds as ITS OWN declared/composed names
+        self.relevant: set[str] = set(declared)
 
     def _called(
         self, function: Deferred, site: ast.AST, bindings: Bindings, deferred: list[Deferred],
     ) -> None:
-        """A call in the callee is not followed."""
+        """A call in the callee is not followed for its own lazy-object returns -- this is no
+        call graph -- but a same-scope call it makes to ANOTHER function declaring global or
+        nonlocal names composes that function's own effect into this flow (delegating back to the
+        caller's own `_effect`, which shares its `_summarizing` guard, so a direct or mutual
+        recursive cycle still closes rather than recursing forever), so a helper's helper's write
+        is still seen by the time this callee's own effect is computed, even when this callee
+        declares no global/nonlocal name of its own."""
+        if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)) and not self._runs_later(
+            function,
+        ):
+            call_site = site if isinstance(site, ast.Call) else None
+            state = _lexical(bindings)
+            for name, targets in self._caller._effect(function, state, call_site).items():
+                self._set(name, targets, bindings)
+                self.relevant.add(name)
 
     def _followed(self, target: str) -> bool:
         return target in self.objects or super()._followed(target)
@@ -1824,6 +2004,73 @@ REACHED_ON_SOME_PATH = {
     # 6hfQ9Rq8R3RWMr3G: a deep ternary chain in a comprehension result is classified iteratively
     "deep-ternary-chain-in-a-comprehension-result-is-reached": (
         _ternary_chain_comprehension("w.bounded_walk(r)")),
+    # 6hfQqGxWrc4QpJqp: a shadowed bool/next/any/all is not the true builtin, so it retains
+    "generator-passed-to-a-shadowed-bool-retains": (
+        "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
+        "def bool(x):\n    stash.append(x)\n    return True\n"
+        "[bool(gen()) for _ in xs]\nm = w\nm = make()\n"),
+    # 6hfQqGxWrc4QpJqp: `next`'s own second (default) argument may itself be the un-advanced
+    # result, so it retains even though the true, unshadowed builtin is used
+    "generator-as-next-default-argument-retains": (
+        "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
+        "items = [next(gen(), gen()) for _ in xs]\nm = w\nm = make()\n"),
+    # 6hfQqH5p7CXJJCvG: deferred cross-scope discovery reaches a chain longer than two hops
+    "cross-scope-discovery-reaches-a-three-hop-reverse-ordered-chain": (
+        "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
+        "def c1():\n    next(gen())\n"
+        "def c2():\n    c1()\n"
+        "def c3():\n    c2()\n"
+        "if x:\n    m = w\nc3()\nm = make()\n"),
+    "cross-scope-discovery-reaches-a-five-hop-reverse-ordered-chain": (
+        "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
+        "def c1():\n    next(gen())\n"
+        "def c2():\n    c1()\n"
+        "def c3():\n    c2()\n"
+        "def c4():\n    c3()\n"
+        "def c5():\n    c4()\n"
+        "if x:\n    m = w\nc5()\nm = make()\n"),
+    # 6hfQqH2qxwxhVWHG: a lambda nested in a function forwards a feasible sibling alias to a
+    # cross-scope call it makes, the same as a `def` in the same position would
+    "lambda-nested-in-a-function-forwards-a-cross-scope-call": (
+        "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
+        "def runner():\n    call = lambda: next(gen())\n    call()\n"
+        "if c:\n    m = w\nrunner()\nm = make()\n"),
+    # 6hfQqH4P4QC6r8Rp: a helper's effect binds the actual call-site argument to its parameter
+    "helper-effect-binds-a-positional-argument": (
+        "m = make()\ndef mutate(x):\n    global m\n    m = x\n"
+        "mutate(w)\nm.bounded_walk(root)\n"),
+    "helper-effect-binds-a-keyword-argument": (
+        "m = make()\ndef mutate(x):\n    global m\n    m = x\n"
+        "mutate(x=w)\nm.bounded_walk(root)\n"),
+    "helper-effect-binds-an-unspecified-parameters-default": (
+        "m = make()\ndef mutate(x=w):\n    global m\n    m = x\n"
+        "mutate()\nm.bounded_walk(root)\n"),
+    # 6hfQqH53pjrMWgxp: a helper's own effect composes a same-scope helper it calls that declares
+    # no global/nonlocal name of its own
+    "helper-effect-composes-a-transitively-called-helpers-effect": (
+        "m = make()\ndef deeper():\n    global m\n    m = w\n"
+        "def mutate():\n    deeper()\n"
+        "mutate()\nm.bounded_walk(root)\n"),
+    "helper-effect-composes-through-two-hops": (
+        "m = make()\ndef deepest():\n    global m\n    m = w\n"
+        "def deeper():\n    deepest()\n"
+        "def mutate():\n    deeper()\n"
+        "mutate()\nm.bounded_walk(root)\n"),
+    # 6hfQqH53pjrMWgxp: a directly or mutually recursive effect-composing helper still reports
+    # its own direct write and terminates rather than recursing forever
+    "self-recursive-composing-helper-still-reports-its-own-write": (
+        "m = make()\ndef mutate():\n    global m\n    m = w\n    mutate()\n"
+        "mutate()\nm.bounded_walk(root)\n"),
+    "mutually-recursive-composing-helpers-terminate-and-report": (
+        "m = make()\ndef a():\n    global m\n    m = w\n    b()\n"
+        "def b():\n    global m\n    a()\n"
+        "a()\nm.bounded_walk(root)\n"),
+    # 6hfQqH5HcRMg38jp: MAX_IFEXP_CHAIN exhaustion fails closed instead of silently dropping the
+    # unvisited remainder of a wide (not merely deep) structure
+    "max-ifexp-chain-exhaustion-fails-closed-on-a-wide-tuple": (
+        "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
+        + "[(store.add((gen()," + ",".join(["safe()"] * MAX_IFEXP_CHAIN) + ")), 0) for _ in xs]\n"
+        + "m = w\nm = make()\n"),
 }
 
 
@@ -2219,6 +2466,34 @@ NOT_REACHED_ON_ANY_PATH = {
     # 6hfQ9Rq8R3RWMr3G: a deep ternary chain in a comprehension result is classified iteratively
     "deep-ternary-chain-in-a-comprehension-result-stays-clean": (
         _ternary_chain_comprehension("safe.bounded_walk(r)")),
+    # 6hfQqGxWrc4QpJqp: the true, unshadowed `next` builtin's own single (iterable) argument is
+    # genuinely only advanced, never retained
+    "generator-as-next-sole-argument-stays-non-retaining": (
+        "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
+        "[next(gen()) for _ in xs]\nm = w\nm = make()\n"),
+    # 6hfQqH3pfGW6W7Vp / 6hfQqGxfgHcvPFXp: a cross-scope call resolves the callee from its own
+    # defining lexical environment; an intermediate scope's own local (here `outer`'s, forwarded
+    # transparently through `inner`, which has no shadow of its own) is excluded, since it is
+    # never what the callee's free reference -- module-level here -- resolves to
+    "cross-scope-call-does-not-leak-an-intermediate-scopes-shadow": (
+        "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
+        "def outer():\n    m = w\n    def inner():\n        next(gen())\n    inner()\n"
+        "outer()\nm = make()\n"),
+    # 6hfQqH4P4QC6r8Rp: an argument bound to an unrelated parameter leaves the caller state safe
+    "helper-effect-argument-binding-leaves-an-unrelated-value-safe": (
+        "m = make()\ndef mutate(x):\n    global m\n    m = x\n"
+        "mutate(make())\nm.bounded_walk(root)\n"),
+    # 6hfQqGxXJRvpH62G: a helper that only calls a safe, non-effect-having function has nothing
+    # to compose and leaves the caller state untouched
+    "helper-composing-a-safe-callee-leaves-the-caller-state-untouched": (
+        "m = make()\ndef safe_helper():\n    return make()\n"
+        "def caller():\n    safe_helper()\n"
+        "caller()\nm.bounded_walk(root)\n"),
+    # 6hfQqGxXJRvpH62G: a helper that definitely reassigns a declared global to something not
+    # followed clears the stale raw alias, rather than retaining it unexamined
+    "helper-effect-propagates-a-definite-clear-of-a-stale-alias": (
+        "m = w\ndef clear_it():\n    global m\n    m = make()\n"
+        "clear_it()\nm.bounded_walk(root)\n"),
 }
 
 
@@ -2284,6 +2559,41 @@ def test_lazy_observation_stays_near_linear_in_the_live_objects(
     assert totals[800] <= 2.1 * totals[400], totals
 
 
+def _interleaved_live_generators(count: int) -> str:
+    """Like `_live_generators`, but rebinds the tracked alias right after every single creation,
+    forcing a late-binding update -- and so a flatten of the alive set -- at every growing chain
+    length, not once at the end: the adversarial pattern that exposes per-prefix retention."""
+    made = "".join(
+        f"items{index} = (m.bounded_walk(r) for r in roots)\nm = w\nm = make()\n"
+        for index in range(count))
+    return f"{IMPORT_W}m = make()\n{made}"
+
+
+def test_alive_materialization_retains_no_per_prefix_cache() -> None:
+    # 6hfQqH2m97ch7g8p: `_Alive.flattened()` used to cache the flattened frozenset on EVERY node
+    # visited during one walk, not only the node actually asked for; flattening at every growing
+    # chain length (as a rebind interleaved with every creation forces) then retained one
+    # separate, ever-larger frozenset copy per length -- O(n) copies summing to O(n^2) bytes,
+    # measured about 1.38 GB at 8,000 objects -- not the O(n) a persistent set actually needs.
+    # Instrument actual traced memory (not a proxy or wall clock): near-linear growth (~4x for a
+    # 4x object count, measured) passes; the O(n^2) caching this replaces measured ~10.6x at this
+    # same (smaller, kept fast here) scale, clearly over the threshold below.
+    def peak_bytes(count: int) -> int:
+        gc.collect()
+        tracemalloc.start()
+        try:
+            assert _direct_walk_uses(
+                _interleaved_live_generators(count), "algua.registry.consumer")
+        finally:
+            _current, peak = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+        return peak
+
+    small = peak_bytes(500)
+    large = peak_bytes(2_000)  # 4x the objects
+    assert large <= 6 * small, (small, large)  # near-linear; O(n^2) caching measured ~10.6x here
+
+
 def _accumulating_factories(count: int) -> str:
     """``count`` independent generator+factory pairs, each called once. Every pair adds two more
     defined names the module tracks (its generator and its factory), so a later factory's
@@ -2328,3 +2638,50 @@ def test_return_summary_cache_keys_stay_near_linear_in_the_factories(
     assert totals[100] <= 2.1 * totals[50], totals
     assert totals[200] <= 2.1 * totals[100], totals
     assert totals[400] <= 2.1 * totals[200], totals
+
+
+def _same_name_local_accumulation(count: int) -> str:
+    """One shared generator-returning factory `g`, called ``count`` times, each after a
+    module-level `x` -- also `g`'s own read-after-write local, never a parameter -- is set to a
+    distinct target (a different dummy function's own marker, so each is genuinely different, not
+    an alias of the same module). `g`'s own first statement always overwrites `x` before it is
+    read, so its actual behavior never depends on what the caller provided; only a cache key
+    projected onto every name `g` owns, not only its parameters, sees that and reuses the one
+    answer."""
+    dummies = "".join(f"def dummy{i}():\n    pass\n" for i in range(count))
+    calls = "".join(f"x = dummy{i}\nitems{i} = g()\n" for i in range(count))
+    return (
+        f"{IMPORT_W}m = make()\n{dummies}"
+        "def gen():\n    yield m.bounded_walk(root)\n"
+        "def g():\n    x = w\n    return gen() if x else None\n"
+        f"{calls}"
+    )
+
+
+def test_summary_cache_excludes_a_functions_own_local_not_only_its_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 6hfQqH4rMMvxq9JG: a cache key projected only onto a function's parameters still varies with
+    # whatever a caller happens to provide for a same-named local the function immediately
+    # overwrites before using -- `g`'s own `x`, read-after-write, never actually depends on the
+    # caller. Instrument the deterministic NUMBER of cache misses (`_summarize` calls, keyed by
+    # (function, entry)): before this fix each of `count` differently-preceded calls to the SAME
+    # `g` missed the cache (misses == count); projecting the key onto every name `g` owns, not
+    # only its parameters, collapses them to a single, reused answer (misses == 1), regardless of
+    # `count` -- not merely near-linear in it.
+    misses = 0
+    real_summarize = _WalkReferences._summarize
+
+    def counting_summarize(
+        self: _WalkReferences, function: Function, entry: Bindings,
+    ) -> list[Returned]:
+        nonlocal misses
+        misses += 1
+        return real_summarize(self, function, entry)
+
+    monkeypatch.setattr(_WalkReferences, "_summarize", counting_summarize)
+    for count in (10, 50, 200):
+        misses = 0
+        assert _direct_walk_uses(
+            _same_name_local_accumulation(count), "algua.registry.consumer") == []
+        assert misses == 1, (count, misses)

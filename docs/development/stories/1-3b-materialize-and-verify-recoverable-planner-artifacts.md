@@ -4,7 +4,7 @@ baseline_commit: 24c4a2bc138822c5a74ea0ed91d6d5f03c402d97
 
 # Story 1.3b: Materialize and verify recoverable planner artifacts
 
-Status: in-progress
+Status: review
 
 Prepared: 2026-09-27. Baseline: Story 1.3a merge `24c4a2b` (PR #674).
 Epic: 1. Parent: Story 1.3. Requirements: FR4, FR6, FR9–FR10 and NFR1, NFR3–NFR8.
@@ -708,33 +708,33 @@ These identities are non-cyclic. An environment-only change does not change `bun
 
 #### Review findings against `3c338bc` (2026-09-28)
 
-- [ ] [Review][Patch] Make alive-state materialization genuinely near-linear; current flattened
+- [x] [Review][Patch] Make alive-state materialization genuinely near-linear; current flattened
   caches every growing frozenset prefix, measured about 1.38 GB at 8,000 objects (Todoist
   6hfQqH2m97ch7g8p) [tests/primitives/test_scoped_walk.py:260]
-- [ ] [Review][Patch] Prove non-retaining builtins by binding and argument position; shadowed
+- [x] [Review][Patch] Prove non-retaining builtins by binding and argument position; shadowed
   bool/next/any/all retain, and builtin next may return its default argument (Todoist
   6hfQqGxWrc4QpJqp) [tests/primitives/test_scoped_walk.py:585]
-- [ ] [Review][Patch] Drive deferred cross-scope discovery to a bounded fixpoint; fixed two
+- [x] [Review][Patch] Drive deferred cross-scope discovery to a bounded fixpoint; fixed two
   passes miss reverse-ordered call chains (Todoist 6hfQqH5p7CXJJCvG)
   [tests/primitives/test_scoped_walk.py:714]
-- [ ] [Review][Patch] Resolve cross-scope calls from the callee's defining lexical environment
+- [x] [Review][Patch] Resolve cross-scope calls from the callee's defining lexical environment
   rather than filtering the current caller state (Todoist 6hfQqH3pfGW6W7Vp)
   [tests/primitives/test_scoped_walk.py:888]
-- [ ] [Review][Patch] Include lambda bodies in cross-scope call propagation with their locals
+- [x] [Review][Patch] Include lambda bodies in cross-scope call propagation with their locals
   (Todoist 6hfQqH2qxwxhVWHG) [tests/primitives/test_scoped_walk.py:725]
-- [ ] [Review][Patch] Apply declared global/nonlocal effects to their real lexical owner so
+- [x] [Review][Patch] Apply declared global/nonlocal effects to their real lexical owner so
   caller locals are not overwritten (Todoist 6hfQqGxfgHcvPFXp)
   [tests/primitives/test_scoped_walk.py:888]
-- [ ] [Review][Patch] Compose transitive declared helper effects safely with recursion-bounded/
+- [x] [Review][Patch] Compose transitive declared helper effects safely with recursion-bounded/
   fixpoint summaries (Todoist 6hfQqH53pjrMWgxp) [tests/primitives/test_scoped_walk.py:857]
-- [ ] [Review][Patch] Bind positional, keyword, and default arguments in helper effect summaries
+- [x] [Review][Patch] Bind positional, keyword, and default arguments in helper effect summaries
   (Todoist 6hfQqH4P4QC6r8Rp) [tests/primitives/test_scoped_walk.py:824]
-- [ ] [Review][Patch] Propagate definite clearing in helper effects rather than retaining a stale
+- [x] [Review][Patch] Propagate definite clearing in helper effects rather than retaining a stale
   raw alias (Todoist 6hfQqGxXJRvpH62G) [tests/primitives/test_scoped_walk.py:881]
-- [ ] [Review][Patch] Fail closed when lazy-value traversal hits MAX_IFEXP_CHAIN instead of
+- [x] [Review][Patch] Fail closed when lazy-value traversal hits MAX_IFEXP_CHAIN instead of
   returning partial escape results (Todoist 6hfQqH5HcRMg38jp)
   [tests/primitives/test_scoped_walk.py:549]
-- [ ] [Review][Patch] Exclude all function-owned locals, not only parameters, from return/effect
+- [x] [Review][Patch] Exclude all function-owned locals, not only parameters, from return/effect
   summary cache entries (Todoist 6hfQqH4rMMvxq9JG) [tests/primitives/test_scoped_walk.py:824]
 
 ## Development notes
@@ -1269,6 +1269,80 @@ uv run lint-imports
   `tests/primitives/test_scoped_walk.py` pass. The full 5,394-test root gate
   (`-p no:randomly`, 527.47 s), ruff, mypy (332 source files), all 28 import contracts and
   `git diff --check` pass.
+- Review findings against `3c338bc` (11 patches, `tests/primitives/test_scoped_walk.py` only,
+  red-green-refactor for every behavior with a distinguishing baseline fixture; the lambda-shadow
+  consistency patch is explicitly qualified below): 20 new cases (319 to 339 guard-file tests).
+  6hfQqH2m97ch7g8p: `_Alive.flattened()`
+  cached the flattened set on every node a walk visited, not only the one asked for; flattening
+  at every growing chain length (a rebind interleaved with every creation, the adversarial shape
+  that matches the finding) retained one ever-larger frozenset copy per length. Traced memory
+  (`tracemalloc`, not a proxy or wall clock) for 500 then 2,000 objects measured ~10.6x on
+  `53e7b11` (quadratic); `_Alive` no longer caches at all (recomputes on every `flattened()` call,
+  still iterative/stack-based, never recursive) and now measures ~4.0x (linear); new
+  `test_alive_materialization_retains_no_per_prefix_cache` asserts ≤6x. 6hfQqGxWrc4QpJqp:
+  `NON_RETAINING_CALLS` matched by bare name only, so a shadowed `def bool(x):` was still exempted
+  as non-retaining, and `next`'s own second (default) argument -- itself possibly the unadvanced
+  result -- was exempted the same as its first (iterable) argument; `_shadowed_non_retaining`
+  checks the name is not itself a `Bindings` key (proof of a rebind) and
+  `_non_retaining_argument_values` exempts only `next`'s first argument; new
+  `generator-passed-to-a-shadowed-bool-retains` and `generator-as-next-default-argument-retains`
+  positives, `generator-as-next-sole-argument-stays-non-retaining` negative pins the true builtin
+  is unaffected. 6hfQqH5p7CXJJCvG: the fixed two-round deferred loop missed a reverse-ordered
+  chain longer than one hop (confirmed empty on a 3-hop `c3->c2->c1->gen` fixture); `_scope` now
+  loops until a full pass changes no sibling's own resolved entry (a true fixpoint), bounded by
+  `len(deferred)+1` rounds; re-walking a sibling whose entry is unchanged is skipped (each nested
+  `_scope` call starts its own object bookkeeping fresh, so re-walking unconditionally would
+  re-discover the same call sites every round and never converge -- this was hit and fixed before
+  landing, confirmed by timing the existing 400-factory cache-key test). New 3-hop and 5-hop chain
+  positives. 6hfQqH3pfGW6W7Vp / 6hfQqGxfgHcvPFXp: a cross-scope call filtered only the immediate
+  caller's own shadow, so an intermediate scope's shadow (an enclosing `outer()`'s own `m = w`,
+  forwarded transparently through a shadow-less `inner()`) leaked into a module-level callee that
+  should never see it (confirmed flagged on `53e7b11` when it must stay clean). Each
+  function/lambda now records its own nesting depth at definition (`_defined_depth`); a
+  cross-scope call excludes the union of `_shadow` from that depth on, not just the top entry, so
+  only scopes strictly deeper than the callee's own ancestry are stripped. New
+  `cross-scope-call-does-not-leak-an-intermediate-scopes-shadow` negative. 6hfQqH2qxwxhVWHG:
+  lambdas were processed via the deferred loop without ever pushing their own locals onto
+  `_shadow` (only a `def` did); `_scope` now pushes/pops `_locals(function)` uniformly for both.
+  A distinct, isolated counterexample could not be produced -- a lambda's own parameters were
+  already excluded via the pre-existing `local` computation, and a lambda's own walrus turned out
+  to depend on a separate, unrelated, out-of-scope quirk (`_expression`'s bare `NamedExpr`
+  handling unbinds rather than binds outside a Boolean/conditional operand) that made every
+  attempted walrus-based fixture pass on `53e7b11` too; the fix is retained as the structurally
+  correct, uniform treatment the finding names, verified only to add no regression, not by a
+  failing-before fixture. 6hfQqH53pjrMWgxp / 6hfQqH4P4QC6r8Rp / 6hfQqGxXJRvpH62G: `_effect`'s own
+  `_ReturnFlow` never followed a call, so a helper with no declared name of its own that only
+  forwards to one that does (`def mutate(): deeper()`) composed nothing, and its parameters were
+  never bound to the actual call-site arguments; `_ReturnFlow._called` now composes a same-scope
+  callee's own effect (delegating back through the shared `_summarizing` guard, so a direct or
+  mutual recursive cycle still terminates), `_bind_arguments` binds positional, keyword and
+  default arguments, and `_entry`/`_transitive_reads` widen the projected seed to what a called
+  function needs too (a forwarding helper reads nothing by name itself, so the narrower,
+  non-transitive projection starved the composed callee of the names it needed -- caught and
+  fixed before landing). A declared name assigned somewhere in a helper's own code but absent
+  from every feasible exit is now recorded as a definite clear (an explicit empty target set), not
+  silence, closing 6hfQqGxXJRvpH62G (confirmed a stale `m = w` alias survived a `global m; m =
+  make()` helper call on `53e7b11`). New composition (direct and two-hop), positional/keyword/
+  default-argument, definite-clear, self- and mutually-recursive-termination, and
+  unrelated-argument/safe-callee negative cases. 6hfQqH5HcRMg38jp: `_values` returned its
+  incomplete set when MAX_IFEXP_CHAIN was exhausted with more of a WIDE (not only deep) structure
+  left unvisited, so a bundled walk past the bound (an escaping object placed early enough to be
+  popped last from the stack) was silently dropped (confirmed missed on `53e7b11` with a
+  10,000-element tuple). `_values` now returns `None` on exhaustion and `_escaping` propagates it;
+  the comprehension call site treats `None` as fail-closed (every made object escapes) rather than
+  trusting a truncated result. New wide-tuple positive at exactly MAX_IFEXP_CHAIN width.
+  6hfQqH4rMMvxq9JG: the cache-key projection excluded only a function's parameters; a read-after-
+  write local (assigned, then read, never a parameter) still let the caller's own, irrelevant
+  value for that name into the key. A shared factory `g` (`x = w; return gen() if x else None`)
+  called after a module-level `x` was set to a distinct dummy function's marker each time missed
+  the cache every single call on `53e7b11` (misses == count); `_entry` now excludes every name
+  `_locals(function)` owns, not only its parameters, collapsing all calls to the one answer
+  (misses == 1, exactly, not merely near-linear, regardless of count) --
+  new `test_summary_cache_excludes_a_functions_own_local_not_only_its_parameters` asserts this
+  deterministically. All 339 tests in `tests/primitives/test_scoped_walk.py` pass (13 s). The
+  full sequential root gate passes: 5,414 tests in 535.01 s, ruff clean, mypy clean across 332
+  source files, all 28 import contracts kept, and `git diff --check` clean. Story and sprint status
+  advance to `review`; independent re-review remains outstanding.
 
 ### Completion Notes
 
@@ -1700,3 +1774,19 @@ uv run lint-imports
   `git diff --check` pass.
 - 2026-09-28: Recorded 11 findings from an independent BMAD review against `3c338bc` and mirrored
   them to Todoist; not yet fixed. Story moved back to `in-progress`.
+- 2026-09-28: Addressed all 11 review findings against `3c338bc` test-first, in
+  `tests/primitives/test_scoped_walk.py` only (near-linear alive-state materialization with no
+  per-prefix cache, binding- and argument-position-aware `bool`/`next`/`any`/`all` non-retaining
+  exemptions, a terminating bounded-fixpoint replacing the fixed two-round deferred cross-scope
+  discovery, cross-scope calls resolved from a callee's own defining lexical depth rather than the
+  caller's whole shadow, uniform lambda/def shadow handling in that fixpoint, `global`/`nonlocal`
+  effects applied to their real lexical owner, recursion-safe transitive composition of a helper's
+  called-helper effects, positional/keyword/default argument binding into effect summaries,
+  definite-clear propagation for a declared name assigned but absent from every exit, fail-closed
+  (not truncated) handling when `MAX_IFEXP_CHAIN` is exhausted, and summary cache keys that exclude
+  every function-owned local, not only its parameters); 20 new cases (319 to 339 guard-file tests),
+  all passing twice in a row. One item (lambda bodies in cross-scope call propagation) is
+  implemented and regression-free but lacks an isolated, distinguishing counterexample -- see the
+  Debug Log entry above for why. The full sequential gate passes: 5,414 tests in 535.01 s, ruff,
+  mypy (332 source files), all 28 import contracts, and `git diff --check`. Story and sprint status
+  advance to `review`; independent re-review remains outstanding.
