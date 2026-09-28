@@ -387,6 +387,14 @@ These identities are non-cyclic. An environment-only change does not change `bun
   with the importable `_ABSENT` sentinel so executed family code cannot install that sentinel as
   a present `__cached__` or `__path__` value and satisfy an absence requirement
   [algua/primitives/module_commit_check.py:110]
+- [ ] [Review][Patch] Correct the checked thirteenth-round finding's implementation pointer to the
+  membership guard that now lives at `module_commit_check.py:104`
+  [docs/development/stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md:386]
+- [ ] [Review][Patch] Make rollback presence-aware instead of using the importable `_ABSENT`
+  sentinel as dictionary state: detect `sys.modules` changes by key membership and snapshot direct
+  parent bindings as an explicit present bit plus value, so a sentinel-valued entry cannot survive
+  rollback or erase a pre-existing binding
+  [algua/primitives/module_refresh.py:172]
 
 ## Development notes
 
