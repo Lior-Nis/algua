@@ -522,6 +522,28 @@ These identities are non-cyclic. An environment-only change does not change `bun
   an aliased or module-qualified `bounded_walk` call cannot bypass the required `scoped_walk` seam
   [tests/primitives/test_scoped_walk.py:99]
 
+#### Review round against `529f6d5..463cb7d` (2026-09-28)
+
+- [ ] [Review][Patch] Keep an arbitrary digit-string port, including one longer than Python's
+  4,300-digit integer conversion limit, inside `EnvironmentIncompatible` instead of a raw
+  `ValueError` (Todoist 6hfP4pGmv6GfHhCp) [algua/registry/planner_environment_lock.py:81]
+- [ ] [Review][Patch] Translate only a `WalkCleanupError` that originates from scoped-walk
+  cleanup at the bundle store, environment store and inventory boundaries, so a consumer
+  operation that itself raises one stays primary and is not mislabeled (Todoist
+  6hfP4pM7xgQqWXpG) [algua/registry/artifact_store.py:45]
+- [ ] [Review][Patch] Canonicalize the wheel URL in a uv failure report and compare its identity
+  with an identity-indexed owner derived from the raw lock, keeping the exact single-report and
+  cause rules, so uv's normalized spelling of an accepted raw URL is still recognized
+  (Todoist 6hfP4pQC2Mvgq32p) [algua/registry/planner_environment_outage.py:68]
+- [ ] [Review][Patch] Follow safe simple assignment propagation and rebinding of imported walk
+  module/function references in the scoped-walk repository guard, without false positives;
+  dynamic `__import__`/`vars` access stays out of scope (Todoist 6hfP4pQr5H8cM3qp)
+  [tests/primitives/test_scoped_walk.py:172]
+- [ ] [Review][Patch] Surface an inner-walk cleanup failure when an entered `scoped_walk`
+  context-manager generator is itself abandoned, instead of letting `generator.close()` suppress
+  it, while preserving consumer-error and interrupt precedence (Todoist 6hfP4pVJxJ2jhRhp)
+  [algua/primitives/bounded_walk.py:142]
+
 ## Development notes
 
 - Prefer focused modules: `registry/artifact_contract.py`, `registry/frozen_source.py`,
