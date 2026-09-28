@@ -383,7 +383,7 @@ These identities are non-cyclic. An environment-only change does not change `bun
   `None` value for ordinary modules so deletion of required nullable spec metadata always refuses
   commit and rolls back
   [algua/primitives/module_commit_check.py:99]
-- [ ] [Review][Patch] Check absent-only module metadata by key membership rather than comparing
+- [x] [Review][Patch] Check absent-only module metadata by key membership rather than comparing
   with the importable `_ABSENT` sentinel so executed family code cannot install that sentinel as
   a present `__cached__` or `__path__` value and satisfy an absence requirement
   [algua/primitives/module_commit_check.py:110]
@@ -664,6 +664,21 @@ uv run lint-imports
   behavior-equivalent (an equivalent mutant, not a surviving one). `module_refresh.py` is 260 lines and
   `module_commit_check.py` 120. The full 4,545-test root gate (`-p no:randomly`), ruff, mypy and
   all 28 import contracts pass.
+- Thirteenth review round: 5 new cases, all failing on the baseline (`b3d9ef9`). With no cache
+  tag, refreshed code that imports `module_commit_check._ABSENT` and installs it as a present
+  `__cached__` on a member, on itself or on the package, or as a present `__path__` on a member or
+  on itself, committed on the baseline (`DID NOT RAISE`); each now refuses and rolls back every
+  family entry and parent binding. The two absence requirements are checked by key membership;
+  present values keep the exact-type comparison. Five mutations were run and all are killed:
+  dropping the membership check, restoring sentinel equality, reading membership through
+  `getattr`, and fixing only `__cached__` (2 cases red) or only `__path__` (3 cases red). An
+  audit of every other commit-check `_ABSENT` default found none absent-only: each compares with
+  a spec, loader, module, `bool`, list, string or `None` that can never be the sentinel. The audit
+  also reproduced a same-class rollback defect outside this finding: `_restore_modules` compares
+  with `module_refresh._ABSENT`, so a NEW `sys.modules` entry whose value is that sentinel (inside
+  or outside the family) survives a failed refresh, while a plain `object()` is dropped. It is
+  left unchanged and reported for review triage. `module_commit_check.py` is 126 lines. The full
+  4,550-test root gate (`-p no:randomly`), ruff, mypy and all 28 import contracts pass.
 
 ### Completion Notes
 
@@ -843,6 +858,12 @@ uv run lint-imports
   in-process mutation of transaction state and stays in the accepted in-process/no-sandbox
   residual. The import-quiescent precondition and every live, authority, deployment and capital
   wall are unchanged.
+- Thirteenth review round complete: an ordinary module's `__path__` and a cache-less module's
+  `__cached__` must be absent by dictionary key membership, never by comparison with the
+  importable `_ABSENT` sentinel, so executed family code that installs that sentinel as a present
+  value refuses commit and rolls back. Every other commit-check lookup compares with a value that
+  can never be the sentinel. The import-quiescent precondition, the accepted in-process/no-sandbox
+  residual and every live, authority, deployment and capital wall are unchanged.
 
 ### File List
 
@@ -947,3 +968,6 @@ uv run lint-imports
   resolution latched for the whole transaction and refused at commit, missing spec and module
   metadata distinguished from a valid `None` at commit); the full 4,545-test root gate, ruff,
   mypy and all 28 import contracts pass.
+- 2026-09-28: Addressed the thirteenth-round review patch test-first (absent-only `__cached__`
+  and `__path__` checked by key membership at commit); the full 4,550-test root gate, ruff, mypy
+  and all 28 import contracts pass.
