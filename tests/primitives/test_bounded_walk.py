@@ -307,6 +307,28 @@ def test_an_interrupt_outranks_an_earlier_ordinary_cleanup_failure(
     assert all(closed.values()), closed
 
 
+class _FalseyInterrupt(KeyboardInterrupt):
+    """An interrupt whose truth value is False must still be selected by presence."""
+
+    def __bool__(self) -> bool:
+        return False
+
+
+def test_a_falsey_interrupt_is_still_reported_over_an_ordinary_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _chain(tmp_path)
+    closed = track_closes(
+        monkeypatch, faulty=tmp_path / "d1", fault=_FalseyInterrupt,
+        also={tmp_path / "d1/d2": RuntimeError})
+    walk = _abandon_at_d3(tmp_path)
+
+    with pytest.raises(_FalseyInterrupt):
+        walk.close()
+
+    assert all(closed.values()), closed
+
+
 def test_an_exhausted_listing_whose_close_fails_once_is_released_by_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

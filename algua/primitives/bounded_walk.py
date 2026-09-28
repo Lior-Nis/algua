@@ -57,7 +57,7 @@ def _close_all(stack: list[tuple[Any, str]]) -> BaseException | None:
                 first = exc
             if interrupt is None and not isinstance(exc, Exception):
                 interrupt = exc
-    return interrupt or first
+    return interrupt if interrupt is not None else first
 
 
 def bounded_walk(
