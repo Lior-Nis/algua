@@ -419,6 +419,22 @@ uv run lint-imports
   module is expanded exactly once. A dedicated case proves the search-location check precedes
   source discovery, which the origin check would otherwise mask. All 25 bundled strategies still
   refresh through `load_strategy_config`.
+- Sixth review round: patches 1–5 first failed red (13 new cases). A child-process probe
+  deadlocked (`returncode 3`, both threads alive) when the refresh held the global import lock
+  while another thread, initializing a module the refresh imports, needed a new import; the
+  supported serialized import and the cold `load_strategy` path had no shared serialization;
+  both parent-binding shapes (a replaced child module, a pre-existing value shadowed by a new
+  child) lost their binding (`KeyError`) on rollback; all four family-tree symlink shapes
+  (dynamically imported subpackage and module, unreached nested file, dangling link) refreshed
+  without refusal; a `link/..` search path passed the symlink check; and all four cold/warm-parent
+  preflight failures (cycle and `KeyboardInterrupt`) left the cold nested parent imported. Patch 6
+  is test-only: the filesystem case wrote 1,202 files at the default recursion limit; the fixed
+  seven-helper chain is pinned by a lazy-traversal mutation. Sixteen mutations were run: fifteen
+  are killed and one (reinstating an entry only when absent after the unconditional pop) is
+  equivalent. Two initially survived and were closed test-first: the tree scan moved after source
+  discovery (the tree case now forbids discovery before refusal) and a trailing `..` ignored (a
+  direct raw-component case). All 25 bundled strategies still refresh through
+  `load_strategy_config`.
 
 ### Completion Notes
 
@@ -489,6 +505,21 @@ uv run lint-imports
   the refresh holds the lock, can deadlock against it, so warm refreshes belong in processes that
   do not import concurrently. Golden digest vectors, schema, working-tree descriptors and every
   live, authority, deployment and capital wall are unchanged.
+- Sixth review round complete: the refresh no longer takes CPython's global import lock. A
+  private re-entrant module lock serializes only the supported callers, `refresh_package_closure`
+  and the new `serialized_import`, which the loader now uses for its cold path too. Correctness
+  requires an import-quiescent process for everything else: a direct family import from another
+  thread, or a supported call made from inside a module another thread is initializing, during a
+  refresh is unsupported; no arbitrary `importlib` concurrency safety is claimed. Module state and
+  a direct `__dict__` snapshot of every module namespace are taken before package discovery, and
+  any failure from discovery through the fresh import, including a `BaseException`, reinstates
+  exactly the previous `sys.modules` entries and restores each affected module's direct parent
+  binding to its prior value or absence. Before discovery, every raw `..` search/source component
+  fails closed and the complete family tree is scanned without following links, refusing any
+  symlink entry. The beyond-recursion-limit proof stays in memory; the integration chain is fixed
+  and small. Static cycles still fail closed, the scope stays source modules only, and the
+  same-UID hostile filesystem swap remains an accepted residual. Golden digest vectors, schema,
+  working-tree descriptors and every live, authority, deployment and capital wall are unchanged.
 
 ### File List
 
@@ -561,3 +592,8 @@ uv run lint-imports
   refresh returning the fresh root, complete rollback of newly introduced modules and their
   parent bindings, symlinked source-path refusal, dictionary-read parent binding, iterative
   cycle check); the full 4,397-test root gate, ruff, mypy and all 28 import contracts pass.
+- 2026-09-28: Addressed all 6 sixth-round review patches test-first (private-lock serialization
+  of supported refresh/loader callers instead of the global import lock, exact parent-binding
+  rollback, complete no-follow family-tree symlink refusal, raw `..` refusal, pre-discovery
+  snapshot with preflight rollback, fixed-size lazy-chain integration case); the full 4,413-test
+  root gate, ruff, mypy and all 28 import contracts pass.
