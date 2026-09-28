@@ -375,11 +375,11 @@ These identities are non-cyclic. An environment-only change does not change `bun
   including loader state, location state, uninitialized submodules and the required final
   initialization flag, so a committed spec cannot retain forged import machinery state
   [algua/primitives/module_commit_check.py:21]
-- [ ] [Review][Patch] Latch any duplicate family-resolution attempt as a transaction-wide
+- [x] [Review][Patch] Latch any duplicate family-resolution attempt as a transaction-wide
   violation so executed code cannot catch the refusal, restore apparently valid bindings and still
   commit a transaction that violated the one-resolution invariant
   [algua/primitives/module_refresh.py:173]
-- [ ] [Review][Patch] Distinguish an absent `submodule_search_locations` attribute from its valid
+- [x] [Review][Patch] Distinguish an absent `submodule_search_locations` attribute from its valid
   `None` value for ordinary modules so deletion of required nullable spec metadata always refuses
   commit and rolls back
   [algua/primitives/module_commit_check.py:99]
@@ -635,6 +635,31 @@ uv run lint-imports
   attribute, and recording a copy of the pending list. `module_refresh.py` is 252 lines and
   `module_commit_check.py` 111. The full 4,527-test root gate (`-p no:randomly`), ruff, mypy and
   all 28 import contracts pass.
+- Twelfth review round: 18 new cases; 8 fail on the baseline (`ef3f280`). Patch 1 (latched
+  duplicate resolution): 3 cases failed red. Refreshed code that imports a helper (or a
+  subpackage member), drops its entry, catches the `ModuleRefreshError` from the second
+  resolution and then reinstates the FIRST object in `sys.modules` and on its direct parent
+  committed on the baseline; both now roll back completely. A positive case proves the latch
+  does not outlive its transaction: after that rolled-back refresh, a refresh of the same names
+  from clean source commits with the fresh helper bound on its parent; the existing distinct-name,
+  repeated-miss and second-transaction case stays green. Patch 2 (missing versus `None`): an audit
+  of every commit-check lookup found the reported ambiguity plus a second one. Deleting an
+  ordinary module's spec `submodule_search_locations`, from a member or from the root's own spec,
+  committed (2 cases red). With no cache tag a source spec's valid cache is `None` and its module
+  has no `__cached__`, so deleting the spec's `_cached` (member or own spec) or adding a `None`
+  `__cached__` also committed (3 cases red). Nine deletion regressions that already refused are
+  pinned: the package's search locations, spec `name` and `loader`, and the module's `__spec__`,
+  `__loader__`, `__name__`, `__package__`, `__cached__` and the package `__path__`. Every refusal
+  case proves complete rollback of family entries and parent bindings, and a positive case proves
+  a cache-less family still refreshes, with a present `None` `_cached` and no `__cached__`. Seven
+  mutations were run and all are killed: never setting the latch, dropping the commit-time latch
+  check, clearing the latch on a duplicate, reverting the search-locations or spec `_cached`
+  default to `None`, defaulting `__cached__` to `None`, and expecting `__cached__` to equal the
+  recorded `None` cache instead of being absent. The remaining lookups now also default to
+  `_ABSENT` for consistency; their expected values are never `None`, so reverting any of them is
+  behavior-equivalent (an equivalent mutant, not a surviving one). `module_refresh.py` is 260 lines and
+  `module_commit_check.py` 120. The full 4,545-test root gate (`-p no:randomly`), ruff, mypy and
+  all 28 import contracts pass.
 
 ### Completion Notes
 
@@ -802,6 +827,18 @@ uv run lint-imports
   reverted by rollback; like any other in-process mutation of non-family state, that stays in
   the accepted in-process/no-sandbox residual. The import-quiescent precondition and every live,
   authority, deployment and capital wall are unchanged.
+- Twelfth review round complete: the guard latches the first family name resolved twice before
+  raising its refusal, never clears it, and the commit seam refuses whenever the latch is set.
+  Code that swallows the refusal and restores the first object's entry and parent binding
+  therefore cannot commit; the latch lives on the per-transaction guard, so a later transaction
+  is unaffected. Every spec, module, `sys.modules` and parent lookup in the commit check defaults
+  to `_ABSENT`, never `None`, so a deleted entry never satisfies a valid `None`: an ordinary
+  module's `None` search locations and a cache-less spec's `None` cache must be present, while
+  `__path__` and `__cached__`, which the import system does not set in those cases, must be
+  absent. Executed code that reaches the guard object itself and resets its latch is an
+  in-process mutation of transaction state and stays in the accepted in-process/no-sandbox
+  residual. The import-quiescent precondition and every live, authority, deployment and capital
+  wall are unchanged.
 
 ### File List
 
@@ -902,3 +939,7 @@ uv run lint-imports
   modules and direct parents, one resolution per family name per transaction, completed
   `ModuleSpec` bookkeeping validated at commit); the full 4,527-test root gate, ruff, mypy and
   all 28 import contracts pass.
+- 2026-09-28: Addressed both twelfth-round review patches test-first (a duplicate family
+  resolution latched for the whole transaction and refused at commit, missing spec and module
+  metadata distinguished from a valid `None` at commit); the full 4,545-test root gate, ruff,
+  mypy and all 28 import contracts pass.
