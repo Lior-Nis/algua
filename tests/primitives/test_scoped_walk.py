@@ -210,6 +210,10 @@ WALK_MODULE = "algua.primitives.bounded_walk"
 RAW_WALK = f"{WALK_MODULE}.bounded_walk"
 
 
+BUILTIN_GETATTR = "builtins.getattr"
+Function = ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
+
+
 def _dotted(node: ast.expr) -> str | None:
     if isinstance(node, ast.Name):
         return node.id
@@ -219,40 +223,69 @@ def _dotted(node: ast.expr) -> str | None:
     return None
 
 
-def _direct_walk_uses(source: str, module: str) -> list[str]:
-    """Every way ``source`` (the module ``module``) reaches `bounded_walk` directly.
+def _parameters(function: Function) -> set[str]:
+    arguments = function.args
+    names = {arg.arg for arg in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)}
+    names.update(arg.arg for arg in (arguments.vararg, arguments.kwarg) if arg is not None)
+    return names
 
-    Import-aware: every local name bound by an import (absolute or relative, aliased or not) is
-    resolved to what it names, so an aliased function import, a star import, a module or package
-    alias followed by attribute access, and `getattr(module, "bounded_walk")` all resolve to the
-    raw walk. Text mentions and unrelated local names do not.
+
+def _bound_names(target: ast.AST) -> set[str]:
+    """The plain names a binding target (or match pattern) binds or deletes."""
+    names = {
+        node.id for node in ast.walk(target)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))
+    }
+    names.update(
+        node.name for node in ast.walk(target)
+        if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name
+    )
+    names.update(
+        node.rest for node in ast.walk(target) if isinstance(node, ast.MatchMapping) and node.rest
+    )
+    return names
+
+
+class _WalkReferences:
+    """Statement-ordered, scope-aware resolution of names that reach the raw walk.
+
+    Followed statically: imports (absolute or relative, aliased or not, star), single-name plain or
+    annotated assignments whose value resolves to an imported module, package, function or the
+    `getattr` builtin, attribute access, and `getattr(module, "bounded_walk")`. Any other binding
+    of a name (a parameter, an unresolved assignment, a loop, `with`, `except` or match target, a
+    `def` or `class`, `del`) clears it, so unrelated locals are never flagged. A function body is
+    resolved against its enclosing scope's final bindings (Python's late binding) minus its own
+    parameters; class-level names do not leak into methods. Dynamic access (`__import__`,
+    `importlib.import_module`, `vars`, `globals`, `exec`, computed attribute names) is out of
+    scope: this is a guard against accidental or casual bypass, not arbitrary dynamic execution.
     """
-    tree = ast.parse(source)
-    package = module.rpartition(".")[0]
-    bindings: dict[str, str] = {}
-    uses: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            base = importlib.util.resolve_name("." * node.level + (node.module or ""), package)
-            for alias in node.names:
-                if alias.name == "*":
-                    if base == WALK_MODULE:
-                        uses.append(f"line {node.lineno}: star import of {WALK_MODULE}")
-                    continue
-                target = f"{base}.{alias.name}"
-                bindings[alias.asname or alias.name] = target
-                if target == RAW_WALK:
-                    uses.append(f"line {node.lineno}: imports {RAW_WALK}")
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.asname:
-                    bindings[alias.asname] = alias.name
-                else:
-                    head = alias.name.partition(".")[0]
-                    bindings[head] = head
 
-    def resolved(node: ast.expr) -> str | None:
-        dotted = _dotted(node)
+    def __init__(self, package: str) -> None:
+        self._package = package
+        self.uses: list[str] = []
+
+    def module(self, tree: ast.Module) -> list[str]:
+        self._scope(tree.body, {"getattr": BUILTIN_GETATTR})
+        return self.uses
+
+    def _scope(self, body: list[ast.stmt], bindings: dict[str, str]) -> None:
+        deferred: list[Function] = []
+        self._block(body, bindings, deferred)
+        for function in deferred:
+            local = {k: v for k, v in bindings.items() if k not in _parameters(function)}
+            if isinstance(function, ast.Lambda):
+                self._expression(function.body, local, deferred)
+            else:
+                self._scope(function.body, local)
+
+    def _block(
+        self, body: list[ast.stmt], bindings: dict[str, str], deferred: list[Function],
+    ) -> None:
+        for statement in body:
+            self._statement(statement, bindings, deferred)
+
+    def _resolved(self, node: ast.expr | None, bindings: dict[str, str]) -> str | None:
+        dotted = None if node is None else _dotted(node)
         if dotted is None:
             return None
         head, _, rest = dotted.partition(".")
@@ -260,18 +293,144 @@ def _direct_walk_uses(source: str, module: str) -> list[str]:
             return None  # a local or builtin name, not something imported
         return f"{bindings[head]}.{rest}" if rest else bindings[head]
 
-    for node in ast.walk(tree):
-        # A bare name can only resolve to the raw walk through a function import, which is
-        # already flagged above; module-qualified access is the remaining direct spelling.
-        if isinstance(node, ast.Attribute) and resolved(node) == RAW_WALK:
-            uses.append(f"line {node.lineno}: references {RAW_WALK}")
+    def _propagate(self, name: str, value: ast.expr, bindings: dict[str, str]) -> None:
+        """Bind ``name`` to what ``value`` resolves to; callers have already unbound it."""
+        resolved = self._resolved(value, bindings)
+        if resolved is not None:
+            bindings[name] = resolved
+
+    def _unbind(self, target: ast.AST, bindings: dict[str, str]) -> None:
+        for name in _bound_names(target):
+            bindings.pop(name, None)
+
+    def _expression(
+        self, node: ast.AST | None, bindings: dict[str, str], deferred: list[Function],
+    ) -> None:
+        if node is None:
+            return
+        if isinstance(node, ast.Lambda):
+            for default in (*node.args.defaults, *node.args.kw_defaults):
+                self._expression(default, bindings, deferred)
+            deferred.append(node)
+            return
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+            local = dict(bindings)
+            for generator in node.generators:
+                self._expression(generator.iter, local, deferred)
+                self._unbind(generator.target, local)
+                for condition in generator.ifs:
+                    self._expression(condition, local, deferred)
+            parts = (node.key, node.value) if isinstance(node, ast.DictComp) else (node.elt,)
+            for part in parts:
+                self._expression(part, local, deferred)
+            return
+        if isinstance(node, ast.NamedExpr):
+            self._expression(node.value, bindings, deferred)
+            self._unbind(node.target, bindings)
+            return
+        if isinstance(node, ast.Attribute) and self._resolved(node, bindings) == RAW_WALK:
+            self.uses.append(f"line {node.lineno}: references {RAW_WALK}")
         if (
-            isinstance(node, ast.Call) and _dotted(node.func) == "getattr"
-            and len(node.args) >= 2 and resolved(node.args[0]) == WALK_MODULE
+            isinstance(node, ast.Call) and self._resolved(node.func, bindings) == BUILTIN_GETATTR
+            and len(node.args) >= 2 and self._resolved(node.args[0], bindings) == WALK_MODULE
             and isinstance(node.args[1], ast.Constant) and node.args[1].value == "bounded_walk"
         ):
-            uses.append(f"line {node.lineno}: getattr of {RAW_WALK}")
-    return uses
+            self.uses.append(f"line {node.lineno}: getattr of {RAW_WALK}")
+        for child in ast.iter_child_nodes(node):
+            self._expression(child, bindings, deferred)
+
+    def _statement(
+        self, node: ast.stmt, bindings: dict[str, str], deferred: list[Function],
+    ) -> None:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    bindings[alias.asname] = alias.name
+                else:
+                    head = alias.name.partition(".")[0]
+                    bindings[head] = head
+        elif isinstance(node, ast.ImportFrom):
+            level = "." * node.level
+            base = importlib.util.resolve_name(level + (node.module or ""), self._package)
+            for alias in node.names:
+                if alias.name == "*":
+                    if base == WALK_MODULE:
+                        self.uses.append(f"line {node.lineno}: star import of {WALK_MODULE}")
+                    continue
+                target = f"{base}.{alias.name}"
+                bindings[alias.asname or alias.name] = target
+                if target == RAW_WALK:
+                    self.uses.append(f"line {node.lineno}: imports {RAW_WALK}")
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            arguments = node.args
+            for part in (*node.decorator_list, *arguments.defaults, *arguments.kw_defaults):
+                self._expression(part, bindings, deferred)
+            bindings.pop(node.name, None)
+            deferred.append(node)
+        elif isinstance(node, ast.ClassDef):
+            for part in (*node.decorator_list, *node.bases, *(k.value for k in node.keywords)):
+                self._expression(part, bindings, deferred)
+            self._block(node.body, dict(bindings), deferred)  # methods resolve late, outside
+            bindings.pop(node.name, None)
+        elif isinstance(node, ast.Assign):
+            self._expression(node.value, bindings, deferred)
+            for target in node.targets:
+                self._expression(target, bindings, deferred)
+            single = node.targets[0] if len(node.targets) == 1 else None
+            for target in node.targets:
+                self._unbind(target, bindings)
+            if isinstance(single, ast.Name):
+                self._propagate(single.id, node.value, bindings)
+        elif isinstance(node, ast.AnnAssign):
+            self._expression(node.value, bindings, deferred)
+            self._expression(node.target, bindings, deferred)
+            self._unbind(node.target, bindings)
+            if isinstance(node.target, ast.Name) and node.value is not None:
+                self._propagate(node.target.id, node.value, bindings)
+        elif isinstance(node, ast.AugAssign):
+            self._expression(node.value, bindings, deferred)
+            self._expression(node.target, bindings, deferred)
+            self._unbind(node.target, bindings)
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            self._expression(node.iter, bindings, deferred)
+            self._unbind(node.target, bindings)
+            self._block(node.body, bindings, deferred)
+            self._block(node.orelse, bindings, deferred)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                self._expression(item.context_expr, bindings, deferred)
+                if item.optional_vars is not None:
+                    self._unbind(item.optional_vars, bindings)
+            self._block(node.body, bindings, deferred)
+        elif isinstance(node, (ast.If, ast.While)):
+            self._expression(node.test, bindings, deferred)
+            self._block(node.body, bindings, deferred)
+            self._block(node.orelse, bindings, deferred)
+        elif isinstance(node, (ast.Try, ast.TryStar)):
+            self._block(node.body, bindings, deferred)
+            for handler in node.handlers:
+                self._expression(handler.type, bindings, deferred)
+                if handler.name:
+                    bindings.pop(handler.name, None)
+                self._block(handler.body, bindings, deferred)
+            self._block(node.orelse, bindings, deferred)
+            self._block(node.finalbody, bindings, deferred)
+        elif isinstance(node, ast.Match):
+            self._expression(node.subject, bindings, deferred)
+            for case in node.cases:
+                self._unbind(case.pattern, bindings)
+                self._expression(case.guard, bindings, deferred)
+                self._block(case.body, bindings, deferred)
+        elif isinstance(node, ast.Delete):
+            for target in node.targets:
+                self._unbind(target, bindings)
+        else:
+            self._expression(node, bindings, deferred)
+
+
+def _direct_walk_uses(source: str, module: str) -> list[str]:
+    """Every static way ``source`` (the module ``module``) reaches `bounded_walk` directly."""
+    return _WalkReferences(module.rpartition(".")[0]).module(ast.parse(source))
 
 
 def _module_name(path: Path) -> str:
@@ -337,4 +496,98 @@ SCOPED_OR_UNRELATED = {
 @pytest.mark.parametrize(
     "source", SCOPED_OR_UNRELATED.values(), ids=SCOPED_OR_UNRELATED.keys())
 def test_the_guard_allows_scoped_use_and_unrelated_mentions(source: str) -> None:
+    assert _direct_walk_uses(source, "algua.registry.consumer") == []
+
+
+ASSIGNMENT_ALIASES = {
+    "module-alias": (
+        "from algua.primitives import bounded_walk as w\nm = w\nm.bounded_walk(root)\n"),
+    "chained-module-alias": (
+        "import algua.primitives.bounded_walk as w\na = w\nb = a\n"
+        "fn = b.bounded_walk\nfn(root)\n"),
+    "package-alias": (
+        "import algua.primitives\np = algua.primitives\np.bounded_walk.bounded_walk(root)\n"),
+    "module-attribute-alias": (
+        "from algua import primitives\nwalks = primitives.bounded_walk\n"
+        "walks.bounded_walk(root)\n"),
+    "annotated-module-alias": (
+        "import algua.primitives.bounded_walk as w\nm: object = w\nm.bounded_walk(root)\n"),
+    "getattr-on-module-alias": (
+        "import algua.primitives.bounded_walk as w\nm = w\ngetattr(m, 'bounded_walk')(root)\n"),
+    "getattr-callable-alias": (
+        "import algua.primitives.bounded_walk as w\ng = getattr\ng(w, 'bounded_walk')(root)\n"),
+    "builtins-getattr": (
+        "import builtins\nimport algua.primitives.bounded_walk as w\n"
+        "builtins.getattr(w, 'bounded_walk')(root)\n"),
+    "function-reads-module-alias-bound-later": (
+        "def walk(root):\n    return m.bounded_walk(root)\n"
+        "import algua.primitives.bounded_walk as w\nm = w\n"),
+    "method-reads-module-alias": (
+        "import algua.primitives.bounded_walk as w\nm = w\n"
+        "class Store:\n    def walk(self, root):\n        return m.bounded_walk(root)\n"),
+    "class-name-does-not-shadow-module-alias-in-method": (
+        "import algua.primitives.bounded_walk as m\n"
+        "class Store:\n    m = None\n    def walk(self, root):\n"
+        "        return m.bounded_walk(root)\n"),
+    "function-local-import": (
+        "def walk(root):\n    import algua.primitives.bounded_walk as w\n"
+        "    return w.bounded_walk(root)\n"),
+    "lambda-reads-module-alias": (
+        "import algua.primitives.bounded_walk as w\nm = w\n"
+        "walk = lambda root: m.bounded_walk(root)\n"),
+    "comprehension-reads-module-alias": (
+        "import algua.primitives.bounded_walk as w\n[w.bounded_walk(root) for root in roots]\n"),
+}
+
+
+@pytest.mark.parametrize("source", ASSIGNMENT_ALIASES.values(), ids=ASSIGNMENT_ALIASES.keys())
+def test_the_guard_follows_simple_assignment_aliases(source: str) -> None:
+    assert _direct_walk_uses(source, "algua.registry.consumer")
+
+
+SHADOWED_OR_REBOUND = {
+    "module-rebound-to-local": (
+        "import algua.primitives.bounded_walk as w\nw = object()\nw.bounded_walk(root)\n"),
+    "alias-rebound-to-local": (
+        "import algua.primitives.bounded_walk as w\nm = w\nm = make()\nm.bounded_walk(root)\n"),
+    "parameter-shadows-module": (
+        "import algua.primitives.bounded_walk as w\n"
+        "def walk(w, root):\n    return w.bounded_walk(root)\n"),
+    "local-shadows-module": (
+        "import algua.primitives.bounded_walk as w\n"
+        "def walk(root):\n    w = make()\n    return w.bounded_walk(root)\n"),
+    "for-target-shadows-module": (
+        "import algua.primitives.bounded_walk as w\nfor w in items:\n    w.bounded_walk(root)\n"),
+    "with-target-shadows-module": (
+        "import algua.primitives.bounded_walk as w\n"
+        "with open(path) as w:\n    w.bounded_walk(root)\n"),
+    "except-name-shadows-module": (
+        "import algua.primitives.bounded_walk as w\n"
+        "try:\n    pass\nexcept Exception as w:\n    w.bounded_walk(root)\n"),
+    "def-shadows-module": (
+        "import algua.primitives.bounded_walk as w\ndef w():\n    pass\nw.bounded_walk(root)\n"),
+    "class-shadows-module": (
+        "import algua.primitives.bounded_walk as w\nclass w:\n    pass\nw.bounded_walk(root)\n"),
+    "deleted-module-alias": (
+        "import algua.primitives.bounded_walk as w\ndel w\nw.bounded_walk(root)\n"),
+    "getattr-shadowed-by-local-def": (
+        "import algua.primitives.bounded_walk as w\n"
+        "def getattr(obj, name):\n    return None\ngetattr(w, 'bounded_walk')\n"),
+    "lambda-parameter-shadows-module": (
+        "import algua.primitives.bounded_walk as w\nwalk = lambda w: w.bounded_walk(root)\n"),
+    "comprehension-target-shadows-module": (
+        "import algua.primitives.bounded_walk as w\n[w.bounded_walk(root) for w in items]\n"),
+    "walrus-rebinds-module": (
+        "import algua.primitives.bounded_walk as w\nif (w := make()):\n    w.bounded_walk(root)\n"),
+    "match-capture-shadows-module": (
+        "import algua.primitives.bounded_walk as w\n"
+        "match item:\n    case w:\n        w.bounded_walk(root)\n"),
+    "augmented-assignment-rebinds-alias": (
+        "import algua.primitives.bounded_walk as w\nm = w\nm += 1\nm.bounded_walk(root)\n"),
+    "unrelated-attribute": "helper.bounded_walk(root)\n",
+}
+
+
+@pytest.mark.parametrize("source", SHADOWED_OR_REBOUND.values(), ids=SHADOWED_OR_REBOUND.keys())
+def test_the_guard_does_not_flag_shadowed_or_rebound_names(source: str) -> None:
     assert _direct_walk_uses(source, "algua.registry.consumer") == []
