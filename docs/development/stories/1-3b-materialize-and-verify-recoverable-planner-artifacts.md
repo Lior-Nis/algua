@@ -502,23 +502,23 @@ These identities are non-cyclic. An environment-only change does not change `bun
 - [x] [Review][Patch] Keep a consumer's typed validation error primary when closing the walk also
   fails, through one shared scoped-walk seam that every production `bounded_walk` consumer uses,
   while still closing every listing [algua/primitives/bounded_walk.py:50]
-- [ ] [Review][Patch] Accept every valid HTTPS wheel URL supported by the pinned uv acquisition
+- [x] [Review][Patch] Accept every valid HTTPS wheel URL supported by the pinned uv acquisition
   path while deriving a separate canonical identity for duplicate ownership, rather than rejecting
   authoritative query-bearing, IPv6 or RFC sub-delimiter URLs
   [algua/registry/planner_environment_lock.py:33]
-- [ ] [Review][Patch] Give every non-exhausted stacked directory listing a bounded cleanup retry
+- [x] [Review][Patch] Give every non-exhausted stacked directory listing a bounded cleanup retry
   after a close fails before releasing it, without stopping cleanup of the remaining listings
   [algua/primitives/bounded_walk.py:41]
-- [ ] [Review][Patch] Select a recorded cleanup interrupt by explicit presence rather than exception
+- [x] [Review][Patch] Select a recorded cleanup interrupt by explicit presence rather than exception
   truthiness, so a falsey `BaseException` subclass cannot be demoted
   [algua/primitives/bounded_walk.py:60]
-- [ ] [Review][Patch] Surface a listing close that raises `GeneratorExit` during generator
+- [x] [Review][Patch] Surface a listing close that raises `GeneratorExit` during generator
   abandonment instead of allowing `generator.close()` to suppress the cleanup failure
   [algua/primitives/bounded_walk.py:95]
-- [ ] [Review][Patch] Translate ordinary scoped-walk close failures after otherwise successful
+- [x] [Review][Patch] Translate ordinary scoped-walk close failures after otherwise successful
   traversal into each consumer's stable artifact/environment error taxonomy while preserving typed
   consumer refusals and real interrupts [algua/registry/artifact_store.py:100]
-- [ ] [Review][Patch] Replace the regex-only direct-call guard with AST/import-aware enforcement so
+- [x] [Review][Patch] Replace the regex-only direct-call guard with AST/import-aware enforcement so
   an aliased or module-qualified `bounded_walk` call cannot bypass the required `scoped_walk` seam
   [tests/primitives/test_scoped_walk.py:99]
 
@@ -915,6 +915,31 @@ uv run lint-imports
   removed (an explicit empty-segment check subsumed by the one-or-more segment pattern, a
   `?`/`#` exclusion subsumed by the segment character class). The full 4,973-test root gate
   (`-p no:randomly`), ruff, mypy, all 28 import contracts and `git diff --check` pass.
+- Review follow-ups recorded in `529f6d5` (6 patches): every change first failed red. Wheel
+  URLs: 58 cases failed on the previous validator; it rejected valid URLs uv can acquire
+  (IPv6 authorities, queries, RFC path sub-delimiters, uppercase scheme or host, explicit or
+  zero-padded default ports, lowercase or unreserved escapes, dot segments) while accepting
+  numeric hosts uv's WHATWG parser reads as IPv4 aliases (`01.2.3.4`, `1.2.3`, `0x7f.0.0.1`,
+  `16909060`) and a bare `.whl`, and it misreported alias pairs as malformed rather than as
+  duplicate owners. Raw URLs are now kept for uv and outage evidence while ownership uses a
+  separate RFC 3986 identity; all 1,785 repository URLs are their own identities. A mutation
+  survivor showed the raw-character check is load-bearing (KELVIN SIGN lowercases to ASCII `k`),
+  now pinned. Walk cleanup: a listing that failed to close before releasing its handle stayed
+  open after abandonment, a consumer error or an active traversal error (6 cases); a falsey
+  interrupt subclass was demoted to an ordinary failure; a listing close raising
+  `GeneratorExit` was silently discarded by `generator.close()` (directly and after an early
+  `scoped_walk` exit), leaked raw into the consumer's loop and displaced an active error.
+  Taxonomy: with a failing listing close a `RuntimeError` escaped the bundle store, staging,
+  published-environment check, sealing, inventory and provisioning, and `deployment verify`
+  reported `frozen_descriptor_conflict` for both a bundle and an environment listing. Guard:
+  the regex missed aliased, unused-alias, star, relative, module-alias-reference and `getattr`
+  bypasses and falsely flagged a docstring mention and an unrelated local function; a planted
+  aliased and module-qualified bypass in a production store is now caught. 53 mutations were
+  run: 49 are killed (two after new cases closed initial survivors) and four exposed redundant
+  guards that were removed (URL fragment, credential and leading-slash checks subsumed by the
+  URL grammars, and a bare-name reference check subsumed by the import check). The full
+  5,065-test root gate (`-p no:randomly`), ruff, mypy, all 28 import contracts and
+  `git diff --check` pass.
 
 ### Completion Notes
 
@@ -1153,6 +1178,20 @@ uv run lint-imports
   when closing also fails while still reporting cleanup failures after a normal or early exit.
   The `--no-env-file` defect stays deferred. The keyed argv, identity schemas, golden digests
   and every live, authority, deployment and capital wall are unchanged.
+- Review follow-ups of `529f6d5` complete: every valid HTTPS wheel URL the lock may name is
+  accepted under its exact spelling, while duplicate ownership is decided by a separate RFC 3986
+  identity (lowercase scheme/host, canonical IP, default port omitted, escapes normalized with
+  unreserved decoded and reserved kept, dot segments removed); ambiguous numeric hosts are
+  refused. Walk cleanup retries each failed listing exactly once, selects an interrupt by
+  presence, and reports every ordinary listing-close failure, `GeneratorExit` included, as
+  `WalkCleanupError` caused by it; interrupts are never wrapped. The bundle store, environment
+  store and inventory translate exactly that error into their typed failures, so
+  `deployment verify` keeps `frozen_bundle_corrupt` / `frozen_environment_corrupt` and
+  provisioning `frozen_environment_incompatible`. An import-aware AST guard enforces the
+  `scoped_walk` seam. Residual: outage evidence matches the exact locked URL, so a URL the lock
+  spells non-canonically (uv reports its own normalized form) is conservatively classified
+  non-retryable. The `--no-env-file` defect stays deferred, and the keyed argv, identity
+  schemas, golden digests and every live, authority, deployment and capital wall are unchanged.
 
 ### File List
 
@@ -1311,3 +1350,8 @@ uv run lint-imports
   test-first (canonical locked wheel-URL identity in a protected lock-policy module, exhaustive
   bounded-walk cleanup, a shared `scoped_walk` seam keeping consumer errors primary); the full
   4,973-test root gate, ruff, mypy, all 28 import contracts and `git diff --check` pass.
+- 2026-09-28: Addressed all 6 review follow-ups of `529f6d5` test-first (valid wheel URLs with a
+  separate RFC ownership identity, bounded cleanup retry, presence-based interrupt selection,
+  visible cleanup `GeneratorExit`, frozen error taxonomy for listing-close failures, an
+  import-aware scoped-walk guard); the full 5,065-test root gate, ruff, mypy, all 28 import
+  contracts and `git diff --check` pass.
