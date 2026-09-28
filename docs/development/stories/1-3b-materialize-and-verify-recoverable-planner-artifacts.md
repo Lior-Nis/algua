@@ -388,14 +388,14 @@ These identities are non-cyclic. An environment-only change does not change `bun
   a present `__cached__` or `__path__` value and satisfy an absence requirement
   [algua/primitives/module_commit_check.py:105]
 - [x] [Review][Patch] Correct the checked thirteenth-round finding's implementation pointer to the
-  membership guard that now lives at `module_commit_check.py:104`
+  membership guard that now lives at `module_commit_check.py:105`
   [docs/development/stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md:386]
 - [x] [Review][Patch] Make rollback presence-aware instead of using the importable `_ABSENT`
   sentinel as dictionary state: detect `sys.modules` changes by key membership and snapshot direct
   parent bindings as an explicit present bit plus value, so a sentinel-valued entry cannot survive
   rollback or erase a pre-existing binding
   [algua/primitives/module_refresh.py:176]
-- [ ] [Review][Patch] Make the fourteenth-round pointer correction internally consistent by naming
+- [x] [Review][Patch] Make the fourteenth-round pointer correction internally consistent by naming
   the actual membership guard at `module_commit_check.py:105`, not the `optional` tuple at line 104
   [docs/development/stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md:391]
 
@@ -1014,3 +1014,6 @@ uv run lint-imports
   of `sys.modules` entries and direct parent bindings without the importable sentinel, corrected
   thirteenth-round pointer); the full 4,568-test root gate, ruff, mypy and all 28 import contracts
   pass.
+- 2026-09-28: Addressed the fifteenth-round review patch (documentation only: the fourteenth-round
+  pointer correction now names the membership guard at `module_commit_check.py:105`);
+  `git diff --check` and `tests/test_repo_hygiene.py` (8 tests) pass.
