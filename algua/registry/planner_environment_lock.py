@@ -200,3 +200,13 @@ def locked_wheels(raw: bytes) -> dict[str, tuple[str, str]]:
 
 def validate_lock(raw: bytes) -> None:
     locked_wheels(raw)
+
+
+def locked_wheel_owners(raw: bytes) -> dict[str, tuple[str, str]]:
+    """Map each locked wheel's canonical ownership identity to its locked (name, version).
+
+    Outage evidence names a wheel by the URL uv reports, which may be uv's normalized spelling
+    of the exact locked URL, so it is matched by identity; `locked_wheels` already guarantees
+    that no two locked URLs share one.
+    """
+    return {wheel_url_identity(url): owner for url, owner in locked_wheels(raw).items()}

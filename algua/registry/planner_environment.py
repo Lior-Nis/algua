@@ -30,7 +30,10 @@ from algua.registry.planner_environment_inventory import (
     inventory_environment,
     scrubbed_environment,
 )
-from algua.registry.planner_environment_lock import locked_wheels, validate_lock
+from algua.registry.planner_environment_lock import (
+    locked_wheel_owners,
+    validate_lock,
+)
 from algua.registry.planner_environment_outage import is_locked_wheel_outage
 from algua.registry.planner_environment_probe import verify_environment
 
@@ -189,8 +192,8 @@ def provision_environment(
     except _UV_FAILURES as exc:
         raise EnvironmentIncompatible("locked environment provisioning failed") from exc
     if synced.returncode != 0:
-        wheels = locked_wheels(_by_path(inputs)["uv.lock"].data)
-        if is_locked_wheel_outage(synced.stdout, synced.stderr, wheels):
+        owners = locked_wheel_owners(_by_path(inputs)["uv.lock"].data)
+        if is_locked_wheel_outage(synced.stdout, synced.stderr, owners):
             raise EnvironmentUnavailable("a compatible locked wheel is temporarily unavailable")
         raise EnvironmentIncompatible("locked environment provisioning failed")
     inventory = inventory_environment(environment)

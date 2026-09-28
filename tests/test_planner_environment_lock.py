@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from algua.primitives.bounded_subprocess import BoundedCompletion
-from algua.registry import planner_environment
+from algua.registry import planner_environment, planner_environment_lock
 from algua.registry.artifact_contract import BuildInputs
 from algua.registry.environment_contract import EnvironmentKey
 from algua.registry.frozen_source import FrozenFile
@@ -79,11 +79,11 @@ def test_validate_lock_refuses_malformed_locked_identities(raw: bytes) -> None:
 @pytest.mark.parametrize("raw", MALFORMED.values(), ids=MALFORMED.keys())
 def test_locked_wheels_is_total_and_fail_closed(raw: bytes) -> None:
     with pytest.raises(EnvironmentIncompatible):
-        planner_environment.locked_wheels(raw)
+        planner_environment_lock.locked_wheels(raw)
 
 
 def test_locked_wheels_maps_each_wheel_to_its_canonical_identity() -> None:
-    assert planner_environment.locked_wheels(_lock()) == {URL: ("six", "1.17.0")}
+    assert planner_environment_lock.locked_wheels(_lock()) == {URL: ("six", "1.17.0")}
 
 
 def _wheel(toml_url: str) -> str:
@@ -155,7 +155,7 @@ REJECTED_WHEEL_URLS = {
                          ids=REJECTED_WHEEL_URLS.keys())
 def test_invalid_locked_wheel_urls_are_refused(toml_url: str) -> None:
     with pytest.raises(EnvironmentIncompatible):
-        planner_environment.locked_wheels(_lock(wheels=_wheel(toml_url)))
+        planner_environment_lock.locked_wheels(_lock(wheels=_wheel(toml_url)))
 
 
 HOST = "https://files.pythonhosted.org"
@@ -189,14 +189,12 @@ def test_valid_wheel_urls_are_accepted_under_their_exact_raw_spelling(
     pair: tuple[str, str],
 ) -> None:
     raw, _identity = pair
-    assert planner_environment.locked_wheels(_lock(wheels=_wheel(raw))) == {
+    assert planner_environment_lock.locked_wheels(_lock(wheels=_wheel(raw))) == {
         raw: ("six", "1.17.0")}
 
 
 @pytest.mark.parametrize("pair", WHEEL_URL_IDENTITIES.values(), ids=WHEEL_URL_IDENTITIES.keys())
 def test_wheel_url_ownership_identity_is_rfc_canonical(pair: tuple[str, str]) -> None:
-    from algua.registry import planner_environment_lock
-
     raw, identity = pair
     assert planner_environment_lock.wheel_url_identity(raw) == identity
 
@@ -225,7 +223,7 @@ def test_semantic_aliases_cannot_claim_a_second_wheel_owner(pair: tuple[str, str
         "source = { registry = 'https://pypi.org/simple' }\n" + _wheel(alias) + "\n"))
 
     with pytest.raises(EnvironmentIncompatible, match="more than one package"):
-        planner_environment.locked_wheels(lock)
+        planner_environment_lock.locked_wheels(lock)
 
 
 @pytest.mark.parametrize(
@@ -239,7 +237,7 @@ def test_rfc_distinct_urls_remain_distinct_owners(pair: tuple[str, str]) -> None
         "[[package]]\nname = 'other'\nversion = '1.0'\n"
         "source = { registry = 'https://pypi.org/simple' }\n" + _wheel(second) + "\n"))
 
-    assert planner_environment.locked_wheels(lock) == {
+    assert planner_environment_lock.locked_wheels(lock) == {
         first: ("six", "1.17.0"), second: ("other", "1.0")}
 
 
@@ -247,13 +245,11 @@ def test_repository_lock_has_canonical_identities() -> None:
     import tomllib
 
     raw = (REPO / "uv.lock").read_bytes()
-    wheels = planner_environment.locked_wheels(raw)
+    wheels = planner_environment_lock.locked_wheels(raw)
     locked = [
         wheel["url"] for package in tomllib.loads(raw.decode())["package"]
         for wheel in package.get("wheels", [])
     ]
-
-    from algua.registry import planner_environment_lock
 
     assert len(locked) == 1785
     assert sorted(wheels) == sorted(locked)  # keyed by each exact raw URL
@@ -267,8 +263,6 @@ OVERSIZED_PORT_LOCK = _lock(wheels=_wheel(f"https://files.pythonhosted.org:{'9' 
     "raw", ["9" * 5000, "1" + "0" * 4400, "0" * 5000, "65536", "0"],
     ids=["5000-nines", "4401-digit", "5000-zeros", "just-over", "zero"])
 def test_port_digit_strings_of_any_length_stay_environment_incompatible(raw: str) -> None:
-    from algua.registry import planner_environment_lock
-
     with pytest.raises(EnvironmentIncompatible):
         planner_environment_lock._port(raw)
 
@@ -280,14 +274,12 @@ def test_port_digit_strings_of_any_length_stay_environment_incompatible(raw: str
 def test_zero_padded_ports_of_any_length_resolve_to_their_number(
     raw: str, expected: int | None,
 ) -> None:
-    from algua.registry import planner_environment_lock
-
     assert planner_environment_lock._port(raw) == expected
 
 
 def test_an_oversized_locked_port_is_environment_incompatible() -> None:
     with pytest.raises(EnvironmentIncompatible):
-        planner_environment.locked_wheels(OVERSIZED_PORT_LOCK)
+        planner_environment_lock.locked_wheels(OVERSIZED_PORT_LOCK)
 
 
 @pytest.mark.parametrize(

@@ -18,10 +18,10 @@ from algua.primitives.bounded_subprocess import BoundedCompletion
 from algua.registry.frozen_source import FrozenFile
 from algua.registry.planner_environment import (
     EnvironmentIncompatible,
-    locked_wheels,
     validate_lock,
 )
 from algua.registry.planner_environment_errors import EnvironmentUnavailable
+from algua.registry.planner_environment_lock import locked_wheel_owners, locked_wheels
 from algua.registry.planner_environment_outage import is_locked_wheel_outage
 from tests.test_planner_environment import _inputs
 from tests.test_planner_environment_uv import _provision
@@ -137,21 +137,21 @@ NOT_RETRYABLE = {
 
 @pytest.mark.parametrize("stderr", RETRYABLE.values(), ids=RETRYABLE.keys())
 def test_positive_locked_wheel_outage_evidence_is_retryable(stderr: str) -> None:
-    assert is_locked_wheel_outage(b"", stderr.encode(), locked_wheels(LOCK)) is True
+    assert is_locked_wheel_outage(b"", stderr.encode(), locked_wheel_owners(LOCK)) is True
 
 
 def test_outage_evidence_on_stdout_is_inspected() -> None:
     assert is_locked_wheel_outage(
-        RECORDED_CONNECTION_REFUSED.encode(), b"", locked_wheels(LOCK)) is True
+        RECORDED_CONNECTION_REFUSED.encode(), b"", locked_wheel_owners(LOCK)) is True
 
 
 @pytest.mark.parametrize("stderr", NOT_RETRYABLE.values(), ids=NOT_RETRYABLE.keys())
 def test_anything_else_is_not_retryable(stderr: str) -> None:
-    assert is_locked_wheel_outage(b"", stderr.encode(), locked_wheels(LOCK)) is False
+    assert is_locked_wheel_outage(b"", stderr.encode(), locked_wheel_owners(LOCK)) is False
 
 
 def test_evidence_split_across_streams_or_undecodable_is_not_retryable() -> None:
-    wheels = locked_wheels(LOCK)
+    wheels = locked_wheel_owners(LOCK)
     head, tail = RECORDED_CONNECTION_REFUSED.split(f"  {BRANCH} client error", 1)
     assert is_locked_wheel_outage(
         head.encode(), (f"  {BRANCH} client error" + tail).encode(), wheels) is False
@@ -184,6 +184,111 @@ def test_sync_failure_with_positive_evidence_is_unavailable(
     with pytest.raises(EnvironmentUnavailable):
         _provision(tmp_path, monkeypatch, inputs=_lock_inputs(), sync=BoundedCompletion(
             2, b"", RECORDED_CONNECTION_REFUSED.encode()))
+
+
+def _single_wheel_lock(url: str) -> bytes:
+    return (
+        "version = 1\n"
+        "[[package]]\nname = \"six\"\nversion = \"1.17.0\"\n"
+        "source = { registry = \"https://pypi.org/simple\" }\n"
+        f"wheels = [{{ url = \"{url}\", hash = \"{HASH}\" }}]\n"
+    ).encode()
+
+
+ESCAPED = WHEEL.replace("six-1.17.0-py2", "six-1.17.0%2Blocal-py2")
+# (raw URL in the committed lock, uv's normalized spelling of it in the failure report)
+NORMALIZED_REPORTS = {
+    "uppercase-host": (WHEEL.replace("files.", "FILES."), WHEEL),
+    "uppercase-scheme": ("HTTPS" + WHEEL[len("https"):], WHEEL),
+    "default-port": (WHEEL.replace(".org/", ".org:443/"), WHEEL),
+    "escaped-unreserved": (WHEEL.replace("six-1.17.0-", "six%2D1.17.0-"), WHEEL),
+    "lowercase-reserved-escape": (ESCAPED.replace("%2B", "%2b"), ESCAPED),
+    "dot-segment": (WHEEL.replace("/packages/b7/", "/packages/./b7/"), WHEEL),
+    "dot-dot-segment": (WHEEL.replace("/packages/b7/", "/packages/x/../b7/"), WHEEL),
+}
+
+
+@pytest.mark.parametrize("pair", NORMALIZED_REPORTS.values(), ids=NORMALIZED_REPORTS.keys())
+def test_uvs_normalized_spelling_of_a_locked_alias_is_retryable_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pair: tuple[str, str],
+) -> None:
+    raw, reported = pair
+    inputs = list(_inputs())
+    inputs[2] = FrozenFile("uv.lock", "100644", _single_wheel_lock(raw))
+    report = RECORDED_CONNECTION_REFUSED.replace(WHEEL, reported)
+
+    with pytest.raises(EnvironmentUnavailable):
+        _provision(tmp_path, monkeypatch, inputs=tuple(inputs),
+                   sync=BoundedCompletion(2, b"", report.encode()))
+
+
+@pytest.mark.parametrize("pair", NORMALIZED_REPORTS.values(), ids=NORMALIZED_REPORTS.keys())
+def test_outage_evidence_matches_the_reported_urls_canonical_wheel_identity(
+    pair: tuple[str, str],
+) -> None:
+    from algua.registry import planner_environment_lock
+
+    raw, reported = pair
+    owners = planner_environment_lock.locked_wheel_owners(_single_wheel_lock(raw))
+    report = RECORDED_CONNECTION_REFUSED.replace(WHEEL, reported)
+
+    assert is_locked_wheel_outage(b"", report.encode(), owners) is True
+    # the reverse spelling (a canonical lock, a non-canonical report) is the same wheel too
+    canonical = planner_environment_lock.locked_wheel_owners(_single_wheel_lock(reported))
+    reverse = RECORDED_CONNECTION_REFUSED.replace(WHEEL, raw)
+    assert is_locked_wheel_outage(b"", reverse.encode(), canonical) is True
+
+
+def test_locked_wheel_owners_are_keyed_by_canonical_identity() -> None:
+    from algua.registry import planner_environment_lock
+
+    aliased = WHEEL.replace("files.", "FILES.").replace(".org/", ".org:443/")
+    assert planner_environment_lock.locked_wheel_owners(_single_wheel_lock(aliased)) == {
+        WHEEL: ("six", "1.17.0")}
+
+
+MALFORMED_REPORTED_URLS = {
+    "malformed-escape": WHEEL.replace("/b7/", "/%zz/"),
+    "credentials": WHEEL.replace("https://", "https://user@"),
+    "invalid-port": WHEEL.replace(".org/", ".org:0/"),
+    "oversized-port": WHEEL.replace(".org/", ".org:" + "9" * 5000 + "/"),
+    "ambiguous-numeric-host": WHEEL.replace("files.pythonhosted.org", "01.2.3.4"),
+    "not-a-wheel": WHEEL.replace(".whl", ".tar.gz"),
+    "http": WHEEL.replace("https://", "http://"),
+    "fragment": WHEEL + "#sha256=x",
+    "unlocked-wheel": WHEEL.replace("six-1.17.0", "six-1.18.0"),
+}
+
+
+@pytest.mark.parametrize(
+    "reported", MALFORMED_REPORTED_URLS.values(), ids=MALFORMED_REPORTED_URLS.keys())
+def test_a_malformed_or_unlocked_reported_url_is_not_evidence(reported: str) -> None:
+    from algua.registry import planner_environment_lock
+
+    owners = planner_environment_lock.locked_wheel_owners(LOCK)
+    report = RECORDED_CONNECTION_REFUSED.replace(WHEEL, reported)
+
+    assert is_locked_wheel_outage(b"", report.encode(), owners) is False
+
+
+def test_an_aliased_report_for_another_distribution_is_not_evidence() -> None:
+    from algua.registry import planner_environment_lock
+
+    owners = planner_environment_lock.locked_wheel_owners(LOCK)
+    report = RECORDED_CONNECTION_REFUSED.replace(
+        WHEEL, WHEEL.replace("files.", "FILES.")).replace("six==1.17.0", "other==1.0")
+
+    assert is_locked_wheel_outage(b"", report.encode(), owners) is False
+
+
+def test_every_cause_must_repeat_the_reported_url_spelling_exactly() -> None:
+    from algua.registry import planner_environment_lock
+
+    owners = planner_environment_lock.locked_wheel_owners(LOCK)
+    alias = WHEEL.replace("files.", "FILES.")
+    report = RECORDED_CONNECTION_REFUSED.replace(f"({WHEEL})", f"({alias})")
+
+    assert is_locked_wheel_outage(b"", report.encode(), owners) is False
 
 
 @pytest.mark.parametrize(
