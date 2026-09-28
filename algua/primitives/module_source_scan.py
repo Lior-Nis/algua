@@ -3,7 +3,10 @@
 The warm refresh in ``module_refresh`` executes nothing until this preflight passes: every search
 location and reachable source is free of raw ``..`` components and symlinks, the complete tree
 holds no symlink or importable non-source module, and the current source's static family closure
-is acyclic. Nothing here imports, purges or mutates module state.
+is acyclic. Every family spec is CONSTRUCTED here from the exact expected in-root path
+(``source_spec``), never obtained from a path hook, a cached path-entry finder or a loaded
+module's ``__spec__``, so preflight and execution resolve the same source. Nothing here imports,
+purges or mutates module state.
 """
 from __future__ import annotations
 
@@ -11,7 +14,8 @@ import ast
 import importlib.machinery
 import importlib.util
 import os
-from collections.abc import Iterator
+import stat
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from importlib.machinery import ModuleSpec
 from pathlib import Path
@@ -89,22 +93,80 @@ def within(name: str, package: str) -> bool:
     return name == package or name.startswith(package + ".")
 
 
-def static_closure(package: str, root: str) -> dict[str, set[str]]:
-    """The ``package`` source modules reachable from ``root``'s current source, each mapped to the
-    ``package`` modules it statically imports (at any nesting) plus its own parent package."""
+def package_location(package: str, entries: Iterable[object]) -> str:
+    """The directory of the regular source package ``package`` in its parent's search ``entries``
+    (``sys.path`` for a top-level package): the first entry holding the package directory or a
+    same-named module decides, as for the default finder, and only a regular source package with
+    no raw ``..`` component or symlink is admissible."""
+    leaf = package.rpartition(".")[2]
+    for entry in entries:
+        if not isinstance(entry, str):
+            continue
+        base = os.path.join(entry or os.getcwd(), leaf)
+        if os.path.isdir(base) or os.path.lexists(base + ".py"):
+            require_unlinked(base, package)
+            spec = _spec_at(base, package)
+            if spec is None or spec.submodule_search_locations is None:
+                break
+            return base
+    raise ModuleRefreshError(f"{package!r} is not a regular package", name=package)
+
+
+def source_spec(package: str, location: str, name: str) -> ModuleSpec | None:
+    """The exact spec of family module ``name`` under the prevalidated root ``location``."""
+    return _spec_at(os.path.join(location, *name.split(".")[package.count(".") + 1:]), name)
+
+
+def _spec_at(base: str, name: str) -> ModuleSpec | None:
+    """A source spec for ``name`` at ``base``, ordered as the default finder orders them: a regular
+    package ``base/__init__.py`` (searching exactly ``base``) before a module ``base.py``. Absent
+    is None; a namespace directory or a non-regular source node fails closed."""
+    is_directory = stat.S_ISDIR(_mode(base, name) or 0)
+    init = os.path.join(base, "__init__.py")
+    if is_directory and _is_regular(init, name):
+        return _source(name, init, [base])
+    if _is_regular(base + ".py", name):
+        return _source(name, base + ".py", None)
+    if is_directory:
+        raise ModuleRefreshError(f"{name!r} is not a Python source module", name=name)
+    return None
+
+
+def _source(name: str, origin: str, search: list[str] | None) -> ModuleSpec:
+    loader = importlib.machinery.SourceFileLoader(name, origin)
+    spec = importlib.util.spec_from_file_location(
+        name, origin, loader=loader, submodule_search_locations=search)
+    assert spec is not None  # a loader was given, so a spec is always built
+    return spec
+
+
+def _mode(path: str, name: str) -> int | None:
+    """``path``'s own file type (a final symlink is not followed), or None when it is absent."""
+    with _inspecting(name):
+        try:
+            return os.stat(path, follow_symlinks=False).st_mode
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+
+
+def _is_regular(path: str, name: str) -> bool:
+    return stat.S_ISREG(_mode(path, name) or 0)
+
+
+def static_closure(package: str, location: str, root: str) -> dict[str, set[str]]:
+    """The ``package`` source modules under ``location`` reachable from ``root``'s current source,
+    each mapped to the ``package`` modules it statically imports (at any nesting) plus its own
+    parent package."""
     specs: dict[str, ModuleSpec | None] = {}
 
     def resolve(name: str) -> ModuleSpec | None:
         if name not in specs:
-            if name == package:
-                specs[name] = importlib.util.find_spec(package)
-            else:
-                parent = resolve(name.rpartition(".")[0])
-                locations = parent.submodule_search_locations if parent is not None else None
-                specs[name] = (
-                    None if locations is None
-                    else importlib.machinery.PathFinder.find_spec(name, list(locations))
-                )
+            parent = None if name == package else resolve(name.rpartition(".")[0])
+            specs[name] = (
+                source_spec(package, location, name)
+                if name == package or (parent and parent.submodule_search_locations is not None)
+                else None
+            )
         return specs[name]
 
     graph: dict[str, set[str]] = {}
@@ -114,14 +176,10 @@ def static_closure(package: str, root: str) -> dict[str, set[str]]:
         if name in graph:
             continue
         spec = resolve(name)
-        if spec is None:
+        if spec is None or not isinstance(spec.origin, str):
             raise ModuleRefreshError(f"{name!r} has no importable source", name=name)
-        origin = spec.origin
-        if isinstance(origin, str):
-            require_unlinked(origin, name)
-        if not isinstance(origin, str) or not origin.endswith(".py") or not Path(origin).is_file():
-            raise ModuleRefreshError(f"{name!r} is not a Python source module", name=name)
-        candidates = _source_imports(origin, spec.parent or "")
+        require_unlinked(spec.origin, name)
+        candidates = _source_imports(spec.origin, spec.parent or "")
         if name != package:
             candidates.add(name.rpartition(".")[0])
         graph[name] = {

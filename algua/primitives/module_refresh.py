@@ -10,7 +10,10 @@ execution order, and a symlink or importable non-source module anywhere in the p
 a dynamic import can reach even outside the static closure) escapes the package-wide bytecode
 purge, so all fail closed before anything is purged or executed (``module_source_scan``). During
 the fresh import a first ``sys.meta_path`` guard resolves family modules from the exact scanned
-root only, so a fresh ``__init__`` cannot extend ``__path__`` into an unscanned tree.
+root only, so a fresh ``__init__`` cannot extend ``__path__`` into an unscanned tree. The family
+location is found on the filesystem from the parent's search path and every family spec is built
+from its exact in-root source path, so no path hook, cached path-entry finder or stale loaded
+``__spec__`` can make preflight inspect one tree while execution loads another.
 
 Concurrency: the complete transaction runs under a private module lock shared ONLY by the
 supported Algua callers (``refresh_package_closure`` and ``serialized_import``, which the strategy
@@ -25,7 +28,6 @@ family or deadlock.
 from __future__ import annotations
 
 import importlib
-import importlib.machinery
 import importlib.util
 import os
 import sys
@@ -36,9 +38,10 @@ from types import ModuleType
 
 from algua.primitives.module_source_scan import (
     ModuleRefreshError,
+    package_location,
     require_acyclic,
     require_source_tree,
-    require_unlinked,
+    source_spec,
     static_closure,
     within,
 )
@@ -141,19 +144,15 @@ class _ImportGuard:
         if self.family is None or not within(fullname, self.family[0]):
             return None
         package, location = self.family
-        if fullname == package:
-            search = [os.path.dirname(location)]
-        else:
+        if fullname != package:
             search = _exact_search_path(package, location, parent_name)
             if path != search:
                 raise ModuleRefreshError(
                     f"{parent_name!r} search path deviates from its prevalidated family root",
                     name=fullname)
-        spec = importlib.machinery.PathFinder.find_spec(fullname, search)
+        spec = source_spec(package, location, fullname)
         if spec is None:
             raise ModuleNotFoundError(f"No module named {fullname!r}", name=fullname)
-        if not isinstance(spec.loader, importlib.machinery.SourceFileLoader):
-            raise ModuleRefreshError(f"{fullname!r} is not a Python source module", name=fullname)
         return spec
 
 
@@ -174,16 +173,11 @@ def _require_confined_search_paths(package: str, location: str) -> None:
 
 def _refresh_attempt(package: str, root: str, guard: _ImportGuard) -> ModuleType:
     importlib.invalidate_caches()
-    package_spec = importlib.util.find_spec(package)
-    if package_spec is None or package_spec.submodule_search_locations is None:
-        raise ModuleRefreshError(f"{package!r} is not a package", name=package)
-    locations = list(package_spec.submodule_search_locations)
-    if len(locations) != 1:
-        raise ModuleRefreshError(f"{package!r} is not a regular package", name=package)
-    location = locations[0]
-    require_unlinked(location, package)
+    parent = package.rpartition(".")[0]
+    entries = vars(importlib.import_module(parent)).get("__path__", ()) if parent else sys.path
+    location = package_location(package, entries)
     require_source_tree(location, package)
-    require_acyclic(static_closure(package, root))
+    require_acyclic(static_closure(package, location, root))
     _purge_package_bytecode(location)
     for name in [name for name in sys.modules if within(name, package)]:
         del sys.modules[name]

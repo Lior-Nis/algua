@@ -199,7 +199,7 @@ def test_static_closure_resolves_absolute_relative_nested_and_parent_edges(famil
         "from . import not_a_module\n"
     ))
 
-    graph = static_closure(pkg, f"{pkg}.strat")
+    graph = static_closure(pkg, str(family.dir), f"{pkg}.strat")
 
     assert graph[f"{pkg}.strat"] == {
         pkg, f"{pkg}._a", f"{pkg}._b", f"{pkg}._c", f"{pkg}._d", f"{pkg}._e",
@@ -270,7 +270,7 @@ def test_refresh_follows_a_fixed_lazy_acyclic_helper_chain(family) -> None:
     family.write(f"h{_LAZY_CHAIN_DEPTH}", "VALUE = 1\n")
     family.write("strat", "from . import h0\nVALUE = 1\n")
 
-    graph = static_closure(family.package, f"{family.package}.strat")
+    graph = static_closure(family.package, str(family.dir), f"{family.package}.strat")
     _refresh(family)
 
     chain = [f"{family.package}.h{i}" for i in range(_LAZY_CHAIN_DEPTH + 1)]
@@ -979,3 +979,86 @@ def test_refresh_never_copies_unrelated_module_namespaces(family, monkeypatch, o
     else:
         with pytest.raises(RuntimeError, match="boom"):
             _refresh(family)
+
+
+class _Redirecting:
+    """A poisoned path-entry finder: it hands out an OUTSIDE source spec for ``target`` and
+    delegates every other name to a genuine source finder for the same directory."""
+
+    def __init__(self, directory: str, target: str, outside: Path) -> None:
+        self._real = importlib.machinery.FileFinder(
+            directory, (importlib.machinery.SourceFileLoader, [".py"]))
+        self._target, self._outside = target, outside
+
+    def find_spec(self, fullname: str, target: object = None):  # type: ignore[no-untyped-def]
+        if fullname == self._target:
+            return importlib.util.spec_from_file_location(fullname, self._outside)
+        return self._real.find_spec(fullname, target)  # type: ignore[arg-type]
+
+    def invalidate_caches(self) -> None:
+        self._real.invalidate_caches()
+
+
+@pytest.mark.parametrize("case", ["path-importer-cache", "path-hook", "stale-package-spec"])
+def test_family_specs_resolve_only_to_the_exact_in_root_source(
+        family, tmp_path, monkeypatch, case) -> None:
+    """Preflight and execution must both use the exact deterministic in-root source: neither a
+    poisoned path-entry finder (cached or produced by a path hook) nor a stale loaded family
+    ``__spec__`` may redirect a family module, so no outside code is inspected or executed."""
+    marker = tmp_path / "executed"
+    outside = tmp_path / "outside" / "fam"
+    outside.mkdir(parents=True)
+    body = f"open({str(marker)!r}, 'w').close()\nVALUE = 'out'\n"
+    for name in ("__init__", "helper", "strat"):
+        (outside / f"{name}.py").write_text(body)
+    family.write("helper", "VALUE = 'in'\n")
+    family.write("strat", "from .helper import VALUE\n")
+    warm = importlib.import_module(f"{family.package}.strat")
+    helper = f"{family.package}.helper"
+    directories = {str(family.dir), *sys.modules[family.package].__path__}
+    if case == "path-importer-cache":
+        for directory in directories:
+            monkeypatch.setitem(
+                sys.path_importer_cache, directory,
+                _Redirecting(directory, helper, outside / "helper.py"))
+    elif case == "path-hook":
+        def hook(directory: str) -> _Redirecting:
+            if directory not in directories:
+                raise ImportError(directory)
+            return _Redirecting(directory, helper, outside / "helper.py")
+
+        monkeypatch.setattr(sys, "path_hooks", [hook, *sys.path_hooks])
+        for directory in directories:
+            monkeypatch.delitem(sys.path_importer_cache, directory, raising=False)
+    else:
+        monkeypatch.setattr(sys.modules[family.package], "__spec__", (
+            importlib.util.spec_from_file_location(
+                family.package, outside / "__init__.py",
+                submodule_search_locations=[str(outside)])))
+
+    root = refresh_package_closure(family.package, f"{family.package}.strat")
+
+    assert not marker.exists(), "code outside the exact family root executed"
+    assert root is not warm and root.VALUE == "in"
+    assert family.mod("helper").__file__ == str(family.dir / "helper.py")
+
+
+@pytest.mark.parametrize("shape", ["namespace-directory", "plain-module", "absent"])
+def test_a_family_that_is_not_a_regular_source_package_is_refused(
+        tmp_path, monkeypatch, shape) -> None:
+    top = f"mrshape_{uuid.uuid4().hex[:10]}"
+    (tmp_path / top).mkdir()
+    (tmp_path / top / "__init__.py").write_text("")
+    if shape == "namespace-directory":
+        (tmp_path / top / "fam").mkdir()
+        (tmp_path / top / "fam" / "strat.py").write_text("VALUE = 1\n")
+    elif shape == "plain-module":
+        (tmp_path / top / "fam.py").write_text("VALUE = 1\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        with pytest.raises(ModuleRefreshError):
+            refresh_package_closure(f"{top}.fam", f"{top}.fam.strat")
+        assert f"{top}.fam" not in sys.modules and top not in sys.modules
+    finally:
+        for key in [k for k in sys.modules if k == top or k.startswith(top + ".")]:
+            del sys.modules[key]
