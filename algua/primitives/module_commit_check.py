@@ -41,16 +41,19 @@ def record_source_spec(spec: ModuleSpec, name: str) -> SourceSpecFacts:
 
 def require_committed_family(package: str, specs: dict[str, SourceSpecFacts]) -> None:
     """Before commit, every family entry in ``sys.modules`` and every module the guard handed out
-    is a ``ModuleType`` carrying that exact source spec, bound identically in ``sys.modules`` and
-    on its direct parent, and the spec and module still carry its recorded facts (``_intact``)."""
+    is exactly a ``ModuleType`` carrying that exact source spec, bound identically in
+    ``sys.modules`` and on its direct parent (itself exactly a ``ModuleType``), and the spec and
+    module still carry its recorded facts (``_intact``). The exact type is checked before any
+    dictionary is read: a subclass (even one swapped in through ``__class__``) can answer
+    attribute access, ``__path__`` included, differently from the dictionary validated here."""
     for name in sorted({*specs, *(name for name in sys.modules if within(name, package))}):
         module, facts = sys.modules.get(name), specs.get(name)
         parent_name, _, child = name.rpartition(".")
         holder = sys.modules.get(parent_name) if parent_name else None
         if not (
-            facts is not None and isinstance(module, ModuleType)
+            facts is not None and type(module) is ModuleType
             and vars(module).get("__spec__") is facts.spec
-            and (isinstance(holder, ModuleType) or not parent_name)
+            and (type(holder) is ModuleType or not parent_name)
             and (holder is None or vars(holder).get(child) is module)
             and _intact(module, facts)
         ):

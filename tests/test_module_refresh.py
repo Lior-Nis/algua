@@ -1694,3 +1694,58 @@ def test_a_second_child_thread_waits_for_a_transaction_its_forking_owner_continu
 
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert result.stdout.strip() == "0", (result.stdout, result.stderr)
+
+
+_MODULE_CLASS_FORGERIES = {
+    "member-class-swapped": (
+        "import types\nfrom . import helper\n"
+        "helper.__class__ = type('M', (types.ModuleType,), {})\n"),
+    "root-class-swapped": (
+        "import sys, types\n"
+        "sys.modules[__name__].__class__ = type('M', (types.ModuleType,), {})\n"),
+    "package-class-swapped": (
+        "import sys, types\n"
+        "sys.modules[__package__].__class__ = type('M', (types.ModuleType,), {})\n"),
+    "direct-parent-class-swapped": (
+        "import sys, types\ntop = __package__.rpartition('.')[0]\n"
+        "sys.modules[top].__class__ = type('M', (types.ModuleType,), {})\n"),
+    "direct-parent-replaced-by-subclass": (
+        "import sys, types\ntop = __package__.rpartition('.')[0]\n"
+        "twin = type('M', (types.ModuleType,), {})(top)\n"
+        "vars(twin).update(vars(sys.modules[top]))\nsys.modules[top] = twin\n"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_MODULE_CLASS_FORGERIES))
+def test_a_family_module_or_direct_parent_that_is_not_exactly_a_module_never_commits(
+        family, case) -> None:
+    """Every committed family entry and every direct parent it is bound on must be exactly a
+    ``ModuleType``: a subclass, including one swapped in through ``__class__``, can conceal import
+    metadata from the dictionary-based commit validation, so it rolls the transaction back."""
+    _assert_never_commits(family, _MODULE_CLASS_FORGERIES[case])
+
+
+def test_a_package_subclass_concealing_an_alternate_search_path_never_commits(
+        family, tmp_path) -> None:
+    """A fresh package whose class is swapped to a ``ModuleType`` subclass answering ``__path__``
+    with an alternate tree keeps its confined ``__path__`` in its dictionary, so it would pass a
+    dictionary-based check, and after commit (with the guard gone) a lazy import of a new family
+    name would load from outside the root. The exact-type check rolls it back instead, and the
+    restored family cannot reach the alternate tree."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "evil.py").write_text("VALUE = 'out-of-root'\n")
+    _assert_never_commits(family, (
+        "import sys, types\n"
+        f"ALTERNATE = [{str(elsewhere)!r}]\n"
+        "class Concealing(types.ModuleType):\n"
+        "    def __getattribute__(self, name):\n"
+        "        if name == '__path__':\n"
+        "            return ALTERNATE\n"
+        "        return super().__getattribute__(name)\n"
+        "sys.modules[__package__].__class__ = Concealing\n"
+        "VALUE = 1\n"))
+
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module(f"{family.package}.evil")
+    assert f"{family.package}.evil" not in sys.modules
