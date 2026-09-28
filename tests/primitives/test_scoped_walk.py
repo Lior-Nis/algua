@@ -4,7 +4,7 @@ from __future__ import annotations
 import ast
 import errno
 import importlib.util
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 import pytest
@@ -213,6 +213,7 @@ RAW_WALK = f"{WALK_MODULE}.bounded_walk"
 
 BUILTIN_GETATTR = "builtins.getattr"
 Function = ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
+Deferred = Function | ast.GeneratorExp  # analyzed after its scope's statements
 # each name mapped to every walk-relevant target it may hold on some path to this point
 Bindings = dict[str, frozenset[str]]
 
@@ -272,9 +273,80 @@ def _irrefutable(pattern: ast.pattern) -> bool:
     return isinstance(pattern, ast.MatchAs) and pattern.pattern is None
 
 
-def _constant_truth(test: ast.expr) -> bool | None:
-    """The truth of a literal constant test, or None when the test is not one."""
-    return bool(test.value) if isinstance(test, ast.Constant) else None
+def _static_number(node: ast.expr) -> complex | None:
+    """The value of a numeric literal under any unary `+`, `-` or (integer) `~`, or None."""
+    if isinstance(node, ast.Constant):
+        value = node.value
+        if isinstance(value, (int, float, complex)) and not isinstance(value, bool):
+            return value
+        return None
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub, ast.Invert)):
+        operand = _static_number(node.operand)
+        if operand is None:
+            return None
+        if isinstance(node.op, ast.USub):
+            return -operand
+        if isinstance(node.op, ast.UAdd):
+            return +operand
+        return ~operand if isinstance(operand, int) else None
+    return None
+
+
+def _hashable_literal(node: ast.expr) -> bool:
+    return isinstance(node, ast.Constant) or _static_number(node) is not None
+
+
+def _static_truth(node: ast.expr) -> bool | None:
+    """The truth of a side-effect-free literal, decided without evaluating code, or None.
+
+    A constant and a numeric literal under `+`, `-` or `~` qualify, and so do tuple, list, set
+    and dict displays of literals without unpacking (set items and dict keys must be hashable
+    constants, since anything else can raise). A call such as `set()` never qualifies: its name
+    can be rebound. `not` is decided where conditions are, by swapping its operand's outcomes.
+    """
+    if isinstance(node, ast.Constant):
+        return bool(node.value)
+    number = _static_number(node)
+    if number is not None:
+        return bool(number)
+    if isinstance(node, (ast.Tuple, ast.List)):
+        if all(_static_truth(item) is not None for item in node.elts):
+            return bool(node.elts)
+    elif isinstance(node, ast.Set):
+        if all(_hashable_literal(item) for item in node.elts):
+            return bool(node.elts)
+    elif isinstance(node, ast.Dict):
+        keys = all(key is not None and _hashable_literal(key) for key in node.keys)
+        if keys and all(_static_truth(value) is not None for value in node.values):
+            return bool(node.keys)
+    return None
+
+
+def _either(states: Iterable[Bindings | None]) -> Bindings | None:
+    """The join of the outcomes some path can have, or None when none can."""
+    reached = [state for state in states if state is not None]
+    return _join(*reached) if reached else None
+
+
+def _marker(function: Function) -> str:
+    """The target a name holds while it refers to ``function``."""
+    return f"<def {id(function)}>"
+
+
+def _own_nodes(nodes: Iterable[ast.AST]) -> Iterator[ast.AST]:
+    """Every node of one scope, not descending into the functions and classes nested in it."""
+    for node in nodes:
+        yield node
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            yield from _own_nodes(ast.iter_child_nodes(node))
+
+
+def _runs_later(function: Deferred) -> bool:
+    """A generator or coroutine, whose body runs when its object is advanced or awaited."""
+    if isinstance(function, (ast.AsyncFunctionDef, ast.GeneratorExp)):
+        return True
+    body: list[ast.AST] = [function.body] if isinstance(function, ast.Lambda) else [*function.body]
+    return any(isinstance(node, (ast.Yield, ast.YieldFrom)) for node in _own_nodes(body))
 
 
 def _continue_from(bindings: Bindings, ends: list[tuple[Bindings, bool]]) -> bool:
@@ -297,34 +369,41 @@ class _WalkReferences:
     annotated assignments whose value resolves to an imported module, package, function or the
     `getattr` builtin, attribute access, and `getattr(module, "bounded_walk")`. Any other binding
     of a name (a parameter, an unresolved assignment, a loop, `with`, `except` or match target, a
-    `def` or `class`, `del`) clears it, so unrelated locals are never flagged. A function body is
-    resolved against its enclosing scope's final bindings (Python's late binding) minus its own
-    parameters, joined with the bindings at each plain call of it (by its name or a simple alias)
-    made in the scope that defines it. Calls from another scope or a class body, or through
-    attributes, containers or other functions, are not followed, and a generator or coroutine
-    body is checked only at the call and the scope's end. Class-level names do not leak into
-    methods. Dynamic access (`__import__`, `importlib.import_module`, `vars`, `globals`, `exec`,
-    computed attribute names) is out of scope: this is a guard against accidental or casual
-    bypass, not arbitrary dynamic execution.
+    `def` or `class`, `del`) clears it, so unrelated locals are never flagged. Dynamic access
+    (`__import__`, `importlib.import_module`, `vars`, `globals`, `exec`, computed attribute names)
+    is out of scope: this is a guard against accidental or casual bypass, not arbitrary dynamic
+    execution.
+
+    A function or lambda body is resolved against its enclosing scope's final bindings (Python's
+    late binding) minus its own parameters, joined with the bindings at each plain call of it (by
+    its name, a simple alias or the lambda itself) made in the scope that defines it; a call in a
+    class body reads the enclosing scope's bindings, never the class's own names. A generator or
+    coroutine body (and the lazy part of a generator expression) runs whenever its object is
+    advanced or awaited, so it is resolved against every state of that scope from the call that
+    made the object on. Calls from another scope, or through attributes, containers, arguments or
+    other functions, are not followed: this is no call graph. Class-level names do not leak into
+    methods.
 
     Paths are joined conservatively, and only where a normal path continues. `break` and
     `continue` end their path (later statements of the block are unreachable and not visited)
     and carry its state to the loop's exit or next iteration, first through every enclosing
-    `finally`; a `finally` that does not complete replaces the transfer. `if` branches start from
-    the state before them, and so do the branches of a conditional expression; an `and`/`or`
-    operand after the first may not run. A later `match` case starts after an earlier one failed:
-    its pattern did not match (the state before that case; a wildcard or capture always matches)
-    or its guard ran and was false. Control falls past the last case unless it cannot fail. A
+    `finally`; a `finally` that does not complete replaces the transfer. A condition (of an `if`,
+    a `while` or a `match` guard) yields the states where it is true and where it is false: an
+    `and`/`or` operand runs only while the earlier ones have not decided, a conditional expression
+    runs one branch, `not` swaps the two, and a side-effect-free literal is decided statically,
+    leaving the impossible operand, branch or body unvisited. An `if` or loop body starts from the
+    true state and its `else` from the false one. A later `match` case starts after an earlier one
+    failed: its pattern did not match (the state before that case; a wildcard or capture always
+    matches) or its guard was false. Control falls past the last case unless it cannot fail. A
     loop body runs zero or more times, each iteration starting from the entry state or any state
     that reaches the next one (the body's end or a `continue`); the loop leaves through its
-    `else` once its test fails or its iterable is exhausted, or through a `break`. A `while` test
-    that is a literal constant is decided statically: a true one never fails, so only a `break`
-    leaves the loop and its `else` is unreachable, and a false one never runs the body. A `try`
-    handler may start from any point of the body (an `except*` handler also after an earlier
-    one), `else` follows the body alone, and `finally` may start from any point of the whole
-    statement. `return` and `raise` are not modeled, so a join may include a path that cannot
-    run, which only ever adds a flag. Only targets on the way to the raw walk or `getattr`, and
-    functions defined in the module, are kept, which keeps loop fixpoints finite.
+    `else` once its test is false or its iterable is exhausted, or through a `break`, and a test
+    that is never false leaves only by `break`. A `try` handler may start from any point of the
+    body (an `except*` handler also after an earlier one), `else` follows the body alone, and
+    `finally` may start from any point of the whole statement. `return` and `raise` are not
+    modeled, so a join may include a path that cannot run, which only ever adds a flag. Only
+    targets on the way to the raw walk or `getattr`, and the functions defined in the module, are
+    kept, which keeps loop fixpoints finite.
     """
 
     def __init__(self, package: str) -> None:
@@ -333,38 +412,48 @@ class _WalkReferences:
         self._watchers: list[Bindings] = []  # every state reached inside an enclosing `try`
         # the break/continue states carried to each open loop, or first to an enclosing `finally`
         self._loops: list[tuple[list[Bindings], list[Bindings]]] = []
-        self._defined: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}  # by its target
-        self._calls: dict[Function, list[Bindings]] = {}  # the bindings at each call in its scope
-        self._recording = True  # a module function called in a class body reads module names
+        self._defined: dict[str, Function] = {}  # each function by the target naming it
+        self._calls: dict[Deferred, list[Bindings]] = {}  # the bindings each call in scope sees
+        # every state of the current scope since a generator or coroutine object was made
+        self._running: dict[Deferred, Bindings] = {}
+        # in a class body: the enclosing scope's bindings and running states
+        self._enclosing: tuple[Bindings, dict[Deferred, Bindings]] | None = None
 
     def module(self, tree: ast.Module) -> list[str]:
         self._scope(tree.body, {"getattr": frozenset({BUILTIN_GETATTR})})
         return list(dict.fromkeys(self.uses))  # loop and `finally` bodies may be visited twice
 
     def _scope(self, body: list[ast.stmt], bindings: Bindings) -> None:
-        deferred: list[Function] = []
+        running, self._running = self._running, {}
+        deferred: list[Deferred] = []
         self._block(body, bindings, deferred)
         for function in deferred:
             entry = _join(bindings, *self._calls.get(function, []))
+            if isinstance(function, ast.GeneratorExp):
+                self._comprehension(function, entry, deferred)
+                continue
             local = {k: v for k, v in entry.items() if k not in _parameters(function)}
             if isinstance(function, ast.Lambda):
                 self._expression(function.body, local, deferred)
             else:
                 self._scope(function.body, local)
+        self._running = running
 
     def _block(
-        self, body: list[ast.stmt], bindings: Bindings, deferred: list[Function],
+        self, body: list[ast.stmt], bindings: Bindings, deferred: list[Deferred],
     ) -> bool:
         """Visit ``body`` in order; report whether a normal path reaches its end."""
         for statement in body:
             falls = self._statement(statement, bindings, deferred)
-            for reached in self._watchers:
+            for reached in (*self._watchers, *self._running.values()):
                 _merge(reached, bindings)
             if not falls:
                 return False  # the rest of the block is unreachable
         return True
 
     def _resolved(self, node: ast.expr | None, bindings: Bindings) -> frozenset[str]:
+        if isinstance(node, ast.Lambda):
+            return frozenset({_marker(node)})
         dotted = None if node is None else _dotted(node)
         if dotted is None:
             return frozenset()
@@ -388,45 +477,103 @@ class _WalkReferences:
         for name in _bound_names(target):
             bindings.pop(name, None)
 
+    def _called(self, function: Deferred, bindings: Bindings, deferred: list[Deferred]) -> None:
+        """Record a call of ``function``; only a call in the scope that defines it is followed."""
+        if function not in deferred:
+            return
+        # a class body runs at once, but what it calls reads the enclosing scope's names
+        state, running = self._enclosing or (bindings, self._running)
+        state = dict(state)
+        if not _runs_later(function):
+            self._calls.setdefault(function, []).append(state)
+        elif function in running:
+            _merge(running[function], state)
+        else:
+            running[function] = state  # the object may run at any later point of the scope
+            self._calls.setdefault(function, []).append(state)
+
+    def _comprehension(
+        self, node: ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp,
+        bindings: Bindings, deferred: list[Deferred],
+    ) -> None:
+        """Analyze a comprehension in its own scope (a generator's first iterable ran when made)."""
+        local = dict(bindings)
+        for index, generator in enumerate(node.generators):
+            if index or not isinstance(node, ast.GeneratorExp):
+                self._expression(generator.iter, local, deferred)
+            self._unbind(generator.target, local)
+            for condition in generator.ifs:
+                self._expression(condition, local, deferred)
+        parts = (node.key, node.value) if isinstance(node, ast.DictComp) else (node.elt,)
+        for part in parts:
+            self._expression(part, local, deferred)
+
+    def _condition(
+        self, node: ast.expr, bindings: Bindings, deferred: list[Deferred],
+    ) -> tuple[Bindings | None, Bindings | None]:
+        """The states in which ``node`` is true and false; None for an outcome no path can have.
+
+        ``bindings`` is the state before ``node`` is evaluated, and is consumed.
+        """
+        truth = _static_truth(node)
+        if truth is not None:  # a literal: nothing to visit, one outcome
+            return (bindings, None) if truth else (None, bindings)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            truthy, falsy = self._condition(node.operand, bindings, deferred)
+            return falsy, truthy
+        if isinstance(node, ast.BoolOp):
+            # `and` goes on while its operands are true and `or` while they are false; an
+            # operand with the other outcome decides the result
+            conjunction = isinstance(node.op, ast.And)
+            decided: list[Bindings | None] = []
+            going: Bindings | None = bindings
+            for value in node.values:
+                if going is None:
+                    break  # the remaining operands never run
+                truthy, falsy = self._condition(value, going, deferred)
+                going, done = (truthy, falsy) if conjunction else (falsy, truthy)
+                decided.append(done)
+            settled = _either(decided)
+            return (going, settled) if conjunction else (settled, going)
+        if isinstance(node, ast.IfExp):
+            tested = self._condition(node.test, bindings, deferred)
+            outcomes = [
+                self._condition(branch, state, deferred)
+                for branch, state in zip((node.body, node.orelse), tested, strict=True)
+                if state is not None
+            ]
+            return _either(t for t, _ in outcomes), _either(f for _, f in outcomes)
+        self._expression(node, bindings, deferred)
+        return bindings, dict(bindings)
+
     def _expression(
-        self, node: ast.AST | None, bindings: Bindings, deferred: list[Function],
+        self, node: ast.AST | None, bindings: Bindings, deferred: list[Deferred],
     ) -> None:
         if node is None:
             return
         if isinstance(node, ast.Lambda):
             for default in (*node.args.defaults, *node.args.kw_defaults):
                 self._expression(default, bindings, deferred)
+            self._defined[_marker(node)] = node
             deferred.append(node)
             return
-        if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
-            local = dict(bindings)
-            for generator in node.generators:
-                self._expression(generator.iter, local, deferred)
-                self._unbind(generator.target, local)
-                for condition in generator.ifs:
-                    self._expression(condition, local, deferred)
-            parts = (node.key, node.value) if isinstance(node, ast.DictComp) else (node.elt,)
-            for part in parts:
-                self._expression(part, local, deferred)
+        if isinstance(node, ast.GeneratorExp):
+            # only the first iterable runs now; the rest runs as the generator is advanced
+            self._expression(node.generators[0].iter, bindings, deferred)
+            deferred.append(node)
+            self._called(node, bindings, deferred)
+            return
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp)):
+            self._comprehension(node, bindings, deferred)
             return
         if isinstance(node, ast.NamedExpr):
             self._expression(node.value, bindings, deferred)
             self._unbind(node.target, bindings)
             return
-        if isinstance(node, ast.BoolOp):
-            decided: list[Bindings] = []  # a later operand runs only if no earlier one decided
-            for value in node.values:
-                self._expression(value, bindings, deferred)
-                decided.append(dict(bindings))
-            for state in decided:
-                _merge(bindings, state)
-            return
-        if isinstance(node, ast.IfExp):
-            self._expression(node.test, bindings, deferred)
-            orelse = dict(bindings)
-            self._expression(node.body, bindings, deferred)
-            self._expression(node.orelse, orelse, deferred)
-            _merge(bindings, orelse)
+        if isinstance(node, (ast.BoolOp, ast.IfExp)):
+            outcome = _either(self._condition(node, dict(bindings), deferred))
+            bindings.clear()
+            bindings.update(outcome or {})
             return
         if isinstance(node, ast.Attribute) and RAW_WALK in self._resolved(node, bindings):
             self.uses.append(f"line {node.lineno}: references {RAW_WALK}")
@@ -436,51 +583,51 @@ class _WalkReferences:
             and isinstance(node.args[1], ast.Constant) and node.args[1].value == "bounded_walk"
         ):
             self.uses.append(f"line {node.lineno}: getattr of {RAW_WALK}")
-        callees = (
-            [self._defined[t] for t in self._resolved(node.func, bindings) if t in self._defined]
-            if isinstance(node, ast.Call) and self._recording else []
-        )
+        if isinstance(node, ast.Call):
+            self._expression(node.func, bindings, deferred)  # the callee is evaluated first
+            callees = [
+                self._defined[t] for t in self._resolved(node.func, bindings) if t in self._defined]
+            for argument in (*node.args, *node.keywords):
+                self._expression(argument, bindings, deferred)
+            for function in callees:
+                self._called(function, bindings, deferred)
+            return
         for child in ast.iter_child_nodes(node):
             self._expression(child, bindings, deferred)
-        for function in callees:
-            if function in deferred:  # called in its own scope: the body reads these names now
-                self._calls.setdefault(function, []).append(dict(bindings))
 
     def _loop(
         self, node: ast.For | ast.AsyncFor | ast.While, bindings: Bindings,
-        deferred: list[Function],
+        deferred: list[Deferred],
     ) -> bool:
         if not isinstance(node, ast.While):
             self._expression(node.iter, bindings, deferred)
-        truth = _constant_truth(node.test) if isinstance(node, ast.While) else None
         breaks: list[Bindings] = []
         continues: list[Bindings] = []
         head = dict(bindings)  # every state an iteration may start from
         while True:
-            tested = dict(head)
             if isinstance(node, ast.While):
-                self._expression(node.test, tested, deferred)
-            if truth is False:
-                break  # the body never runs
-            body = dict(tested)
-            if not isinstance(node, ast.While):
-                self._unbind(node.target, body)
-            self._loops.append((breaks, continues))
-            falls = self._block(node.body, body, deferred)
-            self._loops.pop()
-            following = _join(head, *([body] if falls else []), *continues)
+                entered, left = self._condition(node.test, dict(head), deferred)
+            else:
+                entered, left = dict(head), dict(head)  # a next item, or the iterable is exhausted
+            following = head
+            if entered is not None:
+                if not isinstance(node, ast.While):
+                    self._unbind(node.target, entered)
+                self._loops.append((breaks, continues))
+                falls = self._block(node.body, entered, deferred)
+                self._loops.pop()
+                following = _join(head, *([entered] if falls else []), *continues)
             if following == head:
                 break
             head = following
         ends = [(state, True) for state in breaks]
-        if truth is True:
-            ends.append((head, False))
+        if left is None:
+            ends.append((head, False))  # the test is never false: only a break leaves
         else:
-            ends.append((tested, self._block(node.orelse, tested, deferred)))
+            ends.append((left, self._block(node.orelse, left, deferred)))
         return _continue_from(bindings, ends)
-
     def _try(
-        self, node: ast.Try | ast.TryStar, bindings: Bindings, deferred: list[Function],
+        self, node: ast.Try | ast.TryStar, bindings: Bindings, deferred: list[Deferred],
     ) -> bool:
         anywhere, raised = dict(bindings), dict(bindings)
         transfers: tuple[list[Bindings], list[Bindings]] = ([], [])
@@ -518,26 +665,30 @@ class _WalkReferences:
                     target.append(state)  # otherwise the transfer in `finally` replaces it
         return falls and self._block(node.finalbody, bindings, deferred)
 
-    def _match(self, node: ast.Match, bindings: Bindings, deferred: list[Function]) -> bool:
+    def _match(self, node: ast.Match, bindings: Bindings, deferred: list[Deferred]) -> bool:
         self._expression(node.subject, bindings, deferred)
         unmatched = dict(bindings)
         ends: list[tuple[Bindings, bool]] = []
         for case in node.cases:
             state = dict(unmatched)
             self._unbind(case.pattern, state)
-            self._expression(case.guard, state, deferred)  # run only once the pattern matched
+            # the guard runs only once the pattern matched; the body sees it true
+            success, failure = (
+                (state, None) if case.guard is None
+                else self._condition(case.guard, state, deferred))
             # a failed pattern leaves the state before it (a partial capture only removes names)
             failed = [] if _irrefutable(case.pattern) else [unmatched]
-            if case.guard is not None:
-                failed.append(dict(state))  # a false guard, after its named expressions ran
+            if failure is not None:
+                failed.append(failure)  # a false guard, after its named expressions ran
             unmatched = _join(*failed)
-            ends.append((state, self._block(case.body, state, deferred)))
+            if success is not None:
+                ends.append((success, self._block(case.body, success, deferred)))
         if failed:
             ends.append((unmatched, True))
         return _continue_from(bindings, ends)
 
     def _statement(
-        self, node: ast.stmt, bindings: Bindings, deferred: list[Function],
+        self, node: ast.stmt, bindings: Bindings, deferred: list[Deferred],
     ) -> bool:
         """Analyze ``node``; report whether a normal path leaves it."""
         if isinstance(node, ast.Import):
@@ -563,17 +714,19 @@ class _WalkReferences:
             arguments = node.args
             for part in (*node.decorator_list, *arguments.defaults, *arguments.kw_defaults):
                 self._expression(part, bindings, deferred)
-            marker = f"<def {id(node)}>"  # the name now refers to this function
-            self._defined[marker] = node
-            bindings[node.name] = frozenset({marker})
+            self._defined[_marker(node)] = node  # the name now refers to this function
+            bindings[node.name] = frozenset({_marker(node)})
             deferred.append(node)
         elif isinstance(node, ast.ClassDef):
             for part in (*node.decorator_list, *node.bases, *(k.value for k in node.keywords)):
                 self._expression(part, bindings, deferred)
-            watchers, self._watchers = self._watchers, []  # class-level names stay in the class
-            recording, self._recording = self._recording, False
+            saved = self._watchers, self._running, self._enclosing
+            # the body runs now: its names stay in the class, while a function it calls (or a
+            # generator it makes) reads the enclosing scope's names
+            self._enclosing = self._enclosing or (dict(bindings), self._running)
+            self._watchers, self._running = [], {}
             self._block(node.body, dict(bindings), deferred)  # methods resolve late, outside
-            self._watchers, self._recording = watchers, recording
+            self._watchers, self._running, self._enclosing = saved
             bindings.pop(node.name, None)
         elif isinstance(node, ast.Assign):
             self._expression(node.value, bindings, deferred)
@@ -608,11 +761,12 @@ class _WalkReferences:
                     self._unbind(item.optional_vars, bindings)
             return self._block(node.body, bindings, deferred)
         elif isinstance(node, ast.If):
-            self._expression(node.test, bindings, deferred)
-            orelse = dict(bindings)
-            falls = self._block(node.body, bindings, deferred)
-            return _continue_from(
-                bindings, [(bindings, falls), (orelse, self._block(node.orelse, orelse, deferred))])
+            ends = []
+            tested = self._condition(node.test, dict(bindings), deferred)
+            for branch, state in zip((node.body, node.orelse), tested, strict=True):
+                if state is not None:  # a literal test leaves the other branch unreachable
+                    ends.append((state, self._block(branch, state, deferred)))
+            return _continue_from(bindings, ends)
         elif isinstance(node, (ast.Try, ast.TryStar)):
             return self._try(node, bindings, deferred)
         elif isinstance(node, ast.Match):
@@ -814,9 +968,9 @@ REACHED_ON_SOME_PATH = {
     "function-called-inside-an-endless-loop": (
         "m = make()\ndef walk(root):\n    return m.bounded_walk(root)\n"
         "while True:\n    m = w\n    walk(root)\n"),
-    "callback-run-inside-an-endless-loop": (
+    "uncalled-function-reads-names-an-endless-loop-retains": (
         "m = make()\ndef walk(root):\n    return m.bounded_walk(root)\n"
-        "while True:\n    m = w\n    serve(walk)\n"),
+        "while True:\n    m = w\n    serve()\n"),
     "continue-only-endless-loop-iterates": (
         "m = make()\nwhile True:\n    m.bounded_walk(root)\n    m = w\n    continue\n"),
     "nested-finally-forwards-a-break-alias": (
@@ -877,6 +1031,49 @@ REACHED_ON_SOME_PATH = {
     "conditional-expression-guard-failure-keeps-module": (
         "match value:\n    case _ if ((w := make()) if c else False):\n        pass\n"
         "    case _:\n        w.bounded_walk(root)\n"),
+    # 6hfPWRXC8MMwMrcG: only side-effect-free literals are decided
+    "while-unpacked-list-may-run-zero-times": (
+        "while [*items]:\n    w = make()\n    break\nw.bounded_walk(root)\n"),
+    "while-unpacked-dict-may-run-zero-times": (
+        "while {**options}:\n    w = make()\n    break\nw.bounded_walk(root)\n"),
+    "while-set-call-is-not-a-literal": "while set():\n    w.bounded_walk(root)\n",
+    # 6hfPfM2QXfxpvjvp: separate true and false states
+    "if-else-sees-the-skipped-walrus": (
+        "if c and (w := make()):\n    pass\nelse:\n    w.bounded_walk(root)\n"),
+    "not-and-body-keeps-module": "if not (c and (w := make())):\n    w.bounded_walk(root)\n",
+    "while-exit-keeps-the-skipped-walrus": (
+        "while c and (w := make()):\n    pass\nw.bounded_walk(root)\n"),
+    "statically-true-or-skips-the-walrus": "if 1 or (w := make()):\n    w.bounded_walk(root)\n",
+    # 6hfPfM48RRh6Mc2G: lambdas called in their own scope
+    "lambda-called-before-a-later-rebind": (
+        "m = make()\nwalk = lambda root: m.bounded_walk(root)\nm = w\nwalk(root)\nm = make()\n"),
+    "lambda-called-where-it-is-made": "m = w\n(lambda: m.bounded_walk(root))()\nm = make()\n",
+    # 6hfPfM3X26Qxj9FG: class bodies run at import time
+    "class-body-calls-a-module-function-while-the-alias-is-raw": (
+        "m = make()\ndef walk(root):\n    return m.bounded_walk(root)\n"
+        "m = w\nclass Store:\n    walk(root)\nm = make()\n"),
+    "class-body-calls-its-own-function-with-module-names": (
+        "m = w\nclass Store:\n    def helper():\n        return m.bounded_walk(root)\n"
+        "    helper()\nm = make()\n"),
+    # 6hfPfM2HWPqcrXCG: generator and coroutine bodies run after they are made
+    "generator-advanced-after-a-later-rebind": (
+        "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
+        "items = gen()\nm = w\nnext(items)\nm = make()\n"),
+    "generator-iterated-while-the-alias-is-raw": (
+        "m = make()\ndef gen():\n    while True:\n        yield m.bounded_walk(root)\n"
+        "for item in gen():\n    m = w\nm = make()\n"),
+    "coroutine-awaited-after-a-later-rebind": (
+        "async def main(root):\n    import algua.primitives.bounded_walk as v\n    m = make()\n"
+        "    async def fetch():\n        return m.bounded_walk(root)\n"
+        "    pending = fetch()\n    m = v\n    await pending\n    m = make()\n"),
+    "async-generator-made-before-a-later-rebind": (
+        "m = make()\nasync def stream():\n    yield m.bounded_walk(root)\n"
+        "items = stream()\nm = w\nm = make()\n"),
+    "generator-expression-advanced-after-a-later-rebind": (
+        "m = make()\nitems = (m.bounded_walk(r) for r in roots)\nm = w\nnext(items)\nm = make()\n"),
+    "generator-made-in-a-class-body-advanced-later": (
+        "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
+        "class Store:\n    items = gen()\nm = w\nnext(Store.items)\nm = make()\n"),
 }
 
 
@@ -996,6 +1193,66 @@ NOT_REACHED_ON_ANY_PATH = {
         "match value:\n    case _ if (w := make()):\n        pass\nw.bounded_walk(root)\n"),
     "guard-success-sees-the-rebind": (
         "match value:\n    case _ if (w := make()):\n        w.bounded_walk(root)\n"),
+    # 6hfPWRXC8MMwMrcG: side-effect-free literals and unary literals are decided
+    "while-list-literal-rebinds-before-break": (
+        "while [1]:\n    w = make()\n    break\nw.bounded_walk(root)\n"),
+    "while-tuple-literal-else-is-unreachable": (
+        "m = make()\nwhile (1,):\n    break\nelse:\n    m = w\nm.bounded_walk(root)\n"),
+    "while-dict-literal-rebinds-before-break": (
+        "while {'k': 1}:\n    w = make()\n    break\nw.bounded_walk(root)\n"),
+    "while-set-literal-rebinds-before-break": (
+        "while {1}:\n    w = make()\n    break\nw.bounded_walk(root)\n"),
+    "while-not-zero-rebinds-before-break": (
+        "while not 0:\n    w = make()\n    break\nw.bounded_walk(root)\n"),
+    "while-negative-one-rebinds-before-break": (
+        "while -1:\n    w = make()\n    break\nw.bounded_walk(root)\n"),
+    "while-inverted-zero-rebinds-before-break": (
+        "while ~0:\n    w = make()\n    break\nw.bounded_walk(root)\n"),
+    "while-empty-list-body-is-unreachable": "while []:\n    w.bounded_walk(root)\n",
+    "while-empty-dict-body-is-unreachable": "while {}:\n    w.bounded_walk(root)\n",
+    "while-not-one-body-is-unreachable": "while not 1:\n    w.bounded_walk(root)\n",
+    "while-negative-zero-body-is-unreachable": "while -0.0:\n    w.bounded_walk(root)\n",
+    # 6hfPfM2QXfxpvjvp: a true outcome never inherits a false-only alias, nor the reverse
+    "guard-success-does-not-inherit-a-failure-alias": (
+        "match value:\n    case _ if c and (w := make()):\n        w.bounded_walk(root)\n"),
+    "false-or-guard-rebinds-before-a-later-case": (
+        "match value:\n    case _ if c or (w := make()):\n        pass\n    case _:\n"
+        "        w.bounded_walk(root)\n"),
+    "conditional-expression-guard-success-rebinds": (
+        "match value:\n    case _ if ((w := make()) if c else False):\n"
+        "        w.bounded_walk(root)\n"),
+    "if-body-sees-the-and-walrus": "if c and (w := make()):\n    w.bounded_walk(root)\n",
+    "not-or-body-sees-the-walrus": "if not (c or (w := make())):\n    w.bounded_walk(root)\n",
+    "while-body-sees-the-and-walrus": "while c and (w := make()):\n    w.bounded_walk(root)\n",
+    "unreachable-and-operand-is-not-visited": "flag = 0 and w.bounded_walk(root)\n",
+    "unreachable-or-operand-is-not-visited": "flag = 1 or w.bounded_walk(root)\n",
+    "unreachable-conditional-branch-is-not-visited": (
+        "flag = w.bounded_walk(root) if 0 else None\n"),
+    "statically-false-if-body-is-unreachable": "if 0:\n    w.bounded_walk(root)\n",
+    # 6hfPfM48RRh6Mc2G: the bounded same-scope call model, for lambdas
+    "lambda-parameter-shadows-at-the-call": (
+        "m = make()\nwalk = lambda m: m.bounded_walk(root)\nm = w\nwalk(other)\nm = make()\n"),
+    "lambda-called-before-the-alias-is-bound": (
+        "m = make()\nwalk = lambda root: m.bounded_walk(root)\nwalk(root)\nm = w\nm = make()\n"),
+    "lambda-called-from-another-function-sees-module-names": (
+        "m = make()\ndef other(root):\n    m = w\n    walk(root)\n"
+        "walk = lambda root: m.bounded_walk(root)\n"),
+    # 6hfPfM3X26Qxj9FG: class locals stay isolated from what a called function reads
+    "class-body-call-ignores-class-locals": (
+        "m = make()\nclass Store:\n    m = w\n    def helper():\n"
+        "        return m.bounded_walk(root)\n    helper()\n"),
+    "class-local-name-shadows-the-module-function": (
+        "m = make()\ndef walk(root):\n    return m.bounded_walk(root)\n"
+        "m = w\nclass Store:\n    walk = other\n    walk(root)\nm = make()\n"),
+    # 6hfPfM2HWPqcrXCG: only states from the object's creation on
+    "generator-made-after-the-alias-was-raw": (
+        "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
+        "m = w\nm = make()\nitems = gen()\nnext(items)\n"),
+    "generator-expression-first-iterable-runs-only-at-creation": (
+        "m = make()\nitems = (r for r in m.bounded_walk(root))\nm = w\nnext(items)\n"),
+    "class-local-alias-does-not-reach-a-running-generator": (
+        "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
+        "items = gen()\nclass Store:\n    m = w\nnext(items)\n"),
     "class-body-binding-does-not-reach-a-handler": (
         "try:\n    class Store:\n        m = w\nexcept Exception:\n    m.bounded_walk(root)\n"),
 }
