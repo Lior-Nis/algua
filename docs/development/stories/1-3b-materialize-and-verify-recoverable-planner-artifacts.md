@@ -347,6 +347,18 @@ These identities are non-cyclic. An environment-only change does not change `bun
 - [x] [Review][Patch] Translate bytecode-purge failures into the stable bounded refresh error
   contract and explicitly prove partial cache deletion cannot commit or mutate the module graph
   [algua/primitives/module_refresh.py:217]
+- [ ] [Review][Patch] Canonicalize the selected package root before preflight and import so a
+  relative parent search entry cannot change meaning if refreshed code changes the process working
+  directory
+  [algua/primitives/module_source_scan.py:111]
+- [ ] [Review][Patch] Validate immutable expected source-spec facts and corresponding module
+  metadata at commit so in-place mutation of the `ModuleSpec` handed to executed code cannot retain
+  a forged loader, origin or package search location
+  [algua/primitives/module_refresh.py:190]
+- [ ] [Review][Patch] Preserve refresh serialization when the refreshing thread itself forks so a
+  second thread in the child cannot acquire a replacement lock and enter the still-active partial
+  transaction before its owner commits or rolls back
+  [algua/primitives/module_refresh.py:72]
 
 ## Development notes
 
