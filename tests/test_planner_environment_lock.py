@@ -91,11 +91,11 @@ def _wheel(toml_url: str) -> str:
     return f'wheels = [{{ url = "{toml_url}", hash = "{HASH}" }}]'
 
 
-NON_CANONICAL_URLS = {
-    "scheme-uppercase": "HTTPS://files.pythonhosted.org/x.whl",
-    "empty-query": "https://files.pythonhosted.org/x.whl?",
-    "empty-fragment": "https://files.pythonhosted.org/x.whl#",
+REJECTED_WHEEL_URLS = {
+    # characters a URL can never carry raw
     "leading-space": " https://files.pythonhosted.org/x.whl",
+    "inner-space": "https://files.pythonhosted.org/x y.whl",
+    "trailing-space": "https://files.pythonhosted.org/x.whl ",
     "tab": "https://files.pythonhosted.org/x\\t.whl",
     "newline": "https://files.pythonhosted.org/x\\n.whl",
     "carriage-return": "https://files.pythonhosted.org/x\\r.whl",
@@ -103,102 +103,117 @@ NON_CANONICAL_URLS = {
     "delete": "https://files.pythonhosted.org/x\\u007f.whl",
     "zero-width-space": "https://files.pythonhosted.org/x\\u200b.whl",
     "line-separator": "https://files.pythonhosted.org/x\\u2028.whl",
-}
-
-
-@pytest.mark.parametrize("toml_url", NON_CANONICAL_URLS.values(), ids=NON_CANONICAL_URLS.keys())
-def test_locked_wheel_urls_must_be_printable_and_round_trip_exactly(toml_url: str) -> None:
-    with pytest.raises(EnvironmentIncompatible):
-        planner_environment.locked_wheels(_lock(wheels=_wheel(toml_url)))
-
-
-@pytest.mark.parametrize("alias", ["https://files.pythonhosted.org/x.whl?",
-                                   "https://files.pythonhosted.org/x\\t.whl"])
-def test_url_aliases_cannot_evade_duplicate_detection(alias: str) -> None:
-    canonical = "https://files.pythonhosted.org/x.whl"
-    lock = _lock(wheels=_wheel(canonical), extra=(
-        "[[package]]\nname = 'other'\nversion = '1.0'\n"
-        "source = { registry = 'https://pypi.org/simple' }\n" + _wheel(alias) + "\n"))
-
-    with pytest.raises(EnvironmentIncompatible):
-        planner_environment.locked_wheels(lock)
-
-
-MALFORMED_WHEEL_URLS = {
-    "uppercase-host": "HTTPS://files.pythonhosted.org/x.whl".replace("HTTPS", "https").replace(
-        "files", "FILES"),
-    "mixed-case-host": "https://Files.PythonHosted.org/x.whl",
-    "trailing-dot-host": "https://files.pythonhosted.org./x.whl",
-    "ipv6-literal": "https://[::1]/x.whl",
+    "non-ascii": "https://files.pythonhosted.org/café.whl",
+    # KELVIN SIGN lowercases to ASCII "k", so it must be refused before the host is folded
+    "non-ascii-host-folding": "https://\\u212aeras.org/x.whl",
+    "backslash": "https://files.pythonhosted.org/a\\\\x.whl",
+    "angle-bracket": "https://files.pythonhosted.org/<x>.whl",
+    "bracket-in-path": "https://files.pythonhosted.org/[x].whl",
+    "bracket-in-query": "https://files.pythonhosted.org/x.whl?v=[1]",
+    # credentials and fragments
+    "credentials": "https://user@files.pythonhosted.org/x.whl",
+    "password": "https://user:secret@files.pythonhosted.org/x.whl",
+    "empty-userinfo": "https://@files.pythonhosted.org/x.whl",
+    "fragment": "https://files.pythonhosted.org/x.whl#sha256=abc",
+    "empty-fragment": "https://files.pythonhosted.org/x.whl#",
+    # malformed percent escapes
+    "short-escape": "https://files.pythonhosted.org/x%2.whl",
+    "non-hex-escape": "https://files.pythonhosted.org/x%zz.whl",
+    "query-bad-escape": "https://files.pythonhosted.org/x.whl?v=%g1",
+    # scheme and authority
+    "http": "http://files.pythonhosted.org/x.whl",
+    "no-authority": "https:files.pythonhosted.org/x.whl",
+    "empty-host": "https:///x.whl",
     "underscore-host": "https://files_python.org/x.whl",
+    "trailing-dot-host": "https://files.pythonhosted.org./x.whl",
+    "empty-label": "https://files..pythonhosted.org/x.whl",
+    "hyphen-edge-label": "https://-files.pythonhosted.org/x.whl",
     "overlong-hostname": "https://" + ".".join(["a" * 63] * 4) + "/x.whl",
-    "default-port": "https://files.pythonhosted.org:443/x.whl",
-    "empty-port": "https://files.pythonhosted.org:/x.whl",
+    "escaped-host": "https://files%2Epythonhosted.org/x.whl",
+    "ipv6-zone": "https://[fe80::1%25eth0]/x.whl",
+    "ipv6-invalid": "https://[::g]/x.whl",
+    "ipv-future": "https://[v1.x]/x.whl",
+    "ipv6-unbracketed": "https://::1/x.whl",
+    "numeric-host-leading-zero": "https://01.2.3.4/x.whl",
+    "numeric-host-short": "https://1.2.3/x.whl",
+    "numeric-host-hex": "https://0x7f.0.0.1/x.whl",
+    "numeric-host-integer": "https://16909060/x.whl",
     "zero-port": "https://files.pythonhosted.org:0/x.whl",
     "port-out-of-range": "https://files.pythonhosted.org:65536/x.whl",
     "huge-port": "https://files.pythonhosted.org:99999999999/x.whl",
-    "leading-zero-port": "https://files.pythonhosted.org:0443/x.whl",
     "non-numeric-port": "https://files.pythonhosted.org:https/x.whl",
-    "credentials": "https://user@files.pythonhosted.org/x.whl",
-    "empty-userinfo": "https://@files.pythonhosted.org/x.whl",
-    "inner-space": "https://files.pythonhosted.org/x y.whl",
-    "trailing-space": "https://files.pythonhosted.org/x.whl ",
-    "non-ascii": "https://files.pythonhosted.org/café.whl",
-    "short-escape": "https://files.pythonhosted.org/x%2.whl",
-    "non-hex-escape": "https://files.pythonhosted.org/x%zz.whl",
-    "lowercase-escape": "https://files.pythonhosted.org/x%2b1.whl",
-    "escaped-unreserved": "https://files.pythonhosted.org/%41.whl",
-    "escaped-tilde": "https://files.pythonhosted.org/x%7E.whl",
-    "query": "https://files.pythonhosted.org/x.whl?sig=abc",
-    "fragment": "https://files.pythonhosted.org/x.whl#sha256=abc",
-    "empty-segment": "https://files.pythonhosted.org//x.whl",
-    "dot-segment": "https://files.pythonhosted.org/./x.whl",
-    "dot-dot-segment": "https://files.pythonhosted.org/a/../x.whl",
-    "backslash": "https://files.pythonhosted.org/a\\\\x.whl",
-    "angle-bracket": "https://files.pythonhosted.org/<x>.whl",
-    "raw-sub-delimiter": "https://files.pythonhosted.org/torch-2.4.0+cpu-py3-none-any.whl",
-    "raw-at-sign": "https://files.pythonhosted.org/a@b.whl",
+    # not a wheel
     "no-path": "https://files.pythonhosted.org",
     "not-a-wheel": "https://files.pythonhosted.org/x.tar.gz",
-    "http": "http://files.pythonhosted.org/x.whl",
+    "bare-extension": "https://files.pythonhosted.org/.whl",
+    "wheel-only-in-query": "https://files.pythonhosted.org/x?file=x.whl",
+    "escaped-slash-suffix": "https://files.pythonhosted.org/x.whl%2F",
 }
 
 
-@pytest.mark.parametrize("toml_url", MALFORMED_WHEEL_URLS.values(),
-                         ids=MALFORMED_WHEEL_URLS.keys())
-def test_locked_wheel_urls_must_be_one_canonical_https_identity(toml_url: str) -> None:
+@pytest.mark.parametrize("toml_url", REJECTED_WHEEL_URLS.values(),
+                         ids=REJECTED_WHEEL_URLS.keys())
+def test_invalid_locked_wheel_urls_are_refused(toml_url: str) -> None:
     with pytest.raises(EnvironmentIncompatible):
         planner_environment.locked_wheels(_lock(wheels=_wheel(toml_url)))
 
 
-CANONICAL_WHEEL_URLS = [
-    "https://files.pythonhosted.org/packages/aa/bb/six-1.17.0-py2.py3-none-any.whl",
-    "https://download.example.org:8443/whl/torch-2.4.0%2Bcpu-cp312-cp312-linux_x86_64.whl",
-    "https://mirror-1.example.org/simple/pkg/pkg-1.0-py3-none-any.whl",
-    "https://" + ".".join(["a" * 63] * 3 + ["b" * 61]) + ":65535/x.whl",
-]
+HOST = "https://files.pythonhosted.org"
+WHEEL_URL_IDENTITIES = {
+    "repository-shape": (URL, URL),
+    "scheme-and-host-case": ("HTTPS://Files.PythonHosted.ORG/x.whl", f"{HOST}/x.whl"),
+    "default-port": ("https://files.pythonhosted.org:443/x.whl", f"{HOST}/x.whl"),
+    "empty-port": ("https://files.pythonhosted.org:/x.whl", f"{HOST}/x.whl"),
+    "zero-padded-default-port": ("https://files.pythonhosted.org:0443/x.whl", f"{HOST}/x.whl"),
+    "zero-padded-port": ("https://files.pythonhosted.org:08443/x.whl",
+                         "https://files.pythonhosted.org:8443/x.whl"),
+    "ipv4": ("https://192.0.2.10/x.whl", "https://192.0.2.10/x.whl"),
+    "ipv6": ("https://[2001:DB8:0:0:0:0:0:1]:8443/x.whl", "https://[2001:db8::1]:8443/x.whl"),
+    "ipv6-mapped-ipv4": ("https://[::FFFF:192.0.2.10]/x.whl", "https://[::ffff:c000:20a]/x.whl"),
+    "query": (f"{HOST}/x.whl?token=abc&v=1", f"{HOST}/x.whl?token=abc&v=1"),
+    "empty-query": (f"{HOST}/x.whl?", f"{HOST}/x.whl?"),
+    "query-escapes": (f"{HOST}/x.whl?q=%7e%2f", f"{HOST}/x.whl?q=~%2F"),
+    "path-sub-delimiters": (f"{HOST}/a!$&'()*+,;=:@b/x.whl", f"{HOST}/a!$&'()*+,;=:@b/x.whl"),
+    "reserved-escape-kept": (f"{HOST}/torch-2.4.0%2bcpu.whl", f"{HOST}/torch-2.4.0%2Bcpu.whl"),
+    "unreserved-escape-decoded": (f"{HOST}/%78.whl", f"{HOST}/x.whl"),
+    "escaped-extension": (f"{HOST}/x%2ewhl", f"{HOST}/x.whl"),
+    "dot-segments": (f"{HOST}/a/./b/../x.whl", f"{HOST}/a/x.whl"),
+    "escaped-dot-segments": (f"{HOST}/a/%2E%2E/x.whl", f"{HOST}/x.whl"),
+    "leading-dot-dot": (f"{HOST}/../x.whl", f"{HOST}/x.whl"),
+    "empty-segment-kept": (f"{HOST}//x.whl", f"{HOST}//x.whl"),
+}
 
 
-@pytest.mark.parametrize("url", CANONICAL_WHEEL_URLS)
-def test_canonical_https_wheel_urls_are_accepted_as_their_own_identity(url: str) -> None:
-    assert planner_environment.locked_wheels(_lock(wheels=_wheel(url))) == {
-        url: ("six", "1.17.0")}
+@pytest.mark.parametrize("pair", WHEEL_URL_IDENTITIES.values(), ids=WHEEL_URL_IDENTITIES.keys())
+def test_valid_wheel_urls_are_accepted_under_their_exact_raw_spelling(
+    pair: tuple[str, str],
+) -> None:
+    raw, _identity = pair
+    assert planner_environment.locked_wheels(_lock(wheels=_wheel(raw))) == {
+        raw: ("six", "1.17.0")}
+
+
+@pytest.mark.parametrize("pair", WHEEL_URL_IDENTITIES.values(), ids=WHEEL_URL_IDENTITIES.keys())
+def test_wheel_url_ownership_identity_is_rfc_canonical(pair: tuple[str, str]) -> None:
+    from algua.registry import planner_environment_lock
+
+    raw, identity = pair
+    assert planner_environment_lock.wheel_url_identity(raw) == identity
 
 
 SEMANTIC_ALIASES = {
-    "host-case": ("https://files.pythonhosted.org/x.whl", "https://FILES.pythonhosted.org/x.whl"),
-    "default-port": ("https://files.pythonhosted.org/x.whl",
-                     "https://files.pythonhosted.org:443/x.whl"),
-    "escape-case": ("https://files.pythonhosted.org/x%2B1.whl",
-                    "https://files.pythonhosted.org/x%2b1.whl"),
-    "escaped-unreserved": ("https://files.pythonhosted.org/A.whl",
-                           "https://files.pythonhosted.org/%41.whl"),
-    "dot-segment": ("https://files.pythonhosted.org/x.whl",
-                    "https://files.pythonhosted.org/./x.whl"),
-    "trailing-dot-host": ("https://files.pythonhosted.org/x.whl",
-                          "https://files.pythonhosted.org./x.whl"),
-    "escaped-vs-raw-plus": ("https://files.pythonhosted.org/x%2Bcpu.whl",
-                            "https://files.pythonhosted.org/x+cpu.whl"),
+    "host-case": (f"{HOST}/x.whl", "https://FILES.pythonhosted.org/x.whl"),
+    "scheme-case": (f"{HOST}/x.whl", "HTTPS://files.pythonhosted.org/x.whl"),
+    "default-port": (f"{HOST}/x.whl", "https://files.pythonhosted.org:443/x.whl"),
+    "empty-port": (f"{HOST}/x.whl", "https://files.pythonhosted.org:/x.whl"),
+    "zero-padded-default-port": (f"{HOST}/x.whl", "https://files.pythonhosted.org:0443/x.whl"),
+    "path-escape-case": (f"{HOST}/x%2B1.whl", f"{HOST}/x%2b1.whl"),
+    "query-escape-case": (f"{HOST}/x.whl?a=%2F", f"{HOST}/x.whl?a=%2f"),
+    "escaped-unreserved": (f"{HOST}/A.whl", f"{HOST}/%41.whl"),
+    "escaped-extension": (f"{HOST}/x.whl", f"{HOST}/x%2Ewhl"),
+    "dot-segment": (f"{HOST}/x.whl", f"{HOST}/./x.whl"),
+    "dot-dot-segment": (f"{HOST}/x.whl", f"{HOST}/a/../x.whl"),
+    "ipv6-spelling": ("https://[2001:db8::1]/x.whl", "https://[2001:DB8:0:0:0:0:0:1]/x.whl"),
 }
 
 
@@ -209,8 +224,23 @@ def test_semantic_aliases_cannot_claim_a_second_wheel_owner(pair: tuple[str, str
         "[[package]]\nname = 'other'\nversion = '1.0'\n"
         "source = { registry = 'https://pypi.org/simple' }\n" + _wheel(alias) + "\n"))
 
-    with pytest.raises(EnvironmentIncompatible):
+    with pytest.raises(EnvironmentIncompatible, match="more than one package"):
         planner_environment.locked_wheels(lock)
+
+
+@pytest.mark.parametrize(
+    "pair",
+    [(f"{HOST}/x%2Bcpu.whl", f"{HOST}/x+cpu.whl"), (f"{HOST}/x.whl", f"{HOST}/x.whl?")],
+    ids=["reserved-escape-versus-raw", "empty-query-versus-none"],
+)
+def test_rfc_distinct_urls_remain_distinct_owners(pair: tuple[str, str]) -> None:
+    first, second = pair
+    lock = _lock(wheels=_wheel(first), extra=(
+        "[[package]]\nname = 'other'\nversion = '1.0'\n"
+        "source = { registry = 'https://pypi.org/simple' }\n" + _wheel(second) + "\n"))
+
+    assert planner_environment.locked_wheels(lock) == {
+        first: ("six", "1.17.0"), second: ("other", "1.0")}
 
 
 def test_repository_lock_has_canonical_identities() -> None:
@@ -223,8 +253,11 @@ def test_repository_lock_has_canonical_identities() -> None:
         for wheel in package.get("wheels", [])
     ]
 
+    from algua.registry import planner_environment_lock
+
     assert len(locked) == 1785
-    assert sorted(wheels) == sorted(locked)  # every real locked wheel URL is its own identity
+    assert sorted(wheels) == sorted(locked)  # keyed by each exact raw URL
+    assert all(planner_environment_lock.wheel_url_identity(url) == url for url in locked)
 
 
 def test_provision_refuses_a_malformed_lock_before_running_uv(
