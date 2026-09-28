@@ -33,9 +33,9 @@ from algua.registry.planner_environment_errors import (
 from algua.registry.planner_environment_inventory import (
     inventory_environment,
     scrubbed_environment,
-    verify_environment,
 )
 from algua.registry.planner_environment_outage import is_locked_wheel_outage
+from algua.registry.planner_environment_probe import verify_environment
 
 CREATE_FLAGS = (
     "uv", "venv", "--relocatable", "--python", "<exact-current-interpreter>",

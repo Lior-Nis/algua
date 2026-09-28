@@ -79,11 +79,12 @@ def test_file_count_is_bounded_before_hashing_or_growth(
 
     (env / SITE_PACKAGES / "zz-empty.py").touch()
     hashed = _count_hashes(monkeypatch)
+    read = _count_calls(monkeypatch, "_read_bounded")
     linked = _count_calls(monkeypatch, "_interpreter_link")
     with pytest.raises(EnvironmentIncompatible, match="file-count"):
         inventory_environment(env)
     # Exactly `entries` entries were processed; the one past the bound was never read.
-    assert len(hashed) + len(linked) == entries
+    assert len(hashed) + len(read) + len(linked) == entries
 
 
 def test_per_file_bytes_are_bounded_before_reading(
@@ -149,7 +150,7 @@ def _record_reads(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     return requested
 
 
-@pytest.mark.parametrize("reader", ["_file_digest", "_read_metadata"])
+@pytest.mark.parametrize("reader", ["_file_digest", "_read_bounded"])
 def test_bounded_reads_never_request_bytes_past_the_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reader: str,
 ) -> None:
@@ -158,7 +159,8 @@ def test_bounded_reads_never_request_bytes_past_the_bound(
     requested = _record_reads(monkeypatch)
 
     with pytest.raises(EnvironmentIncompatible):
-        getattr(inventory_module, reader)(path, 10)
+        getattr(inventory_module, reader)(path, 10, *(["metadata"] if reader == "_read_bounded"
+                                                    else []))
 
     assert requested and all(0 <= size <= 11 for size in requested)
 
@@ -167,8 +169,10 @@ def test_aggregate_growth_after_stat_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     env = _environment(tmp_path)
-    regular = _regular_files(env)
-    total = sum(path.stat().st_size for path in regular)
+    # pyvenv.cfg and METADATA are read once through their own small bounds, not streamed.
+    regular = [path for path in _regular_files(env)
+               if path.name not in {"pyvenv.cfg", "METADATA"}]
+    total = sum(path.stat().st_size for path in _regular_files(env))
     monkeypatch.setattr(inventory_module, "MAX_ENVIRONMENT_BYTES", total)
     real = inventory_module._file_digest
     calls: list[Path] = []
@@ -235,6 +239,63 @@ def test_broken_required_interpreter_links_are_incompatible(
 
     with pytest.raises(EnvironmentIncompatible, match="interpreter link"):
         inventory_environment(env)
+
+
+def _opens_of(monkeypatch: pytest.MonkeyPatch, target: Path) -> list[Path]:
+    real_open = Path.open
+    opened: list[Path] = []
+
+    def recording(self: Path, *args, **kwargs):
+        if self == target:
+            opened.append(self)
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", recording)
+    return opened
+
+
+def _small_text_file(env: Path, kind: str) -> Path:
+    if kind == "pyvenv":
+        return env / "pyvenv.cfg"
+    return env / SITE_PACKAGES / "numpy-2.3.3.dist-info/METADATA"
+
+
+@pytest.mark.parametrize("kind", ["pyvenv", "metadata"])
+def test_small_text_files_are_read_once_for_both_digest_and_parse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str,
+) -> None:
+    import hashlib
+
+    env = _environment(tmp_path)
+    target = _small_text_file(env, kind)
+    opened = _opens_of(monkeypatch, target)
+
+    inventory = inventory_environment(env)
+
+    assert len(opened) == 1
+    [entry] = [item for item in inventory.files if item.path == target.relative_to(env).as_posix()]
+    assert entry.sha256 == hashlib.sha256(target.read_bytes()).hexdigest()
+    assert entry.size == target.stat().st_size
+
+
+@pytest.mark.parametrize("kind", ["pyvenv", "metadata"])
+def test_oversized_small_text_files_are_refused_before_any_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str,
+) -> None:
+    env = _environment(tmp_path)
+    target = _small_text_file(env, kind)
+    if kind == "pyvenv":
+        target.write_text("include-system-site-packages = false\n" + "#" * (200 * 1024) + "\n")
+    else:
+        target.write_text("Name: numpy\nVersion: 2.3.3\n\n" + "x" * (2 * 1024 * 1024))
+    opened = _opens_of(monkeypatch, target)
+    hashed = _count_hashes(monkeypatch)
+
+    with pytest.raises(EnvironmentIncompatible, match="pyvenv" if kind == "pyvenv" else "metadata"):
+        inventory_environment(env)
+
+    assert target not in hashed
+    assert opened == []
 
 
 def _malformed_path(env: Path, shape: str) -> Path:
@@ -316,8 +377,9 @@ def test_bounded_metadata_read_never_reads_past_its_bound(tmp_path: Path) -> Non
     path.write_text("Name: numpy\nVersion: 2.3.3\n" + "x" * 100)
 
     with pytest.raises(EnvironmentIncompatible, match="metadata"):
-        inventory_module._read_metadata(path, 20)
-    assert inventory_module._read_metadata(path, path.stat().st_size).startswith("Name: numpy")
+        inventory_module._read_bounded(path, 20, "installed distribution metadata")
+    assert inventory_module._read_bounded(
+        path, path.stat().st_size, "metadata").startswith(b"Name: numpy")
 
 
 def test_non_utf8_metadata_is_incompatible(tmp_path: Path) -> None:

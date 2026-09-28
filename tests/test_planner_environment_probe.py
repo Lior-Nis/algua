@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from algua.primitives.bounded_subprocess import BoundedCompletion, OutputLimitExceeded
-from algua.registry import planner_environment_inventory as inventory_module
+from algua.registry import planner_environment_probe as probe_module
 from algua.registry.planner_environment import (
     EnvironmentIncompatible,
     current_interpreter_identity,
@@ -43,7 +43,7 @@ def test_probe_never_runs_installed_startup_hooks(tmp_path: Path) -> None:
 
     with pytest.raises(EnvironmentIncompatible):
         inventory_environment(env)
-    identity, has_algua = inventory_module._probe(env)
+    identity, has_algua = probe_module._probe(env)
 
     assert identity == current_interpreter_identity().to_dict()
     assert has_algua is False
@@ -83,7 +83,7 @@ def test_probe_runs_isolated_without_site_and_with_bounded_output(
         calls.append((list(argv), kwargs))
         return BoundedCompletion(0, _canonical(_valid_probe()), b"")
 
-    monkeypatch.setattr(inventory_module, "run_bounded", fake)
+    monkeypatch.setattr(probe_module, "run_bounded", fake)
     _verify(env)
 
     [(argv, kwargs)] = calls
@@ -111,7 +111,7 @@ def test_probe_seam_failures_are_incompatible(
     def fail(*_args, **_kwargs):
         raise failure
 
-    monkeypatch.setattr(inventory_module, "run_bounded", fail)
+    monkeypatch.setattr(probe_module, "run_bounded", fail)
     with pytest.raises(EnvironmentIncompatible):
         _verify(env)
 
@@ -121,7 +121,7 @@ def test_probe_nonzero_exit_is_incompatible(
 ) -> None:
     env = uv_like_venv(tmp_path / "env")
     monkeypatch.setattr(
-        inventory_module, "run_bounded",
+        probe_module, "run_bounded",
         lambda *_args, **_kwargs: BoundedCompletion(1, _canonical(_valid_probe()), b""),
     )
     with pytest.raises(EnvironmentIncompatible):
@@ -164,11 +164,11 @@ def _malformed_outputs() -> list[tuple[str, bytes]]:
 )
 def test_probe_parser_refuses_everything_but_one_canonical_identity_object(output: bytes) -> None:
     with pytest.raises(EnvironmentIncompatible):
-        inventory_module._parse_probe(output)
+        probe_module._parse_probe(output)
 
 
 def test_probe_parser_returns_identity_and_algua_flag() -> None:
-    identity, has_algua = inventory_module._parse_probe(_canonical(_valid_probe()))
+    identity, has_algua = probe_module._parse_probe(_canonical(_valid_probe()))
 
     assert identity == current_interpreter_identity().to_dict()
     assert has_algua is False
@@ -183,7 +183,7 @@ def test_probe_requires_exactly_one_canonical_identity_object(
 ) -> None:
     env = uv_like_venv(tmp_path / "env")
     monkeypatch.setattr(
-        inventory_module, "run_bounded",
+        probe_module, "run_bounded",
         lambda *_args, **_kwargs: BoundedCompletion(0, output, b""),
     )
     with pytest.raises(EnvironmentIncompatible):
@@ -195,7 +195,7 @@ def test_canonical_probe_output_is_accepted(
 ) -> None:
     env = uv_like_venv(tmp_path / "env")
     monkeypatch.setattr(
-        inventory_module, "run_bounded",
+        probe_module, "run_bounded",
         lambda *_args, **_kwargs: BoundedCompletion(0, _canonical(_valid_probe()), b""),
     )
     _verify(env)
