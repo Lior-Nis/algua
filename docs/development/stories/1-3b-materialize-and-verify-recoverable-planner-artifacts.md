@@ -363,15 +363,15 @@ These identities are non-cyclic. An environment-only change does not change `bun
   and state handed to the import system so executed code cannot commit a forged spec subclass or a
   same-shaped replacement loader with altered behavior
   [algua/primitives/module_commit_check.py:62]
-- [ ] [Review][Patch] Require every committed family entry and direct parent to be exactly
+- [x] [Review][Patch] Require every committed family entry and direct parent to be exactly
   `ModuleType`, not a subclass whose attribute access can conceal a divergent `__path__` or other
   import metadata from dictionary-based validation
   [algua/primitives/module_commit_check.py:51]
-- [ ] [Review][Patch] Refuse a second resolution of the same family name in one transaction so a
+- [x] [Review][Patch] Refuse a second resolution of the same family name in one transaction so a
   strategy cannot retain a stale first module object while a replacement is the object certified
   in `sys.modules` and on its parent
   [algua/primitives/module_refresh.py:180]
-- [ ] [Review][Patch] Snapshot and validate the behavior-relevant `ModuleSpec` bookkeeping state,
+- [x] [Review][Patch] Snapshot and validate the behavior-relevant `ModuleSpec` bookkeeping state,
   including loader state, location state, uninitialized submodules and the required final
   initialization flag, so a committed spec cannot retain forged import machinery state
   [algua/primitives/module_commit_check.py:21]
@@ -595,6 +595,38 @@ uv run lint-imports
   live spec instead of the recorded original. `module_refresh.py` is 246 lines and
   `module_commit_check.py` 90. The full 4,499-test root gate (`-p no:randomly`), ruff, mypy and
   all 28 import contracts pass.
+- Eleventh review round: 28 new cases; all 27 refusal cases fail on the baseline (`ee88840`). Patch
+  1 (exact `ModuleType`): 6 cases failed red (a member, the root, the package and the direct
+  parent swapped through `__class__` to a `ModuleType` subclass, a direct parent replaced by a
+  subclass instance, and a package subclass whose `__getattribute__('__path__')` exposes an
+  alternate tree). A standalone probe on the baseline confirmed that last case commits and a
+  post-commit lazy import of a new family name then loads from the alternate tree; the fixed
+  refresh rolls back and the restored family cannot reach it. Patch 2 (one resolution per name):
+  3 cases failed red (a helper imported, its entry deleted and re-imported through
+  `importlib.import_module` or `__import__`, and a subpackage member likewise), each committing a
+  stale first object beside the certified replacement; a case that swallows the refusal (it is an
+  `ImportError`) was added after green to prove the commit check still rejects the handed-out,
+  unbound module. A positive case (distinct names including a subpackage member, a repeated probe
+  for an absent name, and a second transaction over the same names) pins that only a second
+  hand-out is refused; its probe first used `from . import`, whose plain `ImportError` hid a
+  surviving mutation, and now uses `importlib.import_module` so the `ModuleNotFoundError`-only
+  handler exposes it. Patch 3 (spec bookkeeping): 14 cases failed red (loader state set, removed
+  or set on the root's own spec; `has_location` cleared, `_set_fileattr` an equal `int` or
+  removed; a forged pending submodule on a member or the package, the package's list replaced,
+  the list removed; `_initializing` stuck `True`, an equal `0` or removed, and the package's stuck
+  `True`); a removed `_cached` or `origin` escaped as a raw `AttributeError`, so spec fields are
+  now read from the instance dictionary (2 cases); an empty `list` subclass with a lying
+  `__contains__` was added after green because the package-replacement case is caught by the
+  original list's emptiness rather than identity. Fifteen mutations were run and all are
+  killed: each of the two exact-type checks (member, holder); dropping the second-resolution
+  check, keying it on recorded parent bindings, counting a miss as a resolution and sharing the
+  record across transactions; and for the bookkeeping, dropping the loader-state or location
+  check, equality instead of identity for the pending list, dropping its emptiness, a falsy
+  instead of exact `False` initialization flag, requiring the pre-load absence instead of the
+  completed state (21 ordinary refreshes fail), reading `cached` or `origin` through the
+  attribute, and recording a copy of the pending list. `module_refresh.py` is 252 lines and
+  `module_commit_check.py` 111. The full 4,527-test root gate (`-p no:randomly`), ruff, mypy and
+  all 28 import contracts pass.
 
 ### Completion Notes
 
@@ -747,6 +779,21 @@ uv run lint-imports
   the carved, protected `module_commit_check.py`. Mutation of the shared stdlib classes
   themselves stays inside the accepted in-process/no-sandbox residual; the import-quiescent
   precondition and every live, authority, deployment and capital wall are unchanged.
+- Eleventh review round complete: at commit every family entry and every direct parent it is
+  bound on must be exactly `ModuleType`, checked before any dictionary is read, so a subclass
+  (including one swapped in through `__class__`) cannot answer `__path__` or other import
+  metadata differently from the validated dictionary. The guard hands out each family name at
+  most once per transaction; a second resolution after executed code dropped the first entry
+  fails closed before a second spec exists, and even a swallowed refusal cannot commit. Before
+  handing a spec to importlib the guard records its bookkeeping (no loader state, the location
+  flag, its own empty uninitialized-submodules list object), and commit requires the completed
+  state: the same bookkeeping, the original list still empty and `_initializing` exactly `False`
+  (importlib sets it `True` while executing and `False` once the load completes), with every
+  spec field read from the instance dictionary and compared by identity or exact type. A
+  parent outside the family whose class was swapped in place is refused at commit but not
+  reverted by rollback; like any other in-process mutation of non-family state, that stays in
+  the accepted in-process/no-sandbox residual. The import-quiescent precondition and every live,
+  authority, deployment and capital wall are unchanged.
 
 ### File List
 
@@ -842,4 +889,8 @@ uv run lint-imports
 - 2026-09-28: Addressed the tenth-round review patch test-first (exact handed-out `ModuleSpec`
   class and original `SourceFileLoader` identity and instance state validated at commit) and
   carved the protected `module_commit_check.py`; the full 4,499-test root gate, ruff, mypy and
+  all 28 import contracts pass.
+- 2026-09-28: Addressed all 3 eleventh-round review patches test-first (exact `ModuleType` family
+  modules and direct parents, one resolution per family name per transaction, completed
+  `ModuleSpec` bookkeeping validated at commit); the full 4,527-test root gate, ruff, mypy and
   all 28 import contracts pass.
