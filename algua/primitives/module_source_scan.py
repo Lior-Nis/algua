@@ -12,6 +12,7 @@ import importlib.machinery
 import importlib.util
 import os
 from collections.abc import Iterator
+from contextlib import contextmanager
 from importlib.machinery import ModuleSpec
 from pathlib import Path
 
@@ -31,7 +32,9 @@ def require_unlinked(path: str, name: str) -> None:
     if os.pardir in Path(path).parts:
         raise ModuleRefreshError(f"{name!r} source path contains a parent traversal", name=name)
     lexical = Path(os.path.abspath(path))
-    if any(candidate.is_symlink() for candidate in (lexical, *lexical.parents)):
+    with _inspecting(name):
+        linked = any(candidate.is_symlink() for candidate in (lexical, *lexical.parents))
+    if linked:
         raise ModuleRefreshError(f"{name!r} source lies at or under a symlink", name=name)
 
 
@@ -40,6 +43,11 @@ def require_source_tree(location: str, name: str) -> None:
     directory or dangling) or an importable non-source module, scanning without following links:
     a dynamic import can reach any file, not only the static closure, the bytecode purge never
     descends into a link, and sourceless bytecode or an extension is never current source."""
+    with _inspecting(name):
+        _scan_tree(location, name)
+
+
+def _scan_tree(location: str, name: str) -> None:
     pending = [location]
     while pending:
         with os.scandir(pending.pop()) as entries:
@@ -53,6 +61,18 @@ def require_source_tree(location: str, name: str) -> None:
                     raise ModuleRefreshError(
                         f"{name!r} source tree contains an importable non-source module: "
                         f"{entry.name!r}", name=name)
+
+
+@contextmanager
+def _inspecting(name: str) -> Iterator[None]:
+    """Translate an ``OSError`` raised while inspecting the family tree into the stable refusal,
+    naming only the error class and errno, never a host path (the cause is not chained)."""
+    try:
+        yield
+    except OSError as exc:
+        raise ModuleRefreshError(
+            f"{name!r} source tree cannot be inspected ({type(exc).__name__}, errno {exc.errno})",
+            name=name) from None
 
 
 def _importable_non_source(file_name: str) -> bool:

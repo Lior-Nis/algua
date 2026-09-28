@@ -872,3 +872,83 @@ def test_a_forked_child_does_not_inherit_a_vanished_refresh_lock_owner() -> None
 
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert result.stdout.strip() == "0", "the forked child could not acquire the refresh lock"
+
+
+_HOST_PATH = "/host/secret/location"
+
+
+def _failing_inspection(monkeypatch, case: str, root: Path) -> None:
+    """Make family-tree inspection under ``root`` raise an ``OSError`` naming a host path."""
+    real_scandir, real_is_symlink = os.scandir, Path.is_symlink
+
+    def denied() -> OSError:
+        return PermissionError(13, "Permission denied", _HOST_PATH)
+
+    def within_root(path: object) -> bool:
+        return str(path).startswith(str(root))
+
+    if case == "scandir":
+        def scandir(path: object = "."):  # type: ignore[no-untyped-def]
+            if within_root(path):
+                raise denied()
+            return real_scandir(path)  # type: ignore[arg-type]
+        monkeypatch.setattr(os, "scandir", scandir)
+    elif case == "dir-entry":
+        class Entry:
+            def __init__(self, entry: os.DirEntry[str]) -> None:
+                self.name, self.path = entry.name, entry.path
+
+            def is_symlink(self) -> bool:
+                raise denied()
+
+        class Entries:
+            def __init__(self, path: object) -> None:
+                self._inner = real_scandir(path)  # type: ignore[arg-type]
+
+            def __enter__(self):  # type: ignore[no-untyped-def]
+                return (Entry(entry) for entry in self._inner)
+
+            def __exit__(self, *exc: object) -> None:
+                self._inner.close()
+
+        monkeypatch.setattr(
+            os, "scandir",
+            lambda path=".": Entries(path) if within_root(path) else real_scandir(path))
+    else:
+        def is_symlink(self: Path) -> bool:
+            if within_root(self):
+                raise denied()
+            return real_is_symlink(self)
+        monkeypatch.setattr(Path, "is_symlink", is_symlink)
+
+
+@pytest.mark.parametrize("case", ["scandir", "dir-entry", "path-lstat"])
+def test_family_tree_inspection_os_errors_fail_closed_with_bounded_diagnostics(
+        family, monkeypatch, case) -> None:
+    family.write("strat", "VALUE = 1\n")
+    importlib.import_module(f"{family.package}.strat")
+    before = family.entries()
+    _failing_inspection(monkeypatch, case, family.dir)
+
+    with pytest.raises(ModuleRefreshError) as caught:
+        _refresh(family)
+
+    message = str(caught.value)
+    assert "PermissionError" in message and len(message) <= 200
+    assert _HOST_PATH not in message and str(family.dir.parent.parent) not in message
+    assert caught.value.__cause__ is None and caught.value.__suppress_context__
+    after = family.entries()
+    assert set(after) == set(before) and all(after[k] is v for k, v in before.items())
+
+
+def test_a_strategy_whose_family_tree_cannot_be_inspected_is_not_found(monkeypatch) -> None:
+    from algua.strategies.loader import StrategyNotFound, _index, load_strategy_config
+
+    dotted = _index()["cross_sectional_momentum"]
+    family_dir = Path(importlib.util.find_spec(dotted.rsplit(".", 1)[0]).origin).parent
+    _failing_inspection(monkeypatch, "scandir", family_dir)
+
+    with pytest.raises(StrategyNotFound) as caught:
+        load_strategy_config("cross_sectional_momentum")
+
+    assert "PermissionError" in str(caught.value) and _HOST_PATH not in str(caught.value)
