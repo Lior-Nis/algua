@@ -433,7 +433,8 @@ These identities are non-cyclic. An environment-only change does not change `bun
 - [x] [Review][Patch] Replace `os.walk` inventory traversal with a fail-closed streaming walk that
   bounds every discovered entry and retained directory before allocation can exceed the protected
   limit, including empty-directory fanout and one directory with an enormous child list
-  [algua/primitives/strict_walk.py:18]
+  [algua/primitives/bounded_walk.py:50; consumers algua/registry/artifact_store.py:31,
+  algua/registry/environment_store.py:34, algua/registry/planner_environment_inventory.py:154]
 - [x] [Review][Patch] Require every locked registry package to have canonical non-empty `name` and
   `version` identities and make locked-wheel extraction total, so malformed committed locks stay
   inside the non-retryable `EnvironmentIncompatible` boundary instead of raising `KeyError`
