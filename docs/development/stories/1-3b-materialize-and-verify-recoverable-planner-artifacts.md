@@ -642,6 +642,36 @@ These identities are non-cyclic. An environment-only change does not change `bun
   element, so a rebind required for evaluation cannot be merged with an impossible false path
   (Todoist 6hfPmMMpfmMvppxG) [tests/primitives/test_scoped_walk.py:495]
 
+#### Review findings against `48f9934` (2026-09-28)
+
+- [ ] [Review][Patch] Keep a lazy body's entry state path-correlated instead of joining the
+  enclosing scope's final bindings into every generator and coroutine, so a raw alias reached
+  only on a sibling path where the object does not exist cannot create a false positive (Todoist
+  6hfPmMP337jqHpGG) [tests/primitives/test_scoped_walk.py:446]
+- [ ] [Review][Patch] Preserve a returned lazy object's captured closure environment separately
+  from later caller bindings, so a factory-local shadow cannot be overwritten by a caller-local
+  rebind while genuine globals still retain Python's late-binding behavior (Todoist
+  6hfPmMMPmhrfqvjG) [tests/primitives/test_scoped_walk.py:535]
+- [ ] [Review][Patch] Propagate returned lazy objects from feasible return states rather than a
+  syntax-only name-to-one-node scan: ignore unreachable returns, resolve simple aliases and
+  conditional results, and retain every definition that can reach a return (Todoist
+  6hfPvjHrFwhGvmxp) [tests/primitives/test_scoped_walk.py:535]
+- [ ] [Review][Patch] Keep lazy objects created only as discarded comprehension temporaries
+  confined to comprehension evaluation while preserving objects that actually escape in the
+  result or through a modeled side effect (Todoist 6hfPvjP4PqJ74J2G)
+  [tests/primitives/test_scoped_walk.py:573]
+- [ ] [Review][Patch] Evaluate a class comprehension's first iterable in class state and its body
+  in lexical/module state, matching Python's nested comprehension scope so class-local shadows
+  cannot hide a raw module alias (Todoist 6hfPvjR73hhFw8fG)
+  [tests/primitives/test_scoped_walk.py:573]
+- [ ] [Review][Patch] Separate per-object lazy environments from the shared bindings map and cache
+  repeated syntax summaries where needed, preventing the measured superlinear scan growth as live
+  lazy objects accumulate (Todoist 6hfPvjhRQ6jVqfgp)
+  [tests/primitives/test_scoped_walk.py:516]
+- [ ] [Review][Patch] Classify long unary-`not` chains iteratively or with an explicit safe bound,
+  so a valid module cannot crash repository hygiene with `RecursionError` (Todoist
+  6hfPWRXC8MMwMrcG) [tests/primitives/test_scoped_walk.py:305]
+
 ## Development notes
 
 - Prefer focused modules: `registry/artifact_contract.py`, `registry/frozen_source.py`,
