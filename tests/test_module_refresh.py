@@ -952,3 +952,25 @@ def test_a_strategy_whose_family_tree_cannot_be_inspected_is_not_found(monkeypat
         load_strategy_config("cross_sectional_momentum")
 
     assert "PermissionError" in str(caught.value) and _HOST_PATH not in str(caught.value)
+
+
+@pytest.mark.parametrize("outcome", ["success", "failure"])
+def test_refresh_never_copies_unrelated_module_namespaces(family, monkeypatch, outcome) -> None:
+    """Rollback state is ``sys.modules`` plus the direct parent bindings imports change, so the
+    refresh cost does not scale with every global of every loaded (scientific) module."""
+    from types import ModuleType
+
+    class Unrelated(ModuleType):
+        @property
+        def __dict__(self):  # type: ignore[override]
+            raise AssertionError("the refresh read an unrelated module's namespace")
+
+    name = f"mrunrelated_{uuid.uuid4().hex[:10]}"
+    monkeypatch.setitem(sys.modules, name, Unrelated(name))
+    family.write("strat", "VALUE = 1\n" if outcome == "success" else "raise RuntimeError('boom')\n")
+
+    if outcome == "success":
+        assert refresh_package_closure(family.package, f"{family.package}.strat").VALUE == 1
+    else:
+        with pytest.raises(RuntimeError, match="boom"):
+            _refresh(family)

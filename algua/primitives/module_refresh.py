@@ -101,15 +101,16 @@ def refresh_package_closure(package: str, root: str) -> ModuleType:
 
 def _refresh_locked(package: str, root: str) -> ModuleType:
     """Snapshot module state BEFORE package discovery (``find_spec`` imports cold parents), so any
-    failure from preflight to the fresh import, including a ``BaseException``, restores it."""
+    failure from preflight to the fresh import, including a ``BaseException``, restores it. The
+    snapshot is ``sys.modules`` itself plus, recorded by the guard, the direct parent binding of
+    each module the import system loads; no module namespace is copied wholesale."""
     before = dict(sys.modules)
-    namespaces = _namespaces(before)
     guard = _ImportGuard()
     sys.meta_path.insert(0, guard)
     try:
         return _refresh_attempt(package, root, guard)
     except BaseException:
-        _restore_modules(before, namespaces, guard.bindings)
+        _restore_modules(before, guard.bindings)
         raise
     finally:
         if guard in sys.meta_path:
@@ -164,10 +165,9 @@ def _exact_search_path(package: str, location: str, name: str) -> list[str]:
 def _require_confined_search_paths(package: str, location: str) -> None:
     """Before commit, every fresh family module that is a package must still search exactly its
     prevalidated directory, so a later lazy import cannot use a path extended during the refresh."""
-    for name, module in list(sys.modules.items()):
-        search = getattr(module, "__dict__", {}).get("__path__", _ABSENT)
-        if within(name, package) and search is not _ABSENT and (
-                search != _exact_search_path(package, location, name)):
+    for name in [name for name in sys.modules if within(name, package)]:
+        search = getattr(sys.modules[name], "__dict__", {}).get("__path__", _ABSENT)
+        if search is not _ABSENT and search != _exact_search_path(package, location, name):
             raise ModuleRefreshError(
                 f"{name!r} search path deviates from its prevalidated family root", name=name)
 
@@ -193,21 +193,11 @@ def _refresh_attempt(package: str, root: str, guard: _ImportGuard) -> ModuleType
     return fresh
 
 
-def _namespaces(modules: dict[str, ModuleType]) -> dict[str, dict[str, object]]:
-    """A shallow copy of every module's own ``__dict__`` (read directly, so a module-level
-    ``__getattr__`` cannot manufacture a binding), keyed by module name."""
-    return {
-        name: dict(module.__dict__) for name, module in modules.items()
-        if isinstance(module, ModuleType)
-    }
-
-
 def _restore_modules(
-        before: dict[str, ModuleType], namespaces: dict[str, dict[str, object]],
-        bindings: dict[str, tuple[ModuleType, object]]) -> None:
+        before: dict[str, ModuleType], bindings: dict[str, tuple[ModuleType, object]]) -> None:
     """Reinstate exactly ``before``'s ``sys.modules`` entries (dropping every entry the attempt
-    introduced or replaced), then restore each affected module's direct parent binding to its
-    snapshotted state: the previous value, or absence."""
+    introduced or replaced), then restore every direct parent binding an import changed to its
+    recorded state: the previous value, or absence."""
     affected = {
         name for name in {*sys.modules, *before}
         if sys.modules.get(name, _ABSENT) is not before.get(name, _ABSENT)
@@ -216,21 +206,12 @@ def _restore_modules(
         sys.modules.pop(name, None)
         if name in before:
             sys.modules[name] = before[name]
-    for name in affected:
-        parent_name, _, child = name.rpartition(".")
-        holder = sys.modules.get(parent_name) if parent_name else None
-        if not isinstance(holder, ModuleType) or parent_name not in namespaces:
-            continue  # a parent the attempt introduced was discarded with its bindings
-        _rebind(holder, child, namespaces[parent_name].get(child, _ABSENT))
     for name, (holder, previous) in bindings.items():
-        _rebind(holder, name.rpartition(".")[2], previous)
-
-
-def _rebind(holder: ModuleType, child: str, previous: object) -> None:
-    if previous is _ABSENT:
-        holder.__dict__.pop(child, None)
-    else:
-        holder.__dict__[child] = previous
+        child = name.rpartition(".")[2]
+        if previous is _ABSENT:
+            holder.__dict__.pop(child, None)
+        else:
+            holder.__dict__[child] = previous
 
 
 def _purge_package_bytecode(location: str) -> None:
