@@ -398,6 +398,34 @@ These identities are non-cyclic. An environment-only change does not change `bun
 - [x] [Review][Patch] Make the fourteenth-round pointer correction internally consistent by naming
   the actual membership guard at `module_commit_check.py:105`, not the `optional` tuple at line 104
   [docs/development/stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md:391]
+- [ ] [Review][Patch] Publish bundle and environment directories with an atomic no-replace primitive
+  so the final operation itself cannot replace a destination created after the existence check;
+  verify an `EEXIST` winner and fail closed when no supported no-replace primitive exists
+  [algua/registry/artifact_store.py:165]
+- [ ] [Review][Patch] Make bundle and environment tree walks fail closed on traversal errors and
+  enforce the protected bundle file-count bound while inventorying, before memory can grow past it
+  [algua/registry/artifact_store.py:82]
+- [ ] [Review][Patch] Make installed-environment inventory complete and resource-bounded: reject
+  uninventoried empty directories, cap file count/per-file/aggregate bytes, and read distribution
+  metadata through an explicit byte bound
+  [algua/registry/planner_environment_inventory.py:88]
+- [ ] [Review][Patch] Run the final interpreter probe without installed startup hooks, bound both
+  output streams, explicitly expose only the environment import roots needed for the `algua`
+  check, and reject non-object or non-canonical probe JSON through `EnvironmentIncompatible`
+  [algua/registry/planner_environment_inventory.py:146]
+- [ ] [Review][Patch] Bound uv version/create/sync output and normalize launch-time `OSError`
+  failures so no provisioning command can exhaust memory or escape the typed incompatibility
+  boundary despite its timeout
+  [algua/registry/planner_environment.py:49]
+- [ ] [Review][Patch] Classify retryable environment unavailability only from positive evidence of
+  a locked compatible-wheel acquisition outage using bounded stdout and stderr; ambiguous timeout,
+  checksum, TLS/configuration and malformed wheel-URL failures must default to non-retryable
+  incompatibility
+  [algua/registry/planner_environment.py:97]
+- [ ] [Review][Patch] Exercise real offline final-locator verification without checkout, Git, uv or
+  network, plus per-digest-lock and post-publication final-verification fault boundaries, instead
+  of satisfying the mandatory matrix through verifier stubs
+  [tests/test_frozen_artifact_verification.py:20]
 
 ## Development notes
 
