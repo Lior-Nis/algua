@@ -805,3 +805,33 @@ def test_family_modules_resolve_only_as_source_from_the_prevalidated_root(
     assert not marker.exists()
     after = family.entries()
     assert set(after) == set(before) and all(after[k] is v for k, v in before.items())
+
+
+def test_a_nested_refresh_on_the_same_thread_is_refused(family) -> None:
+    """A refresh started from a module body the outer refresh is executing would drop and rebuild
+    the family underneath the outer transaction, so the re-entrant lock must not admit it."""
+    family.write("helper", "VALUE = 1\n")
+    family.write("strat", "from .helper import VALUE\n")
+    importlib.import_module(f"{family.package}.strat")
+    before = family.entries()
+    family.write("other", "VALUE = 2\n")
+    family.write("strat", (
+        "from algua.primitives.module_refresh import refresh_package_closure\n"
+        f"refresh_package_closure({family.package!r}, {family.package + '.other'!r})\n"))
+
+    with pytest.raises(ModuleRefreshError, match="nested"):
+        _refresh(family)
+
+    after = family.entries()
+    assert set(after) == set(before) and all(after[k] is v for k, v in before.items())
+
+
+def test_a_serialized_import_inside_a_refresh_on_the_same_thread_proceeds(family) -> None:
+    family.write("other", "VALUE = 2\n")
+    family.write("strat", (
+        "from algua.primitives.module_refresh import serialized_import\n"
+        f"VALUE = serialized_import({family.package + '.other'!r}).VALUE\n"))
+
+    root = refresh_package_closure(family.package, f"{family.package}.strat")
+
+    assert root.VALUE == 2 and family.mod("other").VALUE == 2

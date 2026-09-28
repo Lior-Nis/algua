@@ -48,6 +48,8 @@ __all__ = ["ModuleRefreshError", "refresh_package_closure", "serialized_import"]
 _ABSENT = object()
 # Re-entrant: a supported caller that runs inside a refresh on the same thread must not self-block.
 _REFRESH_LOCK = threading.RLock()
+# Per-thread: set while THIS thread runs a refresh transaction, so a nested refresh is refused.
+_TRANSACTION = threading.local()
 
 
 def serialized_import(name: str) -> ModuleType:
@@ -70,11 +72,20 @@ def refresh_package_closure(package: str, root: str) -> ModuleType:
     were never touched.
 
     The private refresh lock is held from preflight to commit or rollback, so a supported caller
-    waits for the final state; other imports must be quiescent (see the module docstring)."""
+    waits for the final state; other imports must be quiescent (see the module docstring). A
+    refresh started on the same thread from inside a running transaction fails closed, while a
+    same-thread ``serialized_import`` stays re-entrant."""
     if not root.startswith(package + "."):
         raise ValueError(f"{root!r} is not inside package {package!r}")
+    if getattr(_TRANSACTION, "active", False):
+        raise ModuleRefreshError(
+            f"nested refresh of {package!r} inside a running refresh transaction", name=root)
     with _REFRESH_LOCK:
-        return _refresh_locked(package, root)
+        _TRANSACTION.active = True
+        try:
+            return _refresh_locked(package, root)
+        finally:
+            _TRANSACTION.active = False
 
 
 def _refresh_locked(package: str, root: str) -> ModuleType:
