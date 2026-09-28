@@ -425,7 +425,25 @@ These identities are non-cyclic. An environment-only change does not change `bun
 - [x] [Review][Patch] Exercise real offline final-locator verification without checkout, Git, uv or
   network, plus per-digest-lock and post-publication final-verification fault boundaries, instead
   of satisfying the mandatory matrix through verifier stubs
-  [tests/test_frozen_artifact_verification.py:20]
+  [tests/test_frozen_artifact_offline.py:187]
+- [x] [Review][Patch] Reject non-normative `.pth` path entries and executable startup hooks before
+  accepting an installed environment, so the `-I -S` probe cannot certify an environment whose
+  ordinary site startup would expose an external or checkout `algua`
+  [algua/registry/planner_environment_inventory.py:37]
+- [x] [Review][Patch] Replace `os.walk` inventory traversal with a fail-closed streaming walk that
+  bounds every discovered entry and retained directory before allocation can exceed the protected
+  limit, including empty-directory fanout and one directory with an enormous child list
+  [algua/primitives/strict_walk.py:18]
+- [x] [Review][Patch] Require every locked registry package to have canonical non-empty `name` and
+  `version` identities and make locked-wheel extraction total, so malformed committed locks stay
+  inside the non-retryable `EnvironmentIncompatible` boundary instead of raising `KeyError`
+  [algua/registry/planner_environment.py:111]
+- [x] [Review][Patch] Validate each environment file's canonical bounded relative path before
+  hashing its content, so an overlong or malformed path cannot force a large read before refusal
+  [algua/registry/planner_environment_inventory.py:159]
+- [x] [Review][Patch] Correct the offline-evidence finding's implementation pointer to the real
+  end-to-end acceptance test in `test_frozen_artifact_offline.py`
+  [docs/development/stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md:425]
 - [ ] [Review][Patch] Pin a `uv sync` argv that the repository's uv 0.9.26 accepts: `--no-env-file`
   is a `uv run` option, so the normative sync argv exits with `unexpected argument
   '--no-env-file'` and real locked provisioning can never succeed. Correcting it changes the keyed
@@ -769,6 +787,28 @@ uv run lint-imports
   read, a duplicate-key hook subsumed by canonical equality); eleven initial survivors were
   closed with new cases. The full 4,751-test root gate (`-p no:randomly`), ruff, mypy and all 28
   import contracts pass.
+- Chunk-2 patch review (range `932cf2e..ae3c4aa`, 5 admitted follow-ups): every code patch first
+  failed red. Lock: 29 malformed name/version identities were accepted, extraction leaked raw
+  `KeyError`, `TypeError`, `UnicodeDecodeError` and `TOMLDecodeError`, and `provision_environment`
+  ran uv for a lock missing `version` and then escaped `KeyError: 'version'`. Paths: six
+  malformed shapes (overlong, undecodable, non-NFC, trailing space or dot, backslash) were hashed
+  first and then leaked a plain `ValueError`. Traversal: `os.walk` pulled all 300 names of one
+  fanout directory against bounds of about ten, and empty-directory fanout surfaced only after
+  full traversal. Startup: 32 cases were accepted, including an environment whose ordinary
+  startup demonstrably imports an external `algua` through a `.pth` path entry. uv 0.9.26's
+  `_virtualenv.pth` is `import _virtualenv` with no trailing newline, and its 4,342-byte shim
+  only patches distutils/setuptools install configuration; both are pinned by digest, a
+  conformance test compares them with a real `uv venv` when uv 0.9.26 is present, and the real
+  uv-built locked environment (23,849 files, 142 distributions) is accepted. New directory bounds
+  are 25,000 for environments (3,147 locked, 3,302 dev superset) and 10,000 for bundles (36 in the
+  source tree). Implementations: `planner_environment.py:104` (`locked_wheels`),
+  `planner_environment_inventory.py:175` (path before read), `bounded_walk.py:36` and
+  `planner_environment_startup.py:36`. 47 mutations were run: 44 are killed, two exposed
+  redundant guards that were removed (a lock type check subsumed by the identity constructor, a
+  directory path check subsumed by entry paths) and one is equivalent (the sync-failure path only
+  ever sees a lock already revalidated at the key recheck); four initial traversal survivors
+  were closed with new cases. The full 4,863-test root gate (`-p no:randomly`), ruff, mypy, all
+  28 import contracts and `git diff --check` pass.
 
 ### Completion Notes
 
@@ -977,6 +1017,16 @@ uv run lint-imports
   1.3c's runtime import policy should decide whether site processing is permitted. The keyed
   argv, identity schemas, golden digests and every live, authority, deployment and capital wall
   are unchanged; the `--no-env-file` incompatibility is recorded as an open finding.
+- Chunk-2 patch review complete: committed locks must name every registry package canonically
+  and extraction is total, so malformed locks stay `EnvironmentIncompatible` and never reach uv;
+  environment paths are validated before any read; every artifact and environment traversal
+  streams entries through the protected `bounded_walk`, counting each file and directory and the
+  encoded path length before retaining or descending; and an environment is accepted only if
+  ordinary site startup exposes nothing beyond its own site-packages (the pinned uv shim, no
+  other `.pth`, no customize hooks, system site-packages disabled), which closes the `.pth`
+  residual recorded for the previous round. The offline-evidence finding now points at the real
+  end-to-end test. The keyed argv, identity schemas, golden digests and every live, authority,
+  deployment and capital wall are unchanged; the `--no-env-file` finding remains open.
 
 ### File List
 
@@ -1005,9 +1055,10 @@ uv run lint-imports
 - `algua/primitives/module_source_scan.py`
 - `algua/primitives/module_commit_check.py`
 - `algua/primitives/no_replace.py`
-- `algua/primitives/strict_walk.py`
+- `algua/primitives/bounded_walk.py`
 - `algua/primitives/bounded_subprocess.py`
 - `algua/registry/planner_environment_outage.py`
+- `algua/registry/planner_environment_startup.py`
 - `CODEOWNERS`
 - `docs/development/sprint-status.yaml`
 - `docs/contracts/cli-error-envelope.md`
@@ -1026,12 +1077,15 @@ uv run lint-imports
 - `tests/_venv_fixture.py`
 - `tests/_walk_faults.py`
 - `tests/primitives/test_bounded_subprocess.py`
-- `tests/primitives/test_strict_walk.py`
+- `tests/primitives/test_bounded_walk.py`
+- `tests/fixtures/uv-0.9.26-virtualenv-shim.py.txt`
 - `tests/test_frozen_artifact_offline.py`
 - `tests/test_no_replace.py`
 - `tests/test_planner_environment_bounds.py`
+- `tests/test_planner_environment_lock.py`
 - `tests/test_planner_environment_outage.py`
 - `tests/test_planner_environment_probe.py`
+- `tests/test_planner_environment_startup.py`
 - `tests/test_planner_environment_uv.py`
 
 ### Change Log
@@ -1111,3 +1165,8 @@ uv run lint-imports
   and fault acceptance) with three protected primitives and a protected outage recognizer;
   recorded the uv 0.9.26 `--no-env-file` argv incompatibility as an open finding; the full
   4,751-test root gate, ruff, mypy and all 28 import contracts pass.
+- 2026-09-28: Addressed all 5 chunk-2 patch-review follow-ups test-first (canonical committed-lock
+  identities with total extraction, environment paths validated before reading, a protected
+  streaming bounded traversal replacing `strict_walk`, a protected pinned site-startup policy,
+  corrected offline-evidence pointer); the full 4,863-test root gate, ruff, mypy, all 28 import
+  contracts and `git diff --check` pass.
