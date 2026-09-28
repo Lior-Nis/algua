@@ -1282,6 +1282,11 @@ def test_a_fresh_family_graph_that_is_not_exactly_bound_never_commits(family, ca
     resolved from the exact root, bound identically in ``sys.modules`` and on its direct parent,
     with a package keeping exactly its confined ``__path__`` and a module having none; anything
     else rolls the complete transaction back."""
+    _assert_never_commits(family, _UNCOMMITTABLE[case])
+
+
+def _assert_never_commits(family, source: str) -> None:
+    """Refreshing into ``source`` fails closed and restores every prior family entry and binding."""
     (family.dir / "helper").mkdir()
     (family.dir / "helper" / "inner.py").write_text("VALUE = 1\n")
     family.write("helper", "VALUE = 1\n")
@@ -1289,7 +1294,7 @@ def test_a_fresh_family_graph_that_is_not_exactly_bound_never_commits(family, ca
     importlib.import_module(f"{family.package}.strat")
     before = family.entries()
     parent_binding = vars(sys.modules[family.top])["fam"]
-    family.write("strat", _UNCOMMITTABLE[case])
+    family.write("strat", source)
 
     with pytest.raises(ModuleRefreshError):
         _refresh(family)
@@ -1535,3 +1540,47 @@ def test_a_relative_search_entry_under_a_vanished_working_directory_is_a_bounded
 
     with pytest.raises(ModuleRefreshError, match=r"cannot be inspected \(FileNotFoundError"):
         refresh_package_closure("mrgone_pkg", "mrgone_pkg.strat")
+
+
+_SPEC_MUTATIONS = {
+    "loader-type": (
+        "import importlib.machinery\nfrom . import helper\n"
+        "Loader = type('Loader', (importlib.machinery.SourceFileLoader,), {})\n"
+        "helper.__loader__ = helper.__spec__.loader = Loader(helper.__name__, helper.__file__)\n"),
+    "loader-name": "from . import helper\nhelper.__spec__.loader.name = 'json'\n",
+    "loader-path": "from . import helper\nhelper.__spec__.loader.path = '/elsewhere/helper.py'\n",
+    "spec-name": "from . import helper\nhelper.__spec__.name = 'json'\n",
+    "spec-origin": "from . import helper\nhelper.__spec__.origin = '/elsewhere/helper.py'\n",
+    "spec-cached": "from . import helper\nhelper.__spec__.cached = '/elsewhere/helper.pyc'\n",
+    "own-spec-origin": "__spec__.origin = '/elsewhere/strat.py'\n",
+    "package-spec-search-rebound": (
+        "import sys\n"
+        "sys.modules[__package__].__spec__.submodule_search_locations = ['/elsewhere']\n"),
+    "module-spec-gains-search": (
+        "from . import helper\nhelper.__spec__.submodule_search_locations = []\n"),
+    "module-name": "from . import helper\nhelper.__name__ = 'json'\n",
+    "module-package": "from . import helper\nhelper.__package__ = 'json'\n",
+    "package-package": "import sys\nsys.modules[__package__].__package__ = 'json'\n",
+    "module-loader": (
+        "import importlib.machinery\nfrom . import helper\n"
+        "helper.__loader__ = importlib.machinery.SourceFileLoader(helper.__name__, helper.__file__)"
+        "\n"),
+    "module-file": "from . import helper\nhelper.__file__ = '/elsewhere/helper.py'\n",
+    "module-file-removed": "from . import helper\ndel helper.__file__\n",
+    "module-file-str-subclass": (
+        "from . import helper\nhelper.__file__ = type('S', (str,), {})(helper.__file__)\n"),
+    "module-cached": "from . import helper\nhelper.__cached__ = '/elsewhere/helper.pyc'\n",
+    "package-path-str-subclass": (
+        "import sys\nsearch = sys.modules[__package__].__path__\n"
+        "search[0] = type('S', (str,), {})(search[0])\n"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_SPEC_MUTATIONS))
+def test_in_place_mutation_of_an_executed_source_spec_never_commits(family, case) -> None:
+    """The guard records immutable facts of every source spec it hands out; at commit the SAME
+    spec object must still carry them (exact ``SourceFileLoader`` type, loader name and path, spec
+    name, origin, cache and search locations) and its module the corresponding ``__name__``,
+    ``__package__``, ``__loader__``, ``__file__`` and ``__cached__``, so code that mutated the
+    spec in place, which an identity check alone accepts, rolls the transaction back."""
+    _assert_never_commits(family, _SPEC_MUTATIONS[case])

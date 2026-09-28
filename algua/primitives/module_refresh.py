@@ -35,9 +35,10 @@ import importlib.util
 import os
 import sys
 import threading
-from importlib.machinery import ModuleSpec
+from importlib.machinery import ModuleSpec, SourceFileLoader
 from pathlib import Path
 from types import ModuleType
+from typing import NamedTuple
 
 from algua.primitives.module_source_scan import (
     ModuleRefreshError,
@@ -152,7 +153,7 @@ class _ImportGuard:
     def __init__(self) -> None:
         self.bindings: dict[str, tuple[ModuleType, object]] = {}
         self.family: tuple[str, str] | None = None  # (package, prevalidated location)
-        self.specs: dict[str, ModuleSpec] = {}  # every family spec handed to the import system
+        self.specs: dict[str, _Facts] = {}  # every family spec handed out, with its facts
 
     def find_spec(
             self, fullname: str, path: object = None, target: object = None) -> ModuleSpec | None:
@@ -172,7 +173,9 @@ class _ImportGuard:
         spec = source_spec(package, location, fullname)
         if spec is None:
             raise ModuleNotFoundError(f"No module named {fullname!r}", name=fullname)
-        self.specs[fullname] = spec
+        found = spec.submodule_search_locations
+        self.specs[fullname] = _Facts(
+            spec, fullname, spec.origin, spec.cached, None if found is None else tuple(found))
         return spec
 
 
@@ -181,31 +184,59 @@ def _exact_search_path(package: str, location: str, name: str) -> list[str]:
     return [os.path.join(location, *name.split(".")[package.count(".") + 1:])]
 
 
-def _require_committed_family(package: str, location: str, specs: dict[str, ModuleSpec]) -> None:
-    """Before commit, the fresh family graph must be exactly what the guard resolved: every family
-    entry in ``sys.modules`` and every module the guard handed out is a ``ModuleType`` carrying
-    that exact source spec, bound identically in ``sys.modules`` and on its direct parent; a
-    package still searches exactly its prevalidated directory (so a later lazy import cannot use a
-    path extended during the refresh) and a module has no search path at all."""
+class _Facts(NamedTuple):
+    """A source spec's facts, recorded when handed out: executed code can mutate it in place."""
+    spec: ModuleSpec
+    name: str
+    origin: str | None
+    cached: str | None
+    search: tuple[str, ...] | None
+
+
+def _require_committed_family(package: str, specs: dict[str, _Facts]) -> None:
+    """Before commit, every family entry in ``sys.modules`` and every module the guard handed out
+    is a ``ModuleType`` carrying that exact source spec, bound identically in ``sys.modules`` and
+    on its direct parent, and the spec and module still carry its recorded facts (``_intact``)."""
     for name in sorted({*specs, *(name for name in sys.modules if within(name, package))}):
-        module, spec = sys.modules.get(name), specs.get(name)
+        module, facts = sys.modules.get(name), specs.get(name)
         parent_name, _, child = name.rpartition(".")
         holder = sys.modules.get(parent_name) if parent_name else None
-        bound = (
-            spec is not None and isinstance(module, ModuleType)
-            and vars(module).get("__spec__") is spec
+        if not (
+            facts is not None and isinstance(module, ModuleType)
+            and vars(module).get("__spec__") is facts.spec
             and (isinstance(holder, ModuleType) or not parent_name)
             and (holder is None or vars(holder).get(child) is module)
-        )
-        if not bound or spec is None:
+            and _intact(module, facts)
+        ):
             raise ModuleRefreshError(
-                f"{name!r} is not bound as its fresh source module at commit", name=name)
-        search = vars(module).get("__path__", _ABSENT)
-        expected = (_ABSENT if spec.submodule_search_locations is None
-                    else _exact_search_path(package, location, name))
-        if search != expected:
-            raise ModuleRefreshError(
-                f"{name!r} search path deviates from its prevalidated family root", name=name)
+                f"{name!r} is not bound as its fresh source module with its resolved spec, "
+                "metadata and search path at commit", name=name)
+
+
+def _intact(module: ModuleType, facts: _Facts) -> bool:
+    """Whether ``facts.spec`` is still an exact ``SourceFileLoader`` spec with the recorded loader
+    name and path, name, origin, cache and search locations, and ``module`` still has the matching
+    ``__name__``, ``__package__``, ``__loader__``, ``__file__``, ``__cached__`` and ``__path__``."""
+    spec, attrs, loader = facts.spec, vars(module), facts.spec.loader
+    if type(loader) is not SourceFileLoader or attrs.get("__loader__") is not loader:
+        return False  # exactly the stdlib source loader (never a subclass), shared by the module
+    search = None if facts.search is None else list(facts.search)
+    return all(_exact(value, expected) for value, expected in (
+        (getattr(loader, "name", None), facts.name), (getattr(loader, "path", None), facts.origin),
+        (spec.name, facts.name), (spec.origin, facts.origin), (spec.cached, facts.cached),
+        (spec.submodule_search_locations, search), (attrs.get("__name__"), facts.name),
+        (attrs.get("__package__"), facts.name if search else facts.name.rpartition(".")[0]),
+        (attrs.get("__file__"), facts.origin), (attrs.get("__cached__"), facts.cached),
+        (attrs.get("__path__", _ABSENT), _ABSENT if search is None else search)))
+
+
+def _exact(value: object, expected: object) -> bool:
+    """Equal with the exact expected type at every level, so a permissive ``__eq__`` cannot pass."""
+    if type(value) is not type(expected):
+        return False
+    if isinstance(value, list) and isinstance(expected, list):
+        return len(value) == len(expected) and all(map(_exact, value, expected))
+    return value == expected
 
 
 def _refresh_attempt(package: str, root: str, guard: _ImportGuard) -> ModuleType:
@@ -220,7 +251,7 @@ def _refresh_attempt(package: str, root: str, guard: _ImportGuard) -> ModuleType
         del sys.modules[name]
     guard.family = (package, location)
     fresh = importlib.import_module(root)
-    _require_committed_family(package, location, guard.specs)
+    _require_committed_family(package, guard.specs)
     return fresh
 
 
