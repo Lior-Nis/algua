@@ -4,7 +4,7 @@ baseline_commit: 24c4a2bc138822c5a74ea0ed91d6d5f03c402d97
 
 # Story 1.3b: Materialize and verify recoverable planner artifacts
 
-Status: review
+Status: in-progress
 
 Prepared: 2026-09-27. Baseline: Story 1.3a merge `24c4a2b` (PR #674).
 Epic: 1. Parent: Story 1.3. Requirements: FR4, FR6, FR9–FR10 and NFR1, NFR3–NFR8.
@@ -736,6 +736,26 @@ These identities are non-cyclic. An environment-only change does not change `bun
   [tests/primitives/test_scoped_walk.py:549]
 - [x] [Review][Patch] Exclude all function-owned locals, not only parameters, from return/effect
   summary cache entries (Todoist 6hfQqH4rMMvxq9JG) [tests/primitives/test_scoped_walk.py:824]
+
+#### Rescue findings against `89b9754` (2026-09-28)
+
+- [ ] [Review][Patch] Track lexical shadows independently from relevance-only bindings before
+  granting `bool`/`next`/`any`/`all` non-retaining exemptions (Todoist 6hfRG3rqrGgFGWfp)
+  [tests/primitives/test_scoped_walk.py:572]
+- [ ] [Review][Patch] Preserve `global` versus `nonlocal` ownership in helper-effect summaries and
+  apply writes to the declared lexical owner (Todoist 6hfRG3vGHf7Jp22G)
+  [tests/primitives/test_scoped_walk.py:1063]
+- [ ] [Review][Patch] Make helper argument binding definition-time-correct and conservative for
+  conditionals, starred arguments, and supplied-but-unresolved values (Todoist 6hfRG3rM9F8mQjmp)
+  [tests/primitives/test_scoped_walk.py:916]
+- [ ] [Review][Patch] Seed declared names from caller state and infer definite clears only from
+  feasible exit states (Todoist 6hfRG3xrpw3Pm5gG) [tests/primitives/test_scoped_walk.py:1001]
+- [ ] [Review][Patch] Restore near-linear runtime as well as memory for growing alive-state updates,
+  with deterministic work-count coverage (Todoist 6hfRG42g8WcVmw8G)
+  [tests/primitives/test_scoped_walk.py:266]
+- [ ] [Review][Patch] Qualify the completion record and leave the lambda-shadow item unchecked until
+  it has a distinguishing baseline fixture (Todoist 6hfRG3xH46p7vFGG)
+  [docs/development/stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md:1777]
 
 ## Development notes
 
