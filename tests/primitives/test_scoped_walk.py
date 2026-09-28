@@ -7,8 +7,9 @@ import gc
 import importlib.util
 import sys
 import tracemalloc
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -226,6 +227,10 @@ Function = ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
 Deferred = Function | ast.GeneratorExp  # analyzed after its scope's statements
 Comprehension = ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp
 ALIVE = "<alive>"  # the key naming the lazy objects that exist on some path to a point
+# the key naming which of NON_RETAINING_CALLS the source binds, in any way and whatever the value,
+# on some path to a point. A name's own entry cannot say so: `Bindings` keeps only the targets on
+# the way to the raw walk, so a rebinding to anything else simply drops the entry
+SHADOWED = "<shadowed>"
 
 
 class _Alive:
@@ -242,6 +247,14 @@ class _Alive:
     n-object chain retain O(n) separate, ever-larger frozenset copies (sizes 1..n) forever, not
     the O(n) a persistent set actually needs -- about 1.38 GB at 8,000 objects. Materializing
     costs memory only for the flatten actually requested, freed once that call returns.
+
+    Nothing that runs once per rebind, comprehension or statement materializes it any more: a
+    rebind is recorded on the node it happens in and handed down to the objects that node
+    includes in one pass per scope (`_WalkReferences._observe` and `_flush`), and a comprehension
+    learns which objects it made as they start. What still flattens is a loop's fixpoint check,
+    unless both sides are the very same node (a loop that makes no lazy object, since joining a
+    set with itself returns it): a loop that itself makes a lazy object compares its alive set
+    with the one it started from by materializing both, once per iteration.
 
     Deliberately not a `frozenset` subclass either: `set(x)`, `frozenset(x)` and `set.update(x)`
     all special-case an actual `frozenset` (or subclass) instance and copy its underlying hash
@@ -291,10 +304,43 @@ class _Alive:
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, _Alive):
-            return self.flattened() == other.flattened()
+            return self is other or self.flattened() == other.flattened()
         if isinstance(other, frozenset):
             return self.flattened() == other
         return NotImplemented
+
+
+def _alive_order(roots: Iterable[_Alive]) -> list[_Alive]:
+    """Every node reachable from ``roots``, each one AFTER every reachable node that includes it
+    (an ancestor), so what is recorded on a node can be handed down to those it includes in one
+    pass. Walked with an explicit stack, not recursed into (a chain is as deep as it is long),
+    and each node once by identity however many joins reach it."""
+    order: list[_Alive] = []
+    started: set[int] = set()
+    stack: list[tuple[_Alive, bool]] = [(root, False) for root in roots]
+    while stack:
+        node, finished = stack.pop()
+        if finished:
+            order.append(node)  # every node it includes is already in `order`
+            continue
+        if id(node) in started:
+            continue
+        started.add(id(node))
+        stack.append((node, True))
+        stack.extend(
+            (child, False) for child in (node._left, node._right)
+            if isinstance(child, _Alive) and id(child) not in started)
+    order.reverse()
+    return order
+
+
+def _union_views(a: Views, b: Views) -> Views:
+    """What ``a`` and ``b`` record together, as a new mapping: neither is ever changed, so one can
+    be handed to several nodes at once."""
+    joined = dict(a)
+    for name, targets in b.items():
+        joined[name] = joined.get(name, frozenset()) | targets
+    return joined
 
 
 def _alive_add(alive: frozenset[str] | _Alive | None, oid: str) -> _Alive:
@@ -313,6 +359,10 @@ def _alive_union(
         return b
     if b is None:
         return a
+    if a is b:
+        # the same set on both paths (nothing made on either): no new node, so a loop's fixpoint
+        # check finds the very same object instead of flattening two equal sets
+        return a
     return _Alive(left=a, right=b)
 
 
@@ -320,9 +370,23 @@ def _alive_union(
 # ALIVE, whose value is a `frozenset[str] | _Alive | None`, not a `frozenset[str]` alone (see
 # `_Alive` for why it is a genuinely different type rather than a `frozenset` subclass)
 Bindings = dict[str, frozenset[str] | _Alive]
+# names mapped to targets alone, never the alive set: what rebinds recorded or defaults held
+Views = dict[str, frozenset[str]]
 # a lazy object a call hands back: its function, and the names it reads from the closure of the
 # function that made it (whose own flow resolves them)
 Returned = tuple[Deferred, frozenset[str]]
+
+
+class _Write(NamedTuple):
+    """What a call may leave a variable it does not own holding."""
+
+    targets: frozenset[str]
+    exact: bool  # the variable's whole value after the call; otherwise only what it may have gained
+
+
+# the variables a call of a function may write, each by the scope that owns it (None: the module)
+# and the name it goes by
+Effect = dict[tuple[Function | None, str], _Write]
 
 
 def _dotted(node: ast.expr) -> str | None:
@@ -460,7 +524,7 @@ def _either(states: Iterable[Bindings | None]) -> Bindings | None:
 
 
 def _lexical(state: Bindings) -> Bindings:
-    """The names alone, without the lazy objects alive."""
+    """The names, and which builtins they shadow, without the lazy objects alive."""
     return {key: targets for key, targets in state.items() if key != ALIVE}
 
 
@@ -501,19 +565,18 @@ def _global(function: Deferred) -> frozenset[str]:
     return _declared(function, ast.Global) if isinstance(function, Function) else frozenset()
 
 
-def _locals(function: Function) -> frozenset[str]:
-    """The names local to ``function``: its parameters and the names its own code binds, less
-    those it declares `global` or `nonlocal` and a comprehension's own targets. A lambda's body
-    is one expression, not a list of statements, but a walrus in it (unlike a comprehension's)
-    binds in the lambda's own scope, so it is walked exactly as a function's statements are."""
-    names = _parameters(function)
-    nodes = list(_own_nodes(_own_body(function)))
+def _bound_by(body: list[ast.AST], names: set[str]) -> set[str]:
+    """``names`` and every name the scope whose own statements are ``body`` binds, whatever it is
+    bound to and however (an assignment, import, loop, `with`, `except` or match target, a nested
+    `def` or `class`, a walrus): everything but a comprehension's own targets, which live in the
+    comprehension's scope, and what a `global` or `nonlocal` statement merely declares."""
+    nodes = list(_own_nodes(body))
     targets = {
         id(name) for node in nodes if isinstance(node, ast.comprehension)
         for name in ast.walk(node.target)}
     for node in nodes:
         if isinstance(node, (ast.Global, ast.Nonlocal)):
-            continue  # accounted for by `_declared`, subtracted below
+            continue  # what it declares is not bound by it
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             names.add(node.name)
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -524,7 +587,54 @@ def _locals(function: Function) -> frozenset[str]:
             names.add(node.name)
         elif isinstance(node, (ast.Name, ast.pattern)) and id(node) not in targets:
             names.update(_bound_names(node))
+    return names
+
+
+def _locals(function: Function) -> frozenset[str]:
+    """The names local to ``function``: its parameters and the names its own code binds, less
+    those it declares `global` or `nonlocal` and a comprehension's own targets. A lambda's body
+    is one expression, not a list of statements, but a walrus in it (unlike a comprehension's)
+    binds in the lambda's own scope, so it is walked exactly as a function's statements are."""
+    names = _bound_by(_own_body(function), _parameters(function))
     return frozenset(names) - _declared(function)
+
+
+def _scope_parents(tree: ast.Module) -> dict[Function, Function | None]:
+    """Each function and lambda of ``tree`` mapped to the function or lambda whose scope encloses
+    it, or None for the module's: a class body between them is skipped, since a name a class binds
+    is never what a function nested in it resolves to. A decorator or default runs in the scope
+    that defines the function, only its body in its own. Walked with an explicit stack."""
+    parents: dict[Function, Function | None] = {}
+    stack: list[tuple[ast.AST, Function | None]] = [(tree, None)]
+    while stack:
+        node, scope = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            parents[node] = scope
+            arguments = node.args
+            stack.extend(
+                (part, scope) for part in (
+                    *getattr(node, "decorator_list", []), *arguments.defaults,
+                    *(default for default in arguments.kw_defaults if default is not None)))
+            stack.extend((part, node) for part in _own_body(node))
+        else:
+            stack.extend((child, scope) for child in ast.iter_child_nodes(node))
+    return parents
+
+
+def _global_writes(tree: ast.Module) -> frozenset[str]:
+    """The names some function or class body of ``tree`` declares `global` and also binds: a name
+    bound in the module's own scope by code that runs whenever that function is called, which no
+    statement of the module's own flow shows."""
+    written: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            body: list[ast.AST] = list(node.body)
+            declared = {
+                name for inner in _own_nodes(body) if isinstance(inner, ast.Global)
+                for name in inner.names}
+            if declared:
+                written |= declared & _bound_by(body, set())
+    return frozenset(written)
 
 
 def _values(node: ast.expr | None) -> set[ast.AST] | None:
@@ -570,11 +680,27 @@ def _values(node: ast.expr | None) -> set[ast.AST] | None:
 
 
 def _shadowed_non_retaining(bindings: Bindings) -> frozenset[str]:
-    """Which of ``NON_RETAINING_CALLS`` are shadowed at this point: bound to something other than
-    the true builtin (a `def`, an assignment, an import -- anything that rebinds the name at
-    all). None of these are ever seeded into ``Bindings`` themselves, so a name's mere presence as
-    a key is proof enough that the source shadows it."""
-    return frozenset(name for name in NON_RETAINING_CALLS if name in bindings)
+    """Which of ``NON_RETAINING_CALLS`` are shadowed at this point: bound, on some path, to
+    something other than the true builtin (a `def`, an assignment, an import, a parameter, a loop
+    or `with`/`except`/match target -- anything that rebinds the name at all, whatever it is bound
+    to). Read from `SHADOWED`, which every such rebinding records: a name's own entry in
+    ``bindings`` cannot say, since a rebinding to anything the walk does not follow only drops
+    it."""
+    shadowed = bindings.get(SHADOWED, frozenset())
+    return frozenset(name for name in NON_RETAINING_CALLS if name in shadowed)
+
+
+def _comprehension_binders(node: Comprehension) -> frozenset[str]:
+    """Which of ``NON_RETAINING_CALLS`` comprehension ``node`` itself rebinds: as the target of
+    any generator of it or of a comprehension nested in it, or as a walrus target anywhere in it
+    (which binds in the enclosing scope, but for every later iteration). A call anywhere within
+    may then be calling the rebound name, so all of it is treated as shadowed (`_escaping` but
+    for the outermost first iterable, which runs before any of it exists)."""
+    bound: set[str] = set()
+    for inner in _own_nodes([node]):
+        if isinstance(inner, (ast.comprehension, ast.NamedExpr)):
+            bound |= _bound_names(inner.target)
+    return frozenset(bound & NON_RETAINING_CALLS)
 
 
 def _non_retaining_argument_values(call: ast.Call, shadowed: frozenset[str]) -> list[ast.expr]:
@@ -608,7 +734,13 @@ def _escaping(
     kept = _values(node)
     if kept is None:
         return None
-    shadowed = _shadowed_non_retaining(bindings)
+    outside = _shadowed_non_retaining(bindings)
+    inside = outside | _comprehension_binders(node)
+    # the outermost first iterable runs before the comprehension's own targets exist, so what it
+    # calls sees only the scope around it, and any comprehension nested within it
+    first = node.generators[0].iter
+    ahead = outside | _comprehension_binders(first)
+    in_first = {id(inner) for inner in _own_nodes([first])}
     for inner in _own_nodes([node]):
         if isinstance(inner, ast.NamedExpr):
             more = _values(inner.value)
@@ -616,6 +748,7 @@ def _escaping(
                 return None
             kept |= more
         elif isinstance(inner, ast.Call):
+            shadowed = ahead if id(inner) in in_first else inside
             for argument in _non_retaining_argument_values(inner, shadowed):
                 more = _values(argument)
                 if more is None:
@@ -676,6 +809,20 @@ class _WalkReferences:
     a conditional expression or `and`/`or`. Such an object reads the callee's own names from its
     closure, which the callee's own flow resolves, and every other name late-bound in the
     caller's flow.
+
+    A followed call of a `def` also carries what it writes to a variable it does not own: its
+    `global` and `nonlocal` names, and what a function it calls writes that it can see. Each
+    write belongs to the scope that OWNS the variable -- the module for `global`, the nearest
+    enclosing function binding the name for `nonlocal` -- and reaches only a scope whose own name
+    for it is that variable, never a local that merely shares the name; a write a shadowing caller
+    cannot show still outlives it and reaches the module, or the function around it, from there.
+    A name is left holding what every feasible exit leaves it, each exit starting from what the
+    caller held (so one exit that leaves it alone keeps the caller's alias, and it is cleared only
+    if every exit clears it). A parameter holds what the call passes: a conditional, `and`/`or` or
+    walrus argument is any of its feasible values, one before a star binds exactly while one after
+    it may land in any later parameter, a parameter the call certainly supplies never falls back
+    to its default, and one it may not supply holds the default it had when the `def` ran.
+
     Calls from another scope, or through attributes, containers, arguments or other functions,
     and objects handed back by a call inside the callee, are not followed: this is no call graph.
     Class-level names do not leak into methods, a class body, nested or not, runs from the
@@ -703,7 +850,17 @@ class _WalkReferences:
     object back from, so a join may include a path that cannot run, which only ever adds a flag.
     Only targets on the way to the raw walk or `getattr`, and the functions defined in the module,
     are kept, which keeps loop fixpoints finite. A lazy object's view lives beside the bindings,
-    not in them, so the work per statement does not grow with the objects alive.
+    not in them, and a rebind is recorded once, on the set of objects alive where it happens, then
+    handed to those objects in one pass per scope: the work per statement does not grow with the
+    objects alive.
+
+    A builtin `NON_RETAINING_CALLS` exempts (`bool`, `next`, `any`, `all`) keeps that exemption
+    only where the source has not bound the name: every rebinding of it is recorded on the path
+    (`SHADOWED`) whatever it is rebound to, a function's own locals shadow it throughout its
+    body, a comprehension's targets and walrus targets shadow it throughout the comprehension
+    (its outermost first iterable runs before them, in the scope around it), and a function that
+    declares it `global` and binds it shadows it in the module. What a class body rebinds shadows
+    only the class body itself: a comprehension in it runs its element in the enclosing scope.
     """
 
     def __init__(self, package: str) -> None:
@@ -720,6 +877,12 @@ class _WalkReferences:
         # expression that made it
         self._lazy: dict[str, tuple[Deferred, frozenset[str], ast.AST]] = {}
         self._seen: dict[str, Bindings] = {}  # in the current scope, every state each object saw
+        # in the current scope, the rebinds recorded but not yet handed to the objects that saw
+        # them: on each alive-set node, by identity (with the node kept), the targets a name took
+        # while that set was alive -- see `_observe` and `_flush`
+        self._events: dict[int, tuple[_Alive, Views]] = {}
+        # the objects started so far inside each comprehension being analyzed, outermost first
+        self._started: list[list[str]] = []
         # in a class body: the lexical names it runs from, and the lazy objects it makes
         self._enclosing: tuple[Bindings, list[str]] | None = None
         # the locals of every function (or lambda) scope currently being resolved, innermost
@@ -735,21 +898,46 @@ class _WalkReferences:
         self._later: dict[Deferred, bool] = {}
         self._escapes: dict[tuple[ast.AST, frozenset[str]], set[ast.AST] | None] = {}
         self._reads: dict[Function, frozenset[str]] = {}
-        self._transitive: dict[Function, frozenset[str]] = {}
+        # the names a function's code may read and those it declares `global` or `nonlocal`,
+        # widened with the same of every function it calls or nests, transitively
+        self._reach_cache: dict[Function, tuple[frozenset[str], frozenset[str]]] = {}
+        self._locals_cache: dict[Function, frozenset[str]] = {}
+        self._globals_cache: dict[Function, frozenset[str]] = {}
+        # each function and lambda by the function or lambda whose scope encloses it, from the
+        # source alone: which scope owns a name a `global` or `nonlocal` declaration reaches
+        self._parent: dict[Function, Function | None] = {}
+        # every `def` of the module by name, wherever it is nested
+        self._by_name: dict[str, list[Function]] = {}
+        # the function scopes currently being resolved, innermost last (`_shadow`'s owners)
+        self._functions: list[Function] = []
+        # what each parameter's default may have held whenever the `def` ran: a default is
+        # evaluated once, at definition, not at each call
+        self._defaults: dict[Function, Views] = {}
         self._returns: dict[tuple[Function, frozenset[tuple[str, frozenset[str]]]], list[Returned]]
         self._returns = {}
-        # the targets a call of a function may leave a global or nonlocal name of its own
-        # holding, from its own code alone; a function already being summarized (a direct or
-        # mutual recursive helper) summarizes as having none, closing the recursion
-        self._effects: dict[tuple[Function, frozenset[tuple[str, frozenset[str]]]], Bindings] = {}
+        # the variables a call of a function may write and what it may leave each holding, by the
+        # function and what it is seeded with (`_effect`); a function already being summarized (a
+        # direct or mutual recursive helper) summarizes as having none, closing the recursion
+        self._effects: dict[tuple[Function, frozenset[tuple[str, frozenset[str]]]], Effect] = {}
         self._summarizing: set[Function] = set()
 
     def module(self, tree: ast.Module) -> list[str]:
-        self._scope(tree.body, {"getattr": frozenset({BUILTIN_GETATTR})})
+        state: Bindings = {"getattr": frozenset({BUILTIN_GETATTR})}
+        # a function that declares one of these `global` and binds it rebinds it in the module
+        # whenever it is called, which no statement of the module's own flow shows
+        written = _global_writes(tree) & NON_RETAINING_CALLS
+        if written:
+            state[SHADOWED] = written
+        self._parent = _scope_parents(tree)
+        for function in self._parent:
+            if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self._by_name.setdefault(function.name, []).append(function)
+        self._scope(tree.body, state)
         return list(dict.fromkeys(self.uses))  # loop and `finally` bodies may be visited twice
 
     def _scope(self, body: list[ast.stmt], bindings: Bindings) -> None:
         seen, self._seen = self._seen, {}
+        events, self._events = self._events, {}
         deferred: list[Deferred] = []
         self._block(body, bindings, deferred)
         # a sibling defined earlier may be called from another sibling's body, possibly
@@ -766,6 +954,7 @@ class _WalkReferences:
         for _ in range(len(deferred) + 1):
             changed = False
             for function in deferred:
+                self._flush()  # every view read below must already include the rebinds so far
                 calls = self._calls.get(function, [])
                 # a lazy body runs only while one of its objects exists, so from what those
                 # objects saw on their own paths; one never made here is made later, from the
@@ -781,10 +970,18 @@ class _WalkReferences:
                     self._comprehension(function, entry, deferred)
                     continue
                 local = {k: v for k, v in entry.items() if k not in _parameters(function)}
+                # whatever it binds anywhere, a parameter included, is local to it throughout
+                # its body (Python scopes a name to the whole function), so it shadows a builtin
+                # from its first statement on
+                owned = self._locals_of(function)
+                own = owned & NON_RETAINING_CALLS
+                if own:
+                    local[SHADOWED] = frozenset(local.get(SHADOWED, frozenset())) | own
                 # a lambda shares its enclosing scope's deferred list, but still owns its own
                 # locals: it must push them too, so a cross-scope call made from inside it
                 # excludes exactly what a `def` in the same position would
-                self._shadow.append(_locals(function))
+                self._shadow.append(owned)
+                self._functions.append(function)
                 try:
                     if isinstance(function, ast.Lambda):
                         self._expression(function.body, local, deferred)
@@ -792,9 +989,10 @@ class _WalkReferences:
                         self._scope(function.body, local)
                 finally:
                     self._shadow.pop()
+                    self._functions.pop()
             if not changed:
                 break
-        self._seen = seen
+        self._seen, self._events = seen, events
 
     def _block(
         self, body: list[ast.stmt], bindings: Bindings, deferred: list[Deferred],
@@ -834,15 +1032,62 @@ class _WalkReferences:
 
     def _set(self, name: str, targets: frozenset[str], bindings: Bindings) -> None:
         """Rebind ``name`` (to nothing followed when empty) on this path; every lazy object alive
-        on it that reads ``name`` late-bound, not from a closure, sees the new targets."""
+        on it that reads ``name`` late-bound, not from a closure, sees the new targets. Rebinding
+        a builtin `NON_RETAINING_CALLS` exempts is recorded whatever it is rebound to, so the
+        exemption is never granted for a name the source has bound."""
+        if name in NON_RETAINING_CALLS:
+            shadowed = frozenset(bindings.get(SHADOWED, frozenset())) | {name}
+            bindings[SHADOWED] = shadowed
+            self._observe(SHADOWED, shadowed, bindings)
         if not targets:
             bindings.pop(name, None)
             return
         bindings[name] = targets
-        for oid in bindings.get(ALIVE, frozenset()):
-            if name not in self._lazy[oid][1]:
-                seen = self._seen[oid]
-                seen[name] = seen.get(name, frozenset()) | targets
+        self._observe(name, targets, bindings)
+
+    def _observe(self, name: str, targets: frozenset[str], bindings: Bindings) -> None:
+        """Every lazy object alive on this path that reads ``name`` late-bound, not from a
+        closure, sees ``targets``. Recorded once, in O(1), on the alive set the rebind happens in
+        (an immutable node, so what it includes never changes); `_flush` hands it to each object
+        that set includes, all rebinds at once, instead of visiting every live object per rebind."""
+        alive = bindings.get(ALIVE)
+        if alive is None:
+            return
+        node = alive if isinstance(alive, _Alive) else _Alive(left=alive)
+        seen = self._events.setdefault(id(node), (node, {}))[1]
+        seen[name] = seen.get(name, frozenset()) | targets
+
+    def _flush(self) -> None:
+        """Hand every object the rebinds recorded on the alive sets it is in: what is recorded on a
+        node reaches every object that node includes (an id joined in later, or made on a sibling
+        path, is in a different node and does not see it), in one pass over those nodes, each
+        after every node that includes it. Applied at most once, and only where a view is read."""
+        events, self._events = self._events, {}
+        if not events:
+            return
+        reaching: dict[int, Views] = {}  # per node, what it and every node including it saw
+        for node in _alive_order([node for node, _ in events.values()]):
+            view = reaching.pop(id(node), {})
+            if id(node) in events:
+                view = _union_views(view, events[id(node)][1])
+            if not view:
+                continue
+            if node._oid is not None:
+                self._deliver(node._oid, view)
+            for child in (node._left, node._right):
+                if isinstance(child, _Alive):
+                    reaching[id(child)] = _union_views(reaching.get(id(child), {}), view)
+                elif child is not None:  # an already-materialized set of ids
+                    for oid in child:
+                        self._deliver(oid, view)
+
+    def _deliver(self, oid: str, view: Views) -> None:
+        """Object ``oid`` sees ``view``, but for the names it reads from a closure."""
+        closure = self._lazy[oid][1]
+        seen = self._seen[oid]
+        for name, targets in view.items():
+            if name not in closure:
+                seen[name] = frozenset(seen.get(name, frozenset())) | targets
 
     def _propagate(self, name: str, value: ast.expr, bindings: Bindings) -> None:
         """Bind ``name`` to every target ``value`` may resolve to."""
@@ -862,6 +1107,8 @@ class _WalkReferences:
             self._calls.setdefault(function, []).append(seen)
         _merge(seen, {k: v for k, v in _lexical(bindings).items() if k not in closure})
         bindings[ALIVE] = _alive_add(bindings.get(ALIVE), oid)
+        for started in self._started:
+            started.append(oid)
 
     def _made(self, oid: str, bindings: Bindings) -> None:
         if self._enclosing:
@@ -876,85 +1123,180 @@ class _WalkReferences:
         onto this, not onto every name tracked in scope so far, so an unrelated function defined
         earlier or later in the same module can never inflate it."""
         if function not in self._reads:
+            own = list(_own_nodes(_own_body(function)))
+            # a nested function's decorators and defaults run HERE, when its `def` does
+            evaluated = [
+                part for node in own if isinstance(node, Function)
+                for part in (
+                    *getattr(node, "decorator_list", []), *node.args.defaults,
+                    *(default for default in node.args.kw_defaults if default is not None))]
             self._reads[function] = frozenset(
-                node.id for node in _own_nodes(_own_body(function))
+                node.id for node in (*own, *_own_nodes(evaluated))
                 if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load))
         return self._reads[function]
 
-    def _transitive_reads(
+    def _reach(
         self, function: Function, visiting: frozenset[Function] = frozenset(),
-    ) -> frozenset[str]:
-        """``_read_names(function)``, widened with the reads of every function it calls by a
-        plain name in its own top-level code, transitively: a helper that only forwards to
-        another (reading nothing by name itself) must still see everything the forwarded-to
-        function needs seeded, or a transitively composed effect (see `_ReturnFlow._called`)
-        would starve for names ``_entry`` projected away one level too early. Bounded against a
-        call cycle by ``visiting`` (the functions already being expanded on this path); the
-        top-level result (an empty ``visiting``) is cached, since it does not depend on it."""
-        if not visiting and function in self._transitive:
-            return self._transitive[function]
+    ) -> tuple[frozenset[str], frozenset[str]]:
+        """The plain names ``function``'s own top-level code may read and those it declares
+        `global` or `nonlocal`, widened with the same of every function of the module it calls by
+        a plain name, transitively -- whether it is defined beside it, around it, or inside it: a
+        helper that only forwards to another (reading nothing by name itself) must still see
+        everything the forwarded-to function needs seeded, or a composed effect (see
+        `_ReturnFlow._called`) would starve for names ``_entry`` projected away one level too
+        early. A name may be several functions' (any that shares it is included: seeding more
+        than is read only widens a key). Bounded against a call cycle by ``visiting`` (the
+        functions already being expanded on this path); the top-level result (an empty
+        ``visiting``) is cached, since it does not depend on it."""
+        if not visiting and function in self._reach_cache:
+            return self._reach_cache[function]
         if function in visiting:
-            return frozenset()
-        own = self._read_names(function)
-        result = own
+            return frozenset(), frozenset()
+        reads, declared = self._read_names(function), _declared(function)
         if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
             called = frozenset(
                 node.func.id for node in _own_nodes(_own_body(function))
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name))
-            if called:
-                deeper = visiting | {function}
-                for callee in set(self._defined.values()):
-                    if (
-                        isinstance(callee, (ast.FunctionDef, ast.AsyncFunctionDef))
-                        and callee.name in called
-                    ):
-                        result |= self._transitive_reads(callee, deeper)
+            deeper = visiting | {function}
+            for name in called:
+                for callee in self._by_name.get(name, ()):
+                    more_reads, more_declared = self._reach(callee, deeper)
+                    reads, declared = reads | more_reads, declared | more_declared
         if not visiting:
-            self._transitive[function] = result
-        return result
+            self._reach_cache[function] = (reads, declared)
+        return reads, declared
+
+    def _locals_of(self, function: Function) -> frozenset[str]:
+        if function not in self._locals_cache:
+            self._locals_cache[function] = _locals(function)
+        return self._locals_cache[function]
+
+    def _globals_of(self, function: Function) -> frozenset[str]:
+        if function not in self._globals_cache:
+            self._globals_cache[function] = _declared(function, ast.Global)
+        return self._globals_cache[function]
+
+    def _owner(self, scope: Function | None, name: str) -> Function | None:
+        """The scope whose variable ``name`` is when read or written from ``scope`` (None for the
+        module's): the nearest enclosing function that binds it, `global` skipping them all, and
+        `nonlocal` or a name it merely reads passing on to the scope around it."""
+        while scope is not None:
+            if name in self._globals_of(scope):
+                return None
+            if name in self._locals_of(scope):
+                return scope
+            scope = self._parent.get(scope)
+        return None
+
+    def _extend(self, name: str, targets: frozenset[str], bindings: Bindings) -> None:
+        """``name`` may also hold ``targets`` from here on: a write that may not have happened."""
+        if targets:
+            self._set(name, frozenset(bindings.get(name, frozenset())) | targets, bindings)
+
+    def _values_of(self, node: ast.expr | None, bindings: Bindings) -> frozenset[str]:
+        """Every target the value of ``node`` may be on some feasible path: what a name or
+        attribute chain holds, a lambda, either result of a conditional expression that a literal
+        test does not decide, each operand of `and`/`or` up to the first a literal decides, and a
+        walrus's value. Walked iteratively: a chain of them may be deeper than the stack."""
+        found: set[str] = set()
+        stack: list[ast.expr | None] = [node]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, ast.IfExp):
+                truth = _static_truth(current.test)
+                stack.extend(
+                    branch for branch, taken in ((current.body, True), (current.orelse, False))
+                    if truth in (None, taken))
+            elif isinstance(current, ast.BoolOp):
+                conjunction = isinstance(current.op, ast.And)
+                for value in current.values:
+                    stack.append(value)
+                    if _static_truth(value) is (not conjunction):
+                        break  # a literal decides the result: the rest never runs
+            elif isinstance(current, ast.NamedExpr):
+                stack.append(current.value)
+            else:
+                found |= _WalkReferences._resolved(self, current, bindings)
+        return frozenset(found)
+
+    def _snapshot_defaults(self, function: Function, bindings: Bindings) -> None:
+        """What each of ``function``'s defaults holds as of NOW, when its `def` runs: a default is
+        evaluated once, at definition, never again at a call, whatever its names hold by then. A
+        `def` that runs more than once (in a loop, or on several paths) may have held different
+        values each time, so they accumulate."""
+        arguments = function.args
+        positional = [*arguments.posonlyargs, *arguments.args]
+        pairs = [
+            *zip(positional[len(positional) - len(arguments.defaults):], arguments.defaults,
+                 strict=True),
+            *((parameter, default) for parameter, default
+              in zip(arguments.kwonlyargs, arguments.kw_defaults, strict=True)
+              if default is not None),
+        ]
+        held = self._defaults.setdefault(function, {})
+        for parameter, default in pairs:
+            targets = frozenset(t for t in self._values_of(default, bindings) if self._followed(t))
+            if targets:
+                held[parameter.arg] = frozenset(held.get(parameter.arg, frozenset())) | targets
 
     def _bind_arguments(
         self, function: Function, site: ast.Call | None, bindings: Bindings,
     ) -> Bindings:
-        """The targets each of ``function``'s parameters may hold when called at ``site``: a
-        plain positional or keyword argument's own resolved value, or an unspecified parameter's
-        own default, each resolved from ``bindings`` at the call. `*args`/`**kwargs` on either
-        side, and a call with no single site (a transitively composed effect with none of its
-        own), are not modeled -- a parameter one of those would fill is simply left unbound,
-        never guessed."""
+        """The targets each of ``function``'s parameters may hold when called at ``site``, with
+        the arguments resolved from ``bindings`` (the caller's own state). A parameter the call
+        certainly supplies -- by a positional argument before any star, or by name -- holds only
+        what was passed, however little of it the walk follows: it never falls back to its
+        default. One it may or may not supply holds the default too, and that is what it was at
+        definition (`_snapshot_defaults`). An argument after a star may land in any parameter
+        from the earliest position the expansions leave it (each may be empty); a `**` fills no
+        parameter the walk can name. A conditional, Boolean or walrus argument is any of its
+        feasible values (`_values_of`)."""
         bound: Bindings = {}
-        if site is None or isinstance(function, ast.Lambda):
+        if isinstance(function, ast.Lambda):
             return bound
         arguments = function.args
         positional = [*arguments.posonlyargs, *arguments.args]
-        if not any(isinstance(a, ast.Starred) for a in site.args):
-            for parameter, argument in zip(positional, site.args, strict=False):
-                self._bind(parameter.arg, self._resolved(argument, bindings), bound)
-        if not any(keyword.arg is None for keyword in site.keywords):
+        keywordable = {a.arg for a in (*arguments.args, *arguments.kwonlyargs)}
+        given: dict[str, set[str]] = {}
+        supplied: set[str] = set()
+        if site is not None:
+            star = next((i for i, a in enumerate(site.args) if isinstance(a, ast.Starred)), None)
+            for parameter, argument in zip(positional, site.args[:star], strict=False):
+                supplied.add(parameter.arg)
+                given.setdefault(parameter.arg, set()).update(self._values_of(argument, bindings))
+            if star is not None:
+                expansions = 0
+                for index, argument in enumerate(site.args[star:], start=star):
+                    if isinstance(argument, ast.Starred):
+                        expansions += 1
+                        continue
+                    for parameter in positional[index - expansions:]:
+                        given.setdefault(parameter.arg, set()).update(
+                            self._values_of(argument, bindings))
             for keyword in site.keywords:
-                assert keyword.arg is not None
-                self._bind(keyword.arg, self._resolved(keyword.value, bindings), bound)
-        defaulted = positional[len(positional) - len(arguments.defaults):]
-        for parameter, default in zip(defaulted, arguments.defaults, strict=True):
-            if parameter.arg not in bound:
-                self._bind(parameter.arg, self._resolved(default, bindings), bound)
-        for parameter, default in zip(arguments.kwonlyargs, arguments.kw_defaults, strict=True):
-            if parameter.arg not in bound and default is not None:
-                self._bind(parameter.arg, self._resolved(default, bindings), bound)
+                if keyword.arg in keywordable:
+                    supplied.add(keyword.arg)
+                    given.setdefault(keyword.arg, set()).update(
+                        self._values_of(keyword.value, bindings))
+        for name, held in self._defaults.get(function, {}).items():
+            if name not in supplied:
+                given.setdefault(name, set()).update(held)
+        for name, passed in given.items():
+            self._bind(name, passed, bound)
         return bound
 
     def _entry(self, function: Function, state: Bindings) -> Bindings:
-        """``state`` projected to the names ``function`` (or a same-scope function it calls by a
-        plain name, transitively -- `_transitive_reads`, so a forwarding helper's own call still
-        seeds what the forwarded-to function needs) may actually read: every name it owns (not
-        only its parameters, but any other name it locally binds -- an import, a loop or
+        """``state`` projected to the names ``function`` (or a function it calls by a plain name
+        or nests, transitively -- `_reach`, so a forwarding helper's own call still seeds what the
+        forwarded-to function needs) may actually read: every name it owns (not only its
+        parameters, but any other name it locally binds -- an import, a loop or
         `with`/`except`/match target, a nested `def`/`class`, anywhere in its own top-level code)
         is its own, never the caller's, and any name nothing in this chain reads cannot affect
         what it does, so neither belongs in what a cache keys its summary or effect on. A name it
         declares `global` or `nonlocal` is excluded from its own locals (`_locals`), so a genuine
         read of one still comes through."""
-        reads = self._transitive_reads(function)
-        owned = _locals(function)
+        reads, _ = self._reach(function)
+        owned = self._locals_of(function)
         return {k: v for k, v in state.items() if k in reads and k not in owned}
 
     def _returned(self, function: Function, state: Bindings) -> list[Returned]:
@@ -970,7 +1312,7 @@ class _WalkReferences:
         own = set(_own_nodes(body))
         if not any(isinstance(node, ast.Return) and node.value for node in own):
             return []
-        flow = _ReturnFlow(self)
+        flow = _ReturnFlow(self, function)
         flow._block(body, entry, [])
         made = dict.fromkeys(flow.objects[t] for _, objects in flow.returns for t in objects)
         # an object made from ``function``'s own code reads its names from the closure; one made
@@ -984,21 +1326,42 @@ class _WalkReferences:
         ]
 
     def _effect(
-        self, function: Function, state: Bindings, site: ast.Call | None = None,
-    ) -> Bindings:
-        """The targets a call of ``function`` from ``state`` (with ``site``'s positional, keyword
-        and default arguments bound to its parameters) may leave one of its own declared global
-        or nonlocal names holding, from every feasible exit of its own code alone (falling
-        through the end, or any `return`). A same-scope call it makes to ANOTHER declared-effect
-        function composes that function's own effect in too (see `_ReturnFlow._called`), so a
-        helper's helper's write is still seen; a directly or mutually recursive helper's own
-        in-flight call summarizes as having no effect (the shared ``_summarizing`` guard), closing
-        the recursion, and the real answer, from its own code, is still cached once computed. A
-        declared name assigned somewhere in its own code but absent from every feasible exit was
-        definitely reassigned to something not followed (or deleted): that is propagated as a
-        definite clear (an explicit empty target set), not silence, so a stale caller alias
-        cannot survive the call unexamined."""
-        seed = {**self._entry(function, state), **self._bind_arguments(function, site, state)}
+        self, function: Function, state: Bindings, scope: Function | None,
+        site: ast.Call | None = None, given: Bindings | None = None,
+    ) -> Effect:
+        """The variables a call of ``function`` may write, and what it may leave each holding.
+
+        A variable is one a call may write if the function declares it `global` or `nonlocal`, or a
+        function it calls writes it where it can see it. Each write is keyed by the scope that
+        OWNS the variable (the module for `global`, the nearest enclosing function binding the
+        name for `nonlocal`), so it reaches only a scope whose own name resolves to that variable
+        (`_owner`), never a local that merely shares the name. A variable ``function`` itself owns
+        is not an effect: it dies with the call. A write a called function makes to a variable
+        this one shadows with a local of its own cannot show in this one's state, but the variable
+        outlives the call, so the write is passed on as one that may have happened (not exact),
+        since what the variable held before is unknown here.
+
+        ``scope`` is the function (or lambda) making the call, None for the module: a declared
+        name is seeded from ``state`` only where the caller's own name for it is the very variable
+        the callee's is, so the caller's local is never mistaken for the module's. ``given`` is
+        the caller's own state, where the arguments of ``site`` are resolved (they are evaluated
+        in the caller, whatever ``state`` hides from the callee). The value a declared name is
+        left holding is what every feasible exit -- falling through the end, or any `return` --
+        leaves it, each starting from what it held on the way in; so a name that some exit leaves
+        untouched keeps what the caller held, and it is cleared only if EVERY exit rebinds it to
+        something the walk does not follow (or deletes it). A function no exit of which is
+        feasible writes nothing. A same-scope call it makes composes that function's own effect in
+        (see `_ReturnFlow._called`); a directly or mutually recursive helper's in-flight call
+        summarizes as having none (the shared ``_summarizing`` guard), closing the recursion, and
+        the real answer, from its own code, is still cached once computed."""
+        _, declared_chain = self._reach(function)
+        seed = self._entry(function, state)
+        for name in declared_chain:
+            if name in state and self._owner(scope, name) is self._owner(function, name):
+                seed[name] = state[name]
+            else:
+                seed.pop(name, None)
+        seed.update(self._bind_arguments(function, site, state if given is None else given))
         key = (function, frozenset(seed.items()))
         if key in self._effects:
             return self._effects[key]
@@ -1010,24 +1373,24 @@ class _WalkReferences:
         # call but no declared name of its own may still COMPOSE one transitively (see
         # `_ReturnFlow._called`), so it is not skipped just for that
         has_calls = any(isinstance(n, ast.Call) for n in _own_nodes(_own_body(function)))
-        if not declared and not has_calls:
-            effect: Bindings = {}
-        else:
+        effect: Effect = {}
+        if declared or has_calls:
             self._summarizing.add(function)
             try:
-                flow = _ReturnFlow(self, declared)
+                flow = _ReturnFlow(self, function, declared)
                 work = dict(seed)
                 falls = flow._block(_own_body(function), work, [])
                 exits = ([work] if falls else []) + [s for s, _ in flow.returns]
-                merged = _lexical(_join(*exits)) if exits else {}
-                effect = {
-                    name: targets for name, targets in merged.items() if name in flow.relevant}
-                assigned = {
-                    node.id for node in _own_nodes(_own_body(function))
-                    if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))}
-                for name in declared:
-                    if name not in effect and name in assigned:
-                        effect[name] = frozenset()
+                if exits:
+                    for name in flow.relevant:
+                        owner = self._owner(function, name)
+                        if owner is not function:  # a local of the function itself dies with it
+                            after = frozenset().union(
+                                *(state_.get(name, frozenset()) for state_ in exits))
+                            if after != seed.get(name, frozenset()):  # only a change is a write
+                                effect[(owner, name)] = _Write(after, True)
+                    for variable, targets in flow.bypass.items():
+                        effect[variable] = _Write(targets, False)
             finally:
                 self._summarizing.discard(function)
         self._effects[key] = effect
@@ -1045,13 +1408,19 @@ class _WalkReferences:
         intermediate scope between the call site and ``function``'s ancestry, is never what its
         free reference resolves to); anything at or above that depth is part of ``function``'s
         own lexical ancestry and must reach it unfiltered, however many scopes it climbs through.
+        What the call writes to a variable the caller's own scope sees (`_effect`) reaches the
+        caller's state itself, not the copy that hides its locals from the callee.
         """
+        real = bindings
         if function not in deferred:
             if self._enclosing or not self._shadow:
                 return
             depth = self._defined_depth.get(function, 0)
             exclude: frozenset[str] = frozenset().union(*self._shadow[depth:])
-            bindings = {k: v for k, v in bindings.items() if k == ALIVE or k not in exclude}
+            bindings = {
+                k: v for k, v in bindings.items() if k in (ALIVE, SHADOWED) or k not in exclude}
+            if SHADOWED in bindings:  # a deeper scope's own shadow is never the callee's
+                bindings[SHADOWED] = frozenset(bindings[SHADOWED]) - exclude
         # a class body runs at once, but what it calls reads the lexical names
         state = self._enclosing[0] if self._enclosing else _lexical(bindings)
         made: list[Returned]
@@ -1062,8 +1431,14 @@ class _WalkReferences:
             made = self._returned(function, state)  # the lazy objects the call hands back
             if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 call_site = site if isinstance(site, ast.Call) else None
-                for name, targets in self._effect(function, state, call_site).items():
-                    self._set(name, targets, bindings)
+                scope = self._functions[-1] if self._functions else None
+                effect = self._effect(function, state, scope, call_site, _lexical(real))
+                for (owner, name), write in effect.items():
+                    if self._owner(scope, name) is owner:
+                        if write.exact:
+                            self._set(name, write.targets, real)
+                        else:
+                            self._extend(name, write.targets, real)
         for lazy, closure in made:
             oid = f"{id(lazy)}@{id(site)}"  # one object per function and expression making it
             self._lazy[oid] = (lazy, closure, site)
@@ -1071,11 +1446,9 @@ class _WalkReferences:
 
     def _comprehension(
         self, node: Comprehension, bindings: Bindings, deferred: list[Deferred],
-    ) -> set[str]:
-        """Analyze a comprehension in its own scope (a generator's first iterable ran when made);
-        return the lazy objects alive in it."""
+    ) -> None:
+        """Analyze a comprehension in its own scope (a generator's first iterable ran when made)."""
         local = dict(bindings)
-        alive: set[str] = set()
         enclosing = self._enclosing
         try:
             for index, generator in enumerate(node.generators):
@@ -1087,16 +1460,13 @@ class _WalkReferences:
                     local, self._enclosing = dict(self._enclosing[0]), None
                 self._unbind(generator.target, local)
                 for condition in generator.ifs:
-                    truthy, falsy = self._condition(condition, local, deferred)
-                    alive.update(*(
-                        s.get(ALIVE, frozenset()) for s in (truthy, falsy) if s is not None))
+                    truthy, _ = self._condition(condition, local, deferred)
                     if truthy is None:
-                        return alive  # the filter is never true: the rest never runs
+                        return  # the filter is never true: the rest never runs
                     local = truthy  # only an item the filter keeps reaches what follows
             parts = (node.key, node.value) if isinstance(node, ast.DictComp) else (node.elt,)
             for part in parts:
                 self._expression(part, local, deferred)
-            return alive | set(local.get(ALIVE, frozenset()))
         finally:
             self._enclosing = enclosing
 
@@ -1180,15 +1550,23 @@ class _WalkReferences:
             self._called(node, node, bindings, deferred)
             return
         if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp)):
-            already = set(bindings.get(ALIVE, frozenset()))
-            made = self._comprehension(node, bindings, deferred) - already
-            shadowed = _shadowed_non_retaining(bindings)
+            # the objects it made, recorded as they start: none is flattened out of the alive set
+            started: list[str] = []
+            self._started.append(started)
+            try:
+                self._comprehension(node, bindings, deferred)
+            finally:
+                self._started.pop()
+            # a class comprehension's element runs in the enclosing scope, never in the class, so
+            # what the class itself rebinds does not shadow what it calls
+            scope = self._enclosing[0] if self._enclosing else bindings
+            shadowed = _shadowed_non_retaining(scope)
             key = (node, shadowed)
             if key in self._escapes:
                 escaping = self._escapes[key]
             else:
-                escaping = self._escapes[key] = _escaping(node, bindings)
-            for oid in made:
+                escaping = self._escapes[key] = _escaping(node, scope)
+            for oid in dict.fromkeys(started):
                 # MAX_IFEXP_CHAIN exhausted (`escaping is None`): fail closed, nothing here is a
                 # temporary rather than silently trusting an incomplete, unsound result
                 if escaping is None or self._lazy[oid][2] in escaping:
@@ -1349,6 +1727,7 @@ class _WalkReferences:
             arguments = node.args
             for part in (*node.decorator_list, *arguments.defaults, *arguments.kw_defaults):
                 self._expression(part, bindings, deferred)
+            self._snapshot_defaults(node, bindings)  # evaluated now, once, not at each call
             self._defined[_marker(node)] = node  # the name now refers to this function
             self._defined_depth[node] = len(self._shadow)
             self._set(node.name, frozenset({_marker(node)}), bindings)
@@ -1424,37 +1803,63 @@ class _ReturnFlow(_WalkReferences):
     nothing is reported and no call in it is followed, and a name may also hold an object made
     in it (by the expression that made it and its function)."""
 
-    def __init__(self, caller: _WalkReferences, declared: frozenset[str] = frozenset()) -> None:
+    def __init__(
+        self, caller: _WalkReferences, function: Function,
+        declared: frozenset[str] = frozenset(),
+    ) -> None:
         super().__init__(caller._package)
         self._caller = caller
-        self._defined = dict(caller._defined)
+        self._function = function  # the scope this flow runs in
+        # every function seen so far, whichever flow saw it: a `def` run here must be known to a
+        # call composed later from another flow (a marker names one node, so nothing collides)
+        self._defined = caller._defined
         self._later = caller._later
         self._defined_depth = caller._defined_depth
+        self._parent = caller._parent  # source facts, shared
+        self._by_name = caller._by_name
+        self._defaults = caller._defaults  # a nested `def` run here is defined for later calls too
+        self._locals_cache = caller._locals_cache
+        self._globals_cache = caller._globals_cache
         self.returns: list[tuple[Bindings, frozenset[str]]] = []
         self._exits = [self.returns]
         self.objects: dict[str, Deferred] = {}  # each object target by its function
         # the names an effect actually reports: the callee's own declared names, seeded up
-        # front, plus whatever a composed call (below) adds as ITS OWN declared/composed names
+        # front, plus whatever a composed call (below) writes to a variable this function sees
         self.relevant: set[str] = set(declared)
+        # what a composed call writes to a variable this function's own local hides, which
+        # outlives the call: not in this flow's state, but still a write the caller must see
+        self.bypass: dict[tuple[Function | None, str], frozenset[str]] = {}
 
     def _called(
         self, function: Deferred, site: ast.AST, bindings: Bindings, deferred: list[Deferred],
     ) -> None:
         """A call in the callee is not followed for its own lazy-object returns -- this is no
-        call graph -- but a same-scope call it makes to ANOTHER function declaring global or
-        nonlocal names composes that function's own effect into this flow (delegating back to the
-        caller's own `_effect`, which shares its `_summarizing` guard, so a direct or mutual
-        recursive cycle still closes rather than recursing forever), so a helper's helper's write
-        is still seen by the time this callee's own effect is computed, even when this callee
-        declares no global/nonlocal name of its own."""
+        call graph -- but a call it makes to ANOTHER function that writes a variable composes that
+        function's own effect into this flow (delegating back to the caller's own `_effect`, which
+        shares its `_summarizing` guard, so a direct or mutual recursive cycle still closes rather
+        than recursing forever), so a helper's helper's write is still seen by the time this
+        callee's own effect is computed, even when this callee declares no global/nonlocal name of
+        its own. A write to the variable this function's own name for it denotes lands in this
+        flow's state, exactly or as an addition as the callee's effect says. One to a variable
+        this function's own local hides never touches that local, but the variable belongs to a
+        scope around this function (or the module) and outlives the call, so the write is kept
+        aside as one that may have happened."""
         if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)) and not self._runs_later(
             function,
         ):
             call_site = site if isinstance(site, ast.Call) else None
             state = _lexical(bindings)
-            for name, targets in self._caller._effect(function, state, call_site).items():
-                self._set(name, targets, bindings)
-                self.relevant.add(name)
+            effect = self._caller._effect(function, state, self._function, call_site)
+            for (owner, name), write in effect.items():
+                if self._caller._owner(self._function, name) is owner:
+                    if write.exact:
+                        self._set(name, write.targets, bindings)
+                    else:
+                        self._extend(name, write.targets, bindings)
+                    self.relevant.add(name)
+                else:  # a scope around this function owns it, or the module: it outlives the call
+                    variable = (owner, name)
+                    self.bypass[variable] = self.bypass.get(variable, frozenset()) | write.targets
 
     def _followed(self, target: str) -> bool:
         return target in self.objects or super()._followed(target)
@@ -1696,6 +2101,17 @@ def _ternary_chain_comprehension(leaf: str, depth: int = IFEXP_CHAIN_DEPTH) -> s
     ``depth`` levels deep: too deep to classify by recursing one Python frame per `else`."""
     chain = " if c else ".join([leaf] * (depth + 1))
     return f"[{chain} for r in roots]\n"
+
+
+# a generator that reads `m`, made before the alias goes raw: if whatever it is handed retains it,
+# it sees `m = w`. The shadow family below builds on these two halves.
+LAZY_READS_M = "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
+RAW_THEN_SAFE = "m = w\nm = make()\n"
+# a helper that leaves the module's `m` holding whatever it is passed (or, by default, the raw
+# module), then the use of `m` that a raw value would make a direct walk
+MUTATE_GLOBAL = "m = make()\ndef mutate(x):\n    global m\n    m = x\n"
+MUTATE_GLOBAL_RAW_DEFAULT = "m = make()\ndef mutate(x=w):\n    global m\n    m = x\n"
+WALK_M = "m.bounded_walk(root)\n"
 REACHED_ON_SOME_PATH = {
     "if-without-else-may-keep-module": "if c:\n    w = make()\nw.bounded_walk(root)\n",
     "else-branch-keeps-module": "if c:\n    w = make()\nelse:\n    w.bounded_walk(root)\n",
@@ -2071,6 +2487,244 @@ REACHED_ON_SOME_PATH = {
         "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
         + "[(store.add((gen()," + ",".join(["safe()"] * MAX_IFEXP_CHAIN) + ")), 0) for _ in xs]\n"
         + "m = w\nm = make()\n"),
+    # 6hfRG3rqrGgFGWfp: a bool/next/any/all the source binds in ANY way is not the builtin, so it
+    # may retain what it is handed; `Bindings` only ever holds targets on the way to the raw walk,
+    # so it cannot be what says a name is shadowed
+    "assignment-shadows-bool": (
+        LAZY_READS_M + "bool = stash\n[bool(gen()) for _ in xs]\n" + RAW_THEN_SAFE),
+    "assignment-shadows-next": (
+        LAZY_READS_M + "next = stash\n[next(gen()) for _ in xs]\n" + RAW_THEN_SAFE),
+    "assignment-shadows-any": (
+        LAZY_READS_M + "any = stash\n[any(gen()) for _ in xs]\n" + RAW_THEN_SAFE),
+    "assignment-shadows-all": (
+        LAZY_READS_M + "all = stash\n[all(gen()) for _ in xs]\n" + RAW_THEN_SAFE),
+    "annotated-assignment-shadows-bool": (
+        LAZY_READS_M + "bool: object = stash\n[bool(gen()) for _ in xs]\n" + RAW_THEN_SAFE),
+    "import-from-shadows-bool": (
+        LAZY_READS_M + "from helpers import bool\n[bool(gen()) for _ in xs]\n" + RAW_THEN_SAFE),
+    "import-as-shadows-bool": (
+        LAZY_READS_M + "import stash as bool\n[bool(gen()) for _ in xs]\n" + RAW_THEN_SAFE),
+    "for-target-shadows-bool": (
+        LAZY_READS_M + "for bool in fns:\n    [bool(gen()) for _ in xs]\n" + RAW_THEN_SAFE),
+    "with-target-shadows-bool": (
+        LAZY_READS_M + "with opener() as bool:\n    [bool(gen()) for _ in xs]\n" + RAW_THEN_SAFE),
+    "except-name-shadows-bool": (
+        LAZY_READS_M + "try:\n    pass\nexcept Exception as bool:\n"
+        "    [bool(gen()) for _ in xs]\n" + RAW_THEN_SAFE),
+    "match-capture-shadows-bool": (
+        LAZY_READS_M + "match value:\n    case bool:\n        [bool(gen()) for _ in xs]\n"
+        + RAW_THEN_SAFE),
+    "class-definition-shadows-bool": (
+        LAZY_READS_M + "class bool:\n    pass\n[bool(gen()) for _ in xs]\n" + RAW_THEN_SAFE),
+    "shadow-on-one-branch-may-retain": (
+        LAZY_READS_M + "if c:\n    bool = stash\n[bool(gen()) for _ in xs]\n" + RAW_THEN_SAFE),
+    "parameter-shadows-bool": (
+        "def outer(bool):\n    m = make()\n    def gen():\n        yield m.bounded_walk(root)\n"
+        "    [bool(gen()) for _ in xs]\n    m = w\n    m = make()\n"),
+    "keyword-only-parameter-shadows-next": (
+        "def outer(*, next):\n    m = make()\n    def gen():\n        yield m.bounded_walk(root)\n"
+        "    [next(gen()) for _ in xs]\n    m = w\n    m = make()\n"),
+    "variadic-parameter-shadows-any": (
+        "def outer(*any):\n    m = make()\n    def gen():\n        yield m.bounded_walk(root)\n"
+        "    [any(gen()) for _ in xs]\n    m = w\n    m = make()\n"),
+    "function-local-import-shadows-bool": (
+        "def outer():\n    from helpers import bool\n    m = make()\n    def gen():\n"
+        "        yield m.bounded_walk(root)\n    [bool(gen()) for _ in xs]\n"
+        "    m = w\n    m = make()\n"),
+    "nested-function-sees-an-enclosing-parameter-shadow": (
+        "def outer(bool):\n    def inner():\n        m = make()\n        def gen():\n"
+        "            yield m.bounded_walk(root)\n        [bool(gen()) for _ in xs]\n"
+        "        m = w\n        m = make()\n    inner()\n"),
+    "comprehension-target-shadows-bool": (
+        LAZY_READS_M + "[bool(gen()) for bool in fns]\n" + RAW_THEN_SAFE),
+    "set-comprehension-target-shadows-next": (
+        LAZY_READS_M + "{next(gen()) for next in fns}\n" + RAW_THEN_SAFE),
+    "dict-comprehension-target-shadows-all": (
+        LAZY_READS_M + "{k: all(gen()) for k, all in fns}\n" + RAW_THEN_SAFE),
+    "later-generator-target-shadows-bool": (
+        LAZY_READS_M + "[bool(gen()) for _ in xs for bool in fns]\n" + RAW_THEN_SAFE),
+    "nested-comprehension-target-shadows-bool": (
+        LAZY_READS_M + "[[bool(gen()) for bool in fns] for _ in xs]\n" + RAW_THEN_SAFE),
+    "walrus-in-a-filter-shadows-bool": (
+        LAZY_READS_M + "[bool(gen()) for _ in xs if (bool := stash)]\n" + RAW_THEN_SAFE),
+    "helper-declaring-global-and-binding-bool-shadows-it": (
+        LAZY_READS_M + "def install():\n    global bool\n    bool = stash\ninstall()\n"
+        "[bool(gen()) for _ in xs]\n" + RAW_THEN_SAFE),
+    # 6hfRG3rqrGgFGWfp: a comprehension's own targets exist only after its outermost first
+    # iterable has run, but a comprehension nested in that iterable has its own
+    "a-nested-comprehension-in-the-first-iterable-keeps-its-own-target-shadow": (
+        "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
+        "[x for x in [bool(gen()) for bool in fns]]\nm = w\nm = make()\n"),
+    # a class comprehension's element runs in the enclosing scope, so a parameter of the function
+    # around the class still shadows it
+    "a-class-comprehension-element-sees-the-enclosing-functions-parameter-shadow": (
+        "def outer(bool):\n    m = make()\n    def gen():\n"
+        "        yield m.bounded_walk(root)\n    class K:\n"
+        "        flags = [bool(gen()) for _ in xs]\n    m = w\n    m = make()\n"),
+    # nothing in the module's own flow calls `install`, but whoever does rebinds the module's `bool`
+    # for every function that reads it
+    "uncalled-helper-declaring-global-and-binding-bool-shadows-it-for-a-function": (
+        "def install():\n    global bool\n    bool = stash\n"
+        "def worker():\n    n = make()\n    def gen():\n        yield n.bounded_walk(root)\n"
+        "    [bool(gen()) for _ in xs]\n    n = w\n    n = make()\n"),
+    # 6hfRG42g8WcVmw8G: a rebind is recorded on the alive set it happens in and reaches every
+    # object that set includes, whichever side of a join holds it
+    "objects-made-on-both-branches-see-a-rebind-after-the-join-first-branch-reads": (
+        "m = make()\ndef gen1():\n    yield m.bounded_walk(root)\ndef gen2():\n    yield None\n"
+        "if c:\n    a = gen1()\nelse:\n    b = gen2()\nm = w\nm = make()\n"),
+    "objects-made-on-both-branches-see-a-rebind-after-the-join-second-branch-reads": (
+        "m = make()\ndef gen1():\n    yield None\ndef gen2():\n    yield m.bounded_walk(root)\n"
+        "if c:\n    a = gen1()\nelse:\n    b = gen2()\nm = w\nm = make()\n"),
+    "an-earlier-rebind-survives-the-name-being-rebound-again-on-the-same-set": (
+        "import algua.primitives as p\nm = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
+        "items = gen()\nm = w\nm = p\nm = make()\n"),
+    "an-object-reaching-a-join-through-both-sides-sees-a-later-rebind": (
+        "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
+        "if c:\n    a = gen()\nif d:\n    pass\nelse:\n    pass\nm = w\nm = make()\n"),
+    # a lazy body reads `bool` late-bound: one bound after the object was made is what it sees
+    "a-builtin-shadowed-after-a-lazy-object-is-made-is-seen-when-it-runs": (
+        "def lazy():\n    n = make()\n    def gen():\n        yield n.bounded_walk(root)\n"
+        "    [bool(gen()) for _ in xs]\n    n = w\n    n = make()\n    yield 1\n"
+        "items = lazy()\nbool = stash\n"),
+    # 6hfRG3rM9F8mQjmp: a call's arguments bind conservatively -- a conditional, Boolean or walrus
+    # argument may be any feasible operand, a default is what it was when the function was DEFINED,
+    # what precedes a star binds exactly while what follows may land in any later parameter, and a
+    # keyword beside `**` still binds
+    "conditional-argument-may-be-raw": (MUTATE_GLOBAL + "mutate(w if c else make())\n" + WALK_M),
+    "conditional-argument-else-may-be-raw": (
+        MUTATE_GLOBAL
+        + "mutate(make() if c else w)\n"
+        + WALK_M),
+    "and-argument-may-be-raw": (MUTATE_GLOBAL + "mutate(c and w)\n" + WALK_M),
+    "or-argument-may-be-raw": (MUTATE_GLOBAL + "mutate(c or w)\n" + WALK_M),
+    "walrus-argument-value-may-be-raw": (MUTATE_GLOBAL + "mutate((y := w))\n" + WALK_M),
+    "nested-conditional-argument-may-be-raw": (
+        MUTATE_GLOBAL
+        + "mutate(make() if c else (other() if d else w))\n"
+        + WALK_M),
+    "default-is-snapshotted-when-the-function-is-defined-raw": (
+        "a = w\ndef mutate(x=a):\n    global m\n    m = x\na = make()\nmutate()\n"
+        + WALK_M),
+    "keyword-only-default-is-snapshotted-when-defined-raw": (
+        "a = w\ndef mutate(*, x=a):\n    global m\n    m = x\na = make()\nmutate()\n"
+        + WALK_M),
+    "default-snapshotted-after-one-branch-joins-both-values": (
+        "a = make()\nif c:\n    a = w\ndef mutate(x=a):\n    global m\n    m = x\n"
+        "a = make()\nmutate()\n"
+        + WALK_M),
+    "starred-positional-may-land-in-a-parameter": (
+        "m = make()\ndef mutate(x, y):\n    global m\n    m = y\nmutate(*rest, w)\n"
+        + WALK_M),
+    "starred-positional-may-land-in-the-only-parameter": (
+        MUTATE_GLOBAL + "mutate(*rest, w)\n" + WALK_M),
+    "positional-before-a-star-binds-exactly": (
+        "m = make()\ndef mutate(x, y):\n    global m\n    m = x\nmutate(w, *rest)\n"
+        + WALK_M),
+    "double-star-keeps-an-explicit-keyword": (MUTATE_GLOBAL + "mutate(x=w, **options)\n" + WALK_M),
+    "double-star-leaves-a-raw-default-feasible": (
+        MUTATE_GLOBAL_RAW_DEFAULT
+        + "mutate(**options)\n"
+        + WALK_M),
+    "star-leaves-a-raw-default-feasible": (MUTATE_GLOBAL_RAW_DEFAULT + "mutate(*rest)\n" + WALK_M),
+    "argument-is-resolved-in-the-callers-scope-for-a-cross-scope-call": (
+        MUTATE_GLOBAL
+        + "def outer():\n    v = w\n    mutate(v)\n    m.bounded_walk(root)\n"),
+    # 6hfRG3xrpw3Pm5gG: a helper's effect starts from the state it was called in, and only what
+    # every feasible exit does to a declared name is a clear
+    "conditional-assignment-keeps-the-raw-alias-on-the-false-path": (
+        "m = w\ndef maybe_clear():\n    global m\n    if c:\n        m = make()\n"
+        "maybe_clear()\n"
+        + WALK_M),
+    "early-return-keeps-the-raw-alias": (
+        "m = w\ndef helper():\n    global m\n    if c:\n        return\n    m = make()\n"
+        "helper()\n"
+        + WALK_M),
+    "loop-that-may-skip-its-assignment-keeps-the-raw-alias": (
+        "m = w\ndef helper():\n    global m\n    for item in items:\n        m = make()\n"
+        "helper()\n"
+        + WALK_M),
+    "composed-conditional-clear-keeps-the-raw-alias": (
+        "m = w\ndef maybe_clear():\n    global m\n    if c:\n        m = make()\n"
+        "def forward():\n    maybe_clear()\nforward()\n"
+        + WALK_M),
+    "declared-but-unwritten-name-keeps-the-raw-alias": (
+        "m = w\ndef peek():\n    global m\n    return 1\npeek()\n"
+        + WALK_M),
+    "nested-helper-write-reaches-the-module-through-its-caller": (
+        "m = make()\ndef outer():\n    def mutate():\n        global m\n        m = w\n"
+        "    mutate()\nouter()\n"
+        + WALK_M),
+    # 6hfRG3vGHf7Jp22G: a `global` write belongs to the module and a `nonlocal` one to the nearest
+    # enclosing function that binds the name; each reaches only the scopes that see that variable
+    "cross-scope-global-write-reaches-a-free-reader": (
+        "m = make()\ndef mutate():\n    global m\n    m = w\ndef outer():\n    mutate()\n"
+        "    m.bounded_walk(root)\n"),
+    "cross-scope-global-write-reaches-a-global-declaring-caller": (
+        "m = make()\ndef mutate():\n    global m\n    m = w\ndef outer():\n    global m\n"
+        "    mutate()\n    m.bounded_walk(root)\n"),
+    "global-write-survives-a-callers-later-local-rebind": (
+        "m = make()\ndef outer():\n    m = make()\n    def mutate(x):\n        global m\n"
+        "        m = x\n    mutate(w)\n    m = make()\nouter()\n"
+        + WALK_M),
+    "global-write-through-a-shadowing-caller-reaches-the-module": (
+        "m = make()\ndef outer():\n    m = make()\n    def mutate(x):\n        global m\n"
+        "        m = x\n    mutate(w)\nouter()\n"
+        + WALK_M),
+    "global-write-through-a-shadowing-cross-scope-caller-reaches-the-module": (
+        "m = make()\ndef mutate():\n    global m\n    m = w\ndef outer():\n    m = make()\n"
+        "    mutate()\nouter()\n"
+        + WALK_M),
+    "nonlocal-write-reaches-the-owners-later-read": (
+        "def outer():\n    m = make()\n    def mutate():\n        nonlocal m\n"
+        "        m = w\n    mutate()\n    m.bounded_walk(root)\n"),
+    "nonlocal-write-through-an-intermediate-reaches-the-owner": (
+        "def outer():\n    m = make()\n    def middle():\n        def inner():\n"
+        "            nonlocal m\n            m = w\n        inner()\n    middle()\n"
+        "    m.bounded_walk(root)\nouter()\n"),
+    "cross-scope-nonlocal-write-reaches-a-deeper-free-reader": (
+        "def outer():\n    m = make()\n    def mutate():\n        nonlocal m\n"
+        "        m = w\n    def middle():\n        mutate()\n        m.bounded_walk(root)\n"
+        "    middle()\nouter()\n"),
+    "global-write-in-a-nested-helper-reaches-a-free-reader-below-it": (
+        "m = make()\ndef outer():\n    def mutate():\n        global m\n        m = w\n"
+        "    mutate()\n    m.bounded_walk(root)\nouter()\n"),
+    # 6hfRG3rM9F8mQjmp: a `def` run again (here in a loop) keeps what its default held on an
+    # earlier run, and a star never supplies a parameter for certain, so its default stays feasible
+    "default-defined-in-a-loop-keeps-what-it-held-on-an-earlier-run": (
+        "import algua.primitives as p\na = w\nfor item in items:\n    def mutate(x=a):\n"
+        "        global m\n        m = x\n    a = p\nmutate()\n"
+        + WALK_M),
+    "a-star-does-not-supply-a-defaulted-parameter": (
+        "m = make()\ndef mutate(x, y=w):\n    global m\n    m = y\nmutate(make(), *rest)\n"
+        + WALK_M),
+    # 6hfRG3xrpw3Pm5gG, 6hfRG3vGHf7Jp22G: a helper nested in a function is seeded with what it and
+    # the helpers beside it read (defaults included), and what a shadowing caller cannot show
+    # still outlives it as a write that may have happened, without clearing what was there
+    "nested-helper-default-reads-a-name-the-caller-must-seed": (
+        "m = make()\ndef outer():\n    def h1(*, x=w):\n        global m\n        m = x\n"
+        "    h1()\nouter()\n"
+        + WALK_M),
+    "nested-forwarder-composes-a-sibling-helper-of-the-same-function": (
+        "m = make()\ndef outer():\n    def h1():\n        global m\n        m = w\n"
+        "    def middle():\n        h1()\n    middle()\nouter()\n"
+        + WALK_M),
+    "a-write-through-a-shadowing-caller-cannot-clear-what-the-module-held": (
+        "import algua.primitives as p\nm = w\ndef outer():\n    m = make()\n"
+        "    def mutate():\n        global m\n        if c:\n            m = p\n"
+        "    mutate()\nouter()\n"
+        + WALK_M),
+    # 6hfRG3rM9F8mQjmp: a `def` visited by several paths that all reach the call (here, a
+    # `finally` a `break` leaves through, and one it falls out of) keeps the default of each
+    "a-def-in-a-finally-keeps-the-default-of-every-path-that-reaches-the-call": (
+        "import algua.primitives as p\nm = make()\na = w\nfor item in items:\n    try:\n"
+        "        if c:\n            break\n        a = p\n    finally:\n"
+        "        def mutate(x=a):\n            global m\n            m = x\nmutate()\n"
+        + WALK_M),
+    "global-write-through-two-shadowing-levels-reaches-the-module": (
+        "m = make()\ndef outer():\n    m = make()\n    def middle():\n        m = make()\n"
+        "        def inner():\n            global m\n            m = w\n        inner()\n"
+        "    middle()\nouter()\n"
+        + WALK_M),
 }
 
 
@@ -2494,6 +3148,143 @@ NOT_REACHED_ON_ANY_PATH = {
     "helper-effect-propagates-a-definite-clear-of-a-stale-alias": (
         "m = w\ndef clear_it():\n    global m\n    m = make()\n"
         "clear_it()\nm.bounded_walk(root)\n"),
+    # 6hfRG3rqrGgFGWfp: a name the source does not bind, or binds where the call cannot see it, or
+    # only binds after the comprehension has run, leaves the true builtin exempt
+    "an-unrelated-assignment-does-not-shadow-bool": (
+        LAZY_READS_M + "flag = stash\n[bool(gen()) for _ in xs]\n" + RAW_THEN_SAFE),
+    "shadowing-any-leaves-bool-exempt": (
+        LAZY_READS_M + "any = stash\n[bool(gen()) for _ in xs]\n" + RAW_THEN_SAFE),
+    "a-sibling-functions-parameter-does-not-shadow-bool": (
+        LAZY_READS_M + "def other(bool):\n    return bool\n[bool(gen()) for _ in xs]\n"
+        + RAW_THEN_SAFE),
+    "a-shadow-bound-after-the-comprehension-is-not-retroactive": (
+        LAZY_READS_M + "[bool(gen()) for _ in xs]\nbool = stash\n" + RAW_THEN_SAFE),
+    "a-differently-named-comprehension-target-keeps-bool-exempt": (
+        LAZY_READS_M + "[bool(gen()) for item in fns]\n" + RAW_THEN_SAFE),
+    "a-sibling-comprehension-target-does-not-shadow-bool": (
+        LAZY_READS_M + "[x for bool in fns]\n[bool(gen()) for _ in xs]\n" + RAW_THEN_SAFE),
+    "a-helper-local-binding-does-not-shadow-module-bool": (
+        LAZY_READS_M + "def helper():\n    bool = stash\n[bool(gen()) for _ in xs]\n"
+        + RAW_THEN_SAFE),
+    "a-helper-declaring-global-without-binding-does-not-shadow-bool": (
+        LAZY_READS_M + "def peek():\n    global bool\n    return 1\npeek()\n"
+        "[bool(gen()) for _ in xs]\n" + RAW_THEN_SAFE),
+    # 6hfRG42g8WcVmw8G: the rebind happens on a path with an object of its own; the object made on
+    # the other branch is not alive there and never sees it
+    "a-rebind-on-a-sibling-path-with-its-own-object-does-not-reach-this-branchs-object": (
+        "m = make()\ndef gen1():\n    yield m.bounded_walk(root)\ndef gen2():\n    yield None\n"
+        "if c:\n    a = gen1()\nelse:\n    b = gen2()\n    m = w\nm = make()\n"),
+    "a-comprehension-target-does-not-shadow-a-call-in-its-own-first-iterable": (
+        "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
+        "[bool for bool in [bool(gen())]]\nm = w\nm = make()\n"),
+    # 6hfRG3rqrGgFGWfp: a class comprehension's element runs in the enclosing scope, so a
+    # class-level rebinding does not shadow it (Python resolves the element there, not in the class)
+    "a-class-level-rebinding-of-bool-does-not-shadow-a-comprehension-elements-bool": (
+        "m = make()\ndef gen():\n    yield m.bounded_walk(root)\nclass K:\n"
+        "    bool = stash\n    flags = [bool(gen()) for _ in xs]\nm = w\nm = make()\n"),
+    # the callee is defined outside the caller, so its `bool` is not the caller's parameter
+    "a-callers-parameter-shadow-does-not-reach-a-module-level-callee": (
+        "def worker():\n    n = make()\n    def gen():\n        yield n.bounded_walk(root)\n"
+        "    [bool(gen()) for _ in xs]\n    n = w\n    n = make()\n"
+        "def outer(bool):\n    worker()\n"),
+    # 6hfRG3rM9F8mQjmp: only feasible operands, definition-time defaults and unsupplied parameters
+    # can supply a raw value
+    "statically-false-conditional-branch-is-not-a-feasible-argument": (
+        MUTATE_GLOBAL
+        + "mutate(w if 0 else make())\n"
+        + WALK_M),
+    "statically-true-conditional-hides-the-other-branch": (
+        MUTATE_GLOBAL
+        + "mutate(make() if 1 else w)\n"
+        + WALK_M),
+    "conditional-argument-of-two-safe-values": (
+        MUTATE_GLOBAL
+        + "mutate(make() if c else other())\n"
+        + WALK_M),
+    "default-is-snapshotted-when-the-function-is-defined-safe": (
+        "a = make()\ndef mutate(x=a):\n    global m\n    m = x\na = w\nmutate()\n"
+        + WALK_M),
+    "keyword-only-default-is-snapshotted-when-defined-safe": (
+        "a = make()\ndef mutate(*, x=a):\n    global m\n    m = x\na = w\nmutate()\n"
+        + WALK_M),
+    "supplied-safe-positional-does-not-fall-back-to-a-raw-default": (
+        MUTATE_GLOBAL_RAW_DEFAULT
+        + "mutate(make())\n"
+        + WALK_M),
+    "supplied-safe-keyword-does-not-fall-back-to-a-raw-default": (
+        MUTATE_GLOBAL_RAW_DEFAULT
+        + "mutate(x=make())\n"
+        + WALK_M),
+    "supplied-safe-keyword-only-does-not-fall-back-to-a-raw-default": (
+        "m = make()\ndef mutate(*, x=w):\n    global m\n    m = x\nmutate(x=make())\n"
+        + WALK_M),
+    "supplied-unresolved-name-does-not-fall-back-to-a-raw-default": (
+        MUTATE_GLOBAL_RAW_DEFAULT
+        + "mutate(unknown)\n"
+        + WALK_M),
+    "positional-before-a-star-does-not-bind-a-later-parameter": (
+        "m = make()\ndef mutate(x, y):\n    global m\n    m = y\nmutate(w, *rest)\n"
+        + WALK_M),
+    "supplied-positional-before-a-star-blocks-the-raw-default": (
+        MUTATE_GLOBAL_RAW_DEFAULT
+        + "mutate(make(), *rest)\n"
+        + WALK_M),
+    "supplied-keyword-beside-a-double-star-blocks-the-raw-default": (
+        MUTATE_GLOBAL_RAW_DEFAULT
+        + "mutate(x=make(), **options)\n"
+        + WALK_M),
+    # 6hfRG3xrpw3Pm5gG: a clear needs every feasible exit to clear
+    "infeasible-early-return-does-not-keep-the-raw-alias": (
+        "m = w\ndef helper():\n    global m\n    if 0:\n        return\n    m = make()\n"
+        "helper()\n"
+        + WALK_M),
+    "clear-in-both-branches-clears-the-raw-alias": (
+        "m = w\ndef clear_it():\n    global m\n    if c:\n        m = make()\n    else:\n"
+        "        m = other()\nclear_it()\n"
+        + WALK_M),
+    "composed-definite-clear-clears-the-raw-alias": (
+        "m = w\ndef clear_it():\n    global m\n    m = make()\ndef forward():\n"
+        "    clear_it()\nforward()\n"
+        + WALK_M),
+    "delete-of-a-declared-name-clears-the-raw-alias": (
+        "m = w\ndef drop():\n    global m\n    del m\ndrop()\n"
+        + WALK_M),
+    # 6hfRG3vGHf7Jp22G: a write to a variable a scope does not see never reaches that scope
+    "global-write-leaves-the-callers-own-local-alone": (
+        "m = make()\ndef outer():\n    m = make()\n    def mutate():\n        global m\n"
+        "        m = w\n    mutate()\n    m.bounded_walk(root)\n"),
+    "nonlocal-write-stays-in-its-owning-function": (
+        "m = make()\ndef outer():\n    m = make()\n    def mutate(x):\n        nonlocal m\n"
+        "        m = x\n    mutate(w)\nouter()\n"
+        + WALK_M),
+    "nonlocal-write-owned-by-an-intermediate-scope-does-not-escape-it": (
+        "m = make()\ndef outer():\n    def middle():\n        m = make()\n"
+        "        def inner(x):\n            nonlocal m\n            m = x\n"
+        "        inner(w)\n    middle()\n    m.bounded_walk(root)\nouter()\n"),
+    "caller-local-shadows-a-cross-scope-global-write": (
+        "m = make()\ndef mutate():\n    global m\n    m = w\ndef outer():\n    m = make()\n"
+        "    mutate()\n    m.bounded_walk(root)\nouter()\n"),
+    "cross-scope-nonlocal-write-leaves-a-deeper-local-alone": (
+        "def outer():\n    m = make()\n    def mutate():\n        nonlocal m\n"
+        "        m = w\n    def middle():\n        m = make()\n        mutate()\n"
+        "        m.bounded_walk(root)\n    middle()\nouter()\n"),
+    # 6hfRG3vGHf7Jp22G: a helper's declared name is seeded from the caller only where the
+    # caller's own name for it is the same variable, and a variable a function owns is not the
+    # one a recursive call of it (a new frame) writes for the frame that called it
+    "a-helper-reads-the-modules-variable-not-the-callers-local-of-the-same-name": (
+        "m = make()\nk = make()\ndef outer():\n    m = w\n    def copy():\n"
+        "        global m, k\n        k = m\n    copy()\nouter()\nk.bounded_walk(root)\n"),
+    "a-recursive-call-does-not-write-the-enclosing-frames-local": (
+        "def outer(x, depth):\n    m = make()\n    def mutate():\n        nonlocal m\n"
+        "        m = x\n    def middle():\n        if depth:\n"
+        "            outer(w, depth - 1)\n        m.bounded_walk(root)\n    middle()\n"
+        "    mutate()\n"),
+    # 6hfRG3rM9F8mQjmp: a literal operand that decides a Boolean argument hides the ones after it
+    "statically-false-and-operand-hides-the-raw-alias": (
+        MUTATE_GLOBAL
+        + "mutate(0 and w)\n"
+        + WALK_M),
+    "statically-true-or-operand-hides-the-raw-alias": (MUTATE_GLOBAL + "mutate(1 or w)\n" + WALK_M),
 }
 
 
@@ -2592,6 +3383,149 @@ def test_alive_materialization_retains_no_per_prefix_cache() -> None:
     small = peak_bytes(500)
     large = peak_bytes(2_000)  # 4x the objects
     assert large <= 6 * small, (small, large)  # near-linear; O(n^2) caching measured ~10.6x here
+
+
+def test_a_recorded_rebind_reaches_the_objects_of_an_alive_set_and_no_others() -> None:
+    # 6hfRG42g8WcVmw8G: what is recorded on an alive set reaches every object it includes, held as
+    # nodes or as an ordinary set, except a name that object reads from a closure -- and never an
+    # object made after it, whose own node merely includes the set
+    walk = _WalkReferences("algua.registry.consumer")
+    function = ast.parse("def gen():\n    yield 1\n").body[0]
+    assert isinstance(function, ast.FunctionDef)
+    closures = {"plain": frozenset(), "node": frozenset(), "closed": frozenset({"m"}),
+                "later": frozenset()}
+    for oid, closure in closures.items():
+        walk._lazy[oid] = (function, closure, function)
+        walk._seen[oid] = {}
+    alive = _alive_add(_alive_add(frozenset({"plain"}), "node"), "closed")
+    walk._observe("m", frozenset({"raw"}), {ALIVE: alive})
+    _alive_add(alive, "later")  # made after the rebind: its node includes `alive`, not the reverse
+    walk._flush()
+    raw = {"m": frozenset({"raw"})}
+    assert walk._seen == {"plain": raw, "node": raw, "closed": {}, "later": {}}
+    assert walk._events == {}  # applied once, then forgotten
+
+
+def test_the_alive_order_lists_a_shared_node_once_after_everything_that_includes_it() -> None:
+    shared = _alive_add(None, "shared")
+    left, right = _alive_add(shared, "left"), _alive_add(shared, "right")
+    joined = _alive_union(left, right)
+    assert isinstance(joined, _Alive)
+    ids = [id(node) for node in _alive_order([joined, left])]  # `left` again, through a second root
+    assert sorted(ids) == sorted({id(joined), id(left), id(right), id(shared)})
+    assert ids.index(id(joined)) < ids.index(id(left)) < ids.index(id(shared))
+    assert ids.index(id(joined)) < ids.index(id(right)) < ids.index(id(shared))
+
+
+@pytest.mark.usefixtures("default_recursion_limit")
+def test_a_rebind_reaches_a_chain_of_live_objects_longer_than_the_recursion_limit() -> None:
+    # the pass that hands a recorded rebind down an alive set walks it with an explicit stack: a
+    # chain is as deep as the objects made in a row, so recursing would fail well before 1,500
+    assert _direct_walk_uses(_live_generators(1_500), "algua.registry.consumer")
+
+
+def _live_generators_beside_comprehensions(count: int) -> str:
+    """``count`` lazy objects, each followed by a comprehension that makes none of its own, while
+    every earlier object is still alive."""
+    made = "".join(
+        f"items{index} = (m.bounded_walk(r) for r in roots)\n[y for y in ys if y]\n"
+        for index in range(count))
+    return f"{IMPORT_W}m = make()\n{made}m = w\nm = make()\n"
+
+
+def _live_generators_made_by_comprehensions(count: int) -> str:
+    """``count`` comprehensions, each keeping a lazy object in its result, while every earlier
+    object is still alive."""
+    made = "".join(f"items{index} = [gen() for _ in ys]\n" for index in range(count))
+    return (
+        f"{IMPORT_W}m = make()\ndef gen():\n    yield m.bounded_walk(root)\n{made}"
+        "m = w\nm = make()\n")
+
+
+def _loops_beside_live_generators(count: int) -> str:
+    """``count`` lazy objects alive at once, then ``count`` loops that make none: every loop's
+    fixpoint check compares the alive set with itself."""
+    made = "".join(
+        f"items{index} = (m.bounded_walk(r) for r in roots)\n" for index in range(count))
+    loops = "for item in items:\n    pass\n" * count
+    return f"{IMPORT_W}m = make()\n{made}{loops}m = w\nm = make()\n"
+
+
+ALIVE_WORK_SHAPES = {
+    "a-rebind-after-every-creation": _interleaved_live_generators,
+    "a-comprehension-after-every-creation": _live_generators_beside_comprehensions,
+    "a-comprehension-keeping-every-creation": _live_generators_made_by_comprehensions,
+    "a-loop-that-makes-nothing-after-every-creation": _loops_beside_live_generators,
+}
+
+
+@pytest.mark.parametrize(
+    "shape", ALIVE_WORK_SHAPES.values(), ids=ALIVE_WORK_SHAPES.keys())
+def test_alive_state_work_stays_near_linear_in_the_objects_alive(
+    monkeypatch: pytest.MonkeyPatch, shape: Callable[[int], str],
+) -> None:
+    # 6hfRG42g8WcVmw8G: the straight-line shape above (every object made, then ONE rebind) cannot
+    # see this. With a rebind after EVERY creation, each rebind used to visit every object alive so
+    # far -- a flatten of the alive set plus one view update per object -- so n creations cost
+    # n(n+1)/2 object visits: 31,375 / 125,250 / 500,500 / 2,001,000 at 250 / 500 / 1,000 / 2,000
+    # (exactly x4 per doubling), against 250 / 500 / 1,000 / 2,000 for the straight-line shape.
+    # Every comprehension likewise flattened the whole alive set on entry and on each filter.
+    # Counted here, not timed: each alive node built, each id an iteration yields or a flatten
+    # returns, and the work of the pass that hands recorded rebinds to the objects that saw them.
+    work = {"steps": 0}
+    real_add, real_union = _alive_add, _alive_union
+    real_iter, real_flatten = _Alive.__iter__, _Alive.flattened
+    real_order, real_views, real_deliver = _alive_order, _union_views, _WalkReferences._deliver
+
+    def counting_add(alive: frozenset[str] | _Alive | None, oid: str) -> _Alive:
+        work["steps"] += 1
+        return real_add(alive, oid)
+
+    def counting_union(
+        a: frozenset[str] | _Alive | None, b: frozenset[str] | _Alive | None,
+    ) -> frozenset[str] | _Alive | None:
+        work["steps"] += 1
+        return real_union(a, b)
+
+    def counting_iter(self: _Alive) -> Iterator[str]:
+        for oid in real_iter(self):
+            work["steps"] += 1
+            yield oid
+
+    def counting_flatten(self: _Alive) -> frozenset[str]:
+        flat = real_flatten(self)
+        work["steps"] += len(flat)
+        return flat
+
+    def counting_order(roots: Iterable[_Alive]) -> list[_Alive]:
+        order = real_order(roots)
+        work["steps"] += len(order)  # each node the pass visits
+        return order
+
+    def counting_views(a: Views, b: Views) -> Views:
+        work["steps"] += 1 + len(a) + len(b)  # each name a merge of recorded rebinds walks
+        return real_views(a, b)
+
+    def counting_deliver(self: _WalkReferences, oid: str, view: Views) -> None:
+        work["steps"] += 1 + len(view)  # each object handed what it saw, and each name of it
+        real_deliver(self, oid, view)
+
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "_alive_add", counting_add)
+    monkeypatch.setattr(module, "_alive_union", counting_union)
+    monkeypatch.setattr(module, "_alive_order", counting_order)
+    monkeypatch.setattr(module, "_union_views", counting_views)
+    monkeypatch.setattr(_Alive, "__iter__", counting_iter)
+    monkeypatch.setattr(_Alive, "flattened", counting_flatten)
+    monkeypatch.setattr(_WalkReferences, "_deliver", counting_deliver)
+    totals = {}
+    for count in (100, 200, 400, 800):
+        work["steps"] = 0
+        assert _direct_walk_uses(shape(count), "algua.registry.consumer")
+        totals[count] = work["steps"]
+    assert totals[200] <= 2.1 * totals[100], totals
+    assert totals[400] <= 2.1 * totals[200], totals
+    assert totals[800] <= 2.1 * totals[400], totals
 
 
 def _accumulating_factories(count: int) -> str:

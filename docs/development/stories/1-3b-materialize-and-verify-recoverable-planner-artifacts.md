@@ -720,8 +720,10 @@ These identities are non-cyclic. An environment-only change does not change `bun
 - [x] [Review][Patch] Resolve cross-scope calls from the callee's defining lexical environment
   rather than filtering the current caller state (Todoist 6hfQqH3pfGW6W7Vp)
   [tests/primitives/test_scoped_walk.py:888]
-- [x] [Review][Patch] Include lambda bodies in cross-scope call propagation with their locals
-  (Todoist 6hfQqH2qxwxhVWHG) [tests/primitives/test_scoped_walk.py:725]
+- [ ] [Review][Patch] Include lambda bodies in cross-scope call propagation with their locals
+  (Todoist 6hfQqH2qxwxhVWHG) [tests/primitives/test_scoped_walk.py:725] -- unchecked by the rescue
+  review: no fixture fails before the change, and a program runs the other way (see the rescue
+  entry of the Debug Log)
 - [x] [Review][Patch] Apply declared global/nonlocal effects to their real lexical owner so
   caller locals are not overwritten (Todoist 6hfQqGxfgHcvPFXp)
   [tests/primitives/test_scoped_walk.py:888]
@@ -739,23 +741,28 @@ These identities are non-cyclic. An environment-only change does not change `bun
 
 #### Rescue findings against `89b9754` (2026-09-28)
 
-- [ ] [Review][Patch] Track lexical shadows independently from relevance-only bindings before
+- [x] [Review][Patch] Track lexical shadows independently from relevance-only bindings before
   granting `bool`/`next`/`any`/`all` non-retaining exemptions (Todoist 6hfRG3rqrGgFGWfp)
   [tests/primitives/test_scoped_walk.py:572]
-- [ ] [Review][Patch] Preserve `global` versus `nonlocal` ownership in helper-effect summaries and
+- [x] [Review][Patch] Preserve `global` versus `nonlocal` ownership in helper-effect summaries and
   apply writes to the declared lexical owner (Todoist 6hfRG3vGHf7Jp22G)
   [tests/primitives/test_scoped_walk.py:1063]
-- [ ] [Review][Patch] Make helper argument binding definition-time-correct and conservative for
+- [x] [Review][Patch] Make helper argument binding definition-time-correct and conservative for
   conditionals, starred arguments, and supplied-but-unresolved values (Todoist 6hfRG3rM9F8mQjmp)
   [tests/primitives/test_scoped_walk.py:916]
-- [ ] [Review][Patch] Seed declared names from caller state and infer definite clears only from
+- [x] [Review][Patch] Seed declared names from caller state and infer definite clears only from
   feasible exit states (Todoist 6hfRG3xrpw3Pm5gG) [tests/primitives/test_scoped_walk.py:1001]
-- [ ] [Review][Patch] Restore near-linear runtime as well as memory for growing alive-state updates,
+- [x] [Review][Patch] Restore near-linear runtime as well as memory for growing alive-state updates,
   with deterministic work-count coverage (Todoist 6hfRG42g8WcVmw8G)
   [tests/primitives/test_scoped_walk.py:266]
-- [ ] [Review][Patch] Qualify the completion record and leave the lambda-shadow item unchecked until
+- [x] [Review][Patch] Qualify the completion record and leave the lambda-shadow item unchecked until
   it has a distinguishing baseline fixture (Todoist 6hfRG3xH46p7vFGG)
   [docs/development/stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md:1777]
+
+Left open by the rescue round, recorded and not fixed: the lambda-shadow item above (no fixture
+distinguishes it, and a counterexample runs the other way); a loop that itself makes a lazy object
+still compares its alive set with the one it started from by materializing both; and the adjacent
+false negatives listed at the end of the rescue entry of the Debug Log.
 
 ## Development notes
 
@@ -1329,8 +1336,9 @@ uv run lint-imports
   to depend on a separate, unrelated, out-of-scope quirk (`_expression`'s bare `NamedExpr`
   handling unbinds rather than binds outside a Boolean/conditional operand) that made every
   attempted walrus-based fixture pass on `53e7b11` too; the fix is retained as the structurally
-  correct, uniform treatment the finding names, verified only to add no regression, not by a
-  failing-before fixture. 6hfQqH53pjrMWgxp / 6hfQqH4P4QC6r8Rp / 6hfQqGxXJRvpH62G: `_effect`'s own
+  correct, uniform treatment the finding names, without a failing-before fixture (the rescue entry
+  below shows it is not regression-free either: it can lose a real hit).
+  6hfQqH53pjrMWgxp / 6hfQqH4P4QC6r8Rp / 6hfQqGxXJRvpH62G: `_effect`'s own
   `_ReturnFlow` never followed a call, so a helper with no declared name of its own that only
   forwards to one that does (`def mutate(): deeper()`) composed nothing, and its parameters were
   never bound to the actual call-site arguments; `_ReturnFlow._called` now composes a same-scope
@@ -1363,6 +1371,127 @@ uv run lint-imports
   full sequential root gate passes: 5,414 tests in 535.01 s, ruff clean, mypy clean across 332
   source files, all 28 import contracts kept, and `git diff --check` clean. Story and sprint status
   advance to `review`; independent re-review remains outstanding.
+
+- Rescue findings against `89b9754` (6 items, `tests/primitives/test_scoped_walk.py` only; 339 to
+  454 guard-file tests: 108 new fixtures in the two path dictionaries and 7 new tests). Every
+  counterexample was reproduced on the `89b9754` analyzer before any change: 68 of the 108 new
+  fixtures are wrong on it (55 walks it misses, 13 clean programs it flags), none is wrong now,
+  and running the finished tests against that analyzer gives 74 failed and 380 passed. A fixture
+  whose walk the program's own flow reaches was checked against REAL execution (a scratch oracle
+  that runs each program for every branch, loop-count and `*args` input), not against the
+  analyzer's own idea of the answer. A differential fuzz then generated module-level, nested,
+  three-level and definition-time-default programs and compared the analyzer with that execution:
+  on 3,046 programs `89b9754` misses 266 real hits and flags 104 unreachable ones; the final
+  analyzer misses none of them (and flags 6), nor any of 11,901 further programs (what it still
+  flags is an impossible call shape, the deliberately conservative star rule, two conditions that
+  are really one, or a closure over a local assigned later). A separate fuzz makes the retention
+  of a shadowed `bool`/`next`/`any`/`all` observable (a stashing function keeps the generators,
+  the program advances them while `m` is raw): over 540 programs `89b9754` misses 339 shadows
+  that are in effect, and the final analyzer misses none and flags none wrongly. Searching about
+  9,500 programs for one the old analyzer got right and the new one gets wrong found none in the
+  shadow, deep and definition-time-default families and 21 in the module and nested ones: 13 are
+  star or double-star calls (the old code ignored them; the new conservative rule flags them) and
+  8 are closures over a local assigned later, which crash for real. Run over all 699 Python files
+  of the repository, the two analyzers give the same verdicts. Every guard was mutation-checked
+  on copies outside the checkout (62 mutants, every one killed by a named fixture or test;
+  the only edit after that run is a comment).
+  6hfRG3rqrGgFGWfp (40 fixtures, 29 wrong on `89b9754`): `_shadowed_non_retaining` read a name's
+  mere key in `Bindings`, which keeps only targets on the way to the raw walk, so a rebinding to
+  anything else -- an assignment, import, parameter, loop, `with`, `except`, match or comprehension
+  target, walrus, `class`, or a helper's `global` write -- dropped the entry, and `bool`, `next`,
+  `any` and `all` kept their exemption. A `SHADOWED` key in the flow state replaces it: `_set`
+  records every rebinding of those names whatever it binds, merges join it by union, and a lazy body
+  sees it as a late-bound name. A function's own locals (parameters included) shadow throughout its
+  body, a comprehension's targets and walrus targets throughout the comprehension, a cross-scope
+  call drops a deeper scope's shadows, and the module starts with the names some function declares
+  `global` and binds. Eleven clean fixtures pin what stays exempt (an unrelated name, a sibling
+  function's parameter, a shadow bound only after the comprehension, a sibling comprehension's
+  target, a helper's plain local). Two precision regressions of this first version, found by probing
+  it against the old analyzer (the shadow fuzz then reports 26 false positives without the first
+  fix) and fixed test-first before this record, have their own fixtures: a class-level rebinding
+  leaked into a comprehension in the class body (Python resolves its element in the enclosing scope,
+  so `_expression` now reads the shadows of the state the class started from), and a comprehension's
+  target shadowed a call in its own outermost first iterable (which runs before the target exists,
+  so `_escaping` gives it only the shadows of the scope around it and of any comprehension nested
+  within it).
+  6hfRG3rM9F8mQjmp (34 fixtures, 23 wrong): arguments were resolved against the call-site state
+  and only as a name or attribute chain, defaults at call time; a `*` or `**` anywhere dropped
+  every positional or keyword binding; and a supplied argument the walk could not follow left its
+  parameter unbound, so the raw default took over. `_snapshot_defaults` evaluates each default
+  when its `def` runs (accumulating over the runs of a `def` in a loop or on several paths,
+  including the passes of a `finally`), `_values_of` resolves a conditional, `and`/`or` or walrus
+  argument to every feasible value (iteratively, literal tests pruning what cannot run), and
+  `_bind_arguments` tracks suppliedness apart from targets: a positional argument before any star,
+  or a keyword, certainly supplies its parameter, which then never falls back to its default; an
+  argument after a star may land in any parameter from the earliest position the expansions leave
+  it; a `**` keeps an explicit keyword.
+  6hfRG3xrpw3Pm5gG (10 fixtures, 5 wrong): a declared name was seeded only if the helper read it,
+  and any syntactic assignment counted as a clear, so a conditional assignment cleared a raw alias
+  on the path that never assigned it, and a clear composed through a forwarding helper was lost.
+  The seed now carries each declared name -- the helper's and every helper's it calls -- from the
+  caller wherever the caller's own name for it is the same variable, and what a name is left
+  holding is what every feasible exit leaves it, each exit starting from what the caller held: a
+  name only some exits touch keeps the caller's alias, it is cleared only if every exit clears it,
+  a function with no feasible exit writes nothing, and only a change is a write. Composing nested
+  helpers also needed the seed to reach what a sibling helper and its defaults read (`_reach`
+  resolves callees over the module's `def`s by name, a function's reads include the decorators and
+  defaults of the `def`s nested in it, and flows share the functions and snapshotted defaults they
+  have seen).
+  6hfRG3vGHf7Jp22G (19 fixtures, 11 wrong; 3 shared with the seed item above): an effect was one
+  name-to-targets map applied to the immediate caller, `global` and `nonlocal` alike, and a
+  composed write was reported as the composing function's own. `_scope_parents` indexes the
+  source's function nesting (a class body is skipped), `_owner` names the scope whose variable a
+  name is from a given scope (`global` skips every enclosing function), and an effect is keyed by
+  that owner (`_Write(targets, exact)`): it reaches only a scope whose own name for the variable
+  resolves to it, in the caller's real state (a cross-scope call no longer writes into the copy
+  that hides the caller's locals) and never a local that shares the name; a variable the function
+  itself owns is not an effect (it dies with the call); and a write a shadowing caller cannot show
+  still outlives it, passed on as a write that may have happened, which adds to what the module or
+  the enclosing function held and never clears it.
+  6hfRG42g8WcVmw8G (5 fixtures and 7 tests): dropping the cache fixed retained memory, but each
+  rebind still flattened the whole alive set and updated every live object, so n creations with a
+  rebind after each cost n(n+1)/2 object visits on `89b9754` (31,375 / 125,250 / 500,500 /
+  2,001,000 at 250 / 500 / 1,000 / 2,000, exactly x4 per doubling; 0.734 s at 2,000, x3.7 per
+  doubling), where the straight-line shape of the existing test cost n. A rebind is now recorded
+  once, in O(1), on the persistent alive-set node it happens in, and one pass per scope (`_flush`
+  over `_alive_order`) hands it to every object that node includes, and to none made after it or
+  on a sibling path; a comprehension learns which objects it made as they start instead of
+  flattening the alive set on entry and at each filter; and joining a set with itself returns it,
+  so a loop that makes nothing compares the very same node. The new test counts work (nodes built,
+  ids iterated or flattened, and the flush's own nodes, merges and deliveries; deterministic, not
+  timed): 897 / 1,797 / 3,597 / 7,197 at 100 / 200 / 400 / 800 creations with a rebind after each
+  (10,200 / 40,400 / 160,800 / 641,600 on `89b9754`), and exactly x2.00 per doubling in all four
+  shapes (a rebind, a comprehension, a comprehension keeping the object, and a loop that makes
+  nothing, after every creation); wall clock 0.154 s at 2,000, x2.2 per doubling. A final flush at
+  scope exit was tried and removed: an assertion that the log is empty there held over every
+  test and the production scan.
+  6hfRG3xH46p7vFGG: the completion record said all 11 findings against `3c338bc` were test-first,
+  and 10 were. The lambda patch (`_scope` pushing a lambda's own locals onto the shadow stack) has
+  no fixture that fails before it: a differential run of the pre-patch analyzer (`3c338bc`) and
+  `89b9754` over 240 generated lambda programs, each judged against real execution, found 0 the
+  patch gets right and the pre-patch analyzer does not, and 8 the other way round: a lambda whose
+  walrus local shares a name with a variable a cross-scope helper reads from outside it
+  (`call = lambda: (helper(), (m := 1))`, `helper` reading the module's `m`, misses the hit that
+  `3c338bc` reports). The checklist item is unchecked and the change-log entry qualified; the code
+  is deliberately not changed here.
+  Not fixed and not claimed. (1) A loop that itself makes a lazy object still compares its alive
+  set with the one it started from by materializing both, once per iteration: x3.1 to x3.7 per
+  doubling over n sequential loops that each make one object. (2) Two mutants are not claimed: a
+  bare Python loop hidden inside `_deliver` (the alive counters watch the alive primitives only,
+  so it does not show in them) and an in-place `_union_views` (equivalent: every dict it is
+  handed is fresh or owned). (3) Verified by real execution to miss a hit, and identical on
+  `89b9754` and `3c338bc`, so none is a regression of this round: a conditional assignment alias
+  (`m = w if c else make()`; `_values_of` covers arguments and defaults only), a walrus
+  (`if (m := w): m.bounded_walk(root)` binds nothing), a helper's write to a module variable made
+  from a class body or a lambda body (`class K: mutate()`, `f = lambda: mutate()`), and a
+  cross-scope callee whose free name the caller also binds locally (`lambda m: helper()`, or a
+  `def` local assigned after the call), which is handed the caller's state without that name and
+  so misses the outer variable's value.
+  Gates: `uv run pytest tests/primitives/test_scoped_walk.py -q -p no:randomly` 454 passed
+  (8.6 s; also stable under random order and six hash seeds), `uv run ruff check .` clean,
+  `uv run mypy algua` clean (332 source files), `uv run lint-imports` 28 kept and 0 broken,
+  `git diff --check` clean, and the full sequential root gate `uv run pytest -q -p no:randomly`:
+  5,529 passed in 509.63 s.
 
 ### Completion Notes
 
@@ -1794,19 +1923,31 @@ uv run lint-imports
   `git diff --check` pass.
 - 2026-09-28: Recorded 11 findings from an independent BMAD review against `3c338bc` and mirrored
   them to Todoist; not yet fixed. Story moved back to `in-progress`.
-- 2026-09-28: Addressed all 11 review findings against `3c338bc` test-first, in
-  `tests/primitives/test_scoped_walk.py` only (near-linear alive-state materialization with no
+- 2026-09-28: Addressed 10 of the 11 review findings against `3c338bc` test-first, in
+  `tests/primitives/test_scoped_walk.py` only: near-linear alive-state materialization with no
   per-prefix cache, binding- and argument-position-aware `bool`/`next`/`any`/`all` non-retaining
   exemptions, a terminating bounded-fixpoint replacing the fixed two-round deferred cross-scope
   discovery, cross-scope calls resolved from a callee's own defining lexical depth rather than the
-  caller's whole shadow, uniform lambda/def shadow handling in that fixpoint, `global`/`nonlocal`
-  effects applied to their real lexical owner, recursion-safe transitive composition of a helper's
-  called-helper effects, positional/keyword/default argument binding into effect summaries,
-  definite-clear propagation for a declared name assigned but absent from every exit, fail-closed
-  (not truncated) handling when `MAX_IFEXP_CHAIN` is exhausted, and summary cache keys that exclude
-  every function-owned local, not only its parameters); 20 new cases (319 to 339 guard-file tests),
-  all passing twice in a row. One item (lambda bodies in cross-scope call propagation) is
-  implemented and regression-free but lacks an isolated, distinguishing counterexample -- see the
-  Debug Log entry above for why. The full sequential gate passes: 5,414 tests in 535.01 s, ruff,
-  mypy (332 source files), all 28 import contracts, and `git diff --check`. Story and sprint status
-  advance to `review`; independent re-review remains outstanding.
+  caller's whole shadow, `global`/`nonlocal` effects applied to their real lexical owner,
+  recursion-safe transitive composition of a helper's called-helper effects, positional/keyword/
+  default argument binding into effect summaries, definite-clear propagation for a declared name
+  assigned but absent from every exit, fail-closed (not truncated) handling when `MAX_IFEXP_CHAIN`
+  is exhausted, and summary cache keys that exclude every function-owned local, not only its
+  parameters; 20 new cases (319 to 339 guard-file tests), all passing twice in a row. The eleventh
+  (lambda bodies in cross-scope call propagation, handled uniformly with `def` shadows) was NOT
+  test-first and is unchecked: it has no isolated, distinguishing counterexample (see the Debug
+  Log entry above), and the rescue review of 2026-09-29 found programs on which it loses a real
+  hit. The full sequential gate passed: 5,414 tests in 535.01 s, ruff, mypy (332 source files),
+  all 28 import contracts, and `git diff --check`. Story and sprint status advanced to `review`;
+  independent re-review remained outstanding.
+- 2026-09-29: Addressed the six rescue findings against `89b9754` test-first, in
+  `tests/primitives/test_scoped_walk.py` only: lexical shadows of `bool`/`next`/`any`/`all` tracked
+  apart from the relevance-only bindings; `global`/`nonlocal` writes keyed by, and applied only to,
+  the scope that owns the variable; definition-time defaults, conservative star and conditional
+  arguments and separate suppliedness; declared names seeded from the caller with clears derived
+  only from feasible exits; alive-state updates made linear, with deterministic work counts; and the
+  completion record qualified, with the lambda-shadow item left unchecked. 115 new cases (339 to 454
+  guard-file tests), 68 of the 108 new fixtures failing on `89b9754`; the focused gate, the
+  repository ruff, mypy and import-contract gates and `git diff --check` pass, and the full
+  sequential root gate passes (5,529 tests in 509.63 s). Story and sprint status remain
+  `in-progress`; independent re-review is outstanding.
