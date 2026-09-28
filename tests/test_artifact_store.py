@@ -454,6 +454,55 @@ def test_verify_keeps_its_typed_refusal_when_closing_the_walk_fails(
     assert closed and all(closed.values()), closed
 
 
+@pytest.mark.parametrize("fault", [RuntimeError, ValueError, 5])
+def test_a_bundle_listing_close_failure_is_a_typed_store_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: object,
+) -> None:
+    root = publish_bundle(tmp_path, _files(), _descriptor())
+    closed = track_closes(monkeypatch, faulty=root, fault=fault)
+
+    with pytest.raises(ArtifactStoreError) as caught:
+        verify_bundle(tmp_path, _descriptor())
+
+    assert "could not be closed" in str(caught.value.__cause__)
+    assert closed and all(closed.values()), closed
+
+
+def test_a_staging_listing_close_failure_is_a_typed_store_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staged: list[Path] = []
+
+    def first_staging_listing(path: Path) -> bool:
+        """Only the staging seal walk's listing fails; later cleanup listings are healthy."""
+        if path.name == "algua" and path.parent.name.startswith(".stage-"):
+            staged.append(path)
+            return len(staged) == 1
+        return False
+
+    closed = track_closes(monkeypatch, fault=RuntimeError, faulty=first_staging_listing)
+
+    with pytest.raises(ArtifactStoreError, match="could not be closed"):
+        publish_bundle(tmp_path, _files(), _descriptor())
+
+    target = tmp_path / _descriptor().locator
+    assert not target.exists()
+    assert not list(target.parent.glob(".stage-*"))
+    assert closed and all(closed.values()), closed
+
+
+def test_an_interrupt_while_closing_a_bundle_listing_is_not_translated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = publish_bundle(tmp_path, _files(), _descriptor())
+    closed = track_closes(monkeypatch, faulty=root, fault=SystemExit)
+
+    with pytest.raises(SystemExit):
+        verify_bundle(tmp_path, _descriptor())
+
+    assert closed and all(closed.values()), closed
+
+
 def _foreign_stage(parent: Path) -> Path:
     """Another builder's in-progress stage; this attempt must never remove it."""
     parent.mkdir(parents=True, exist_ok=True)

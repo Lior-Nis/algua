@@ -99,6 +99,12 @@ class TrackedListing:
     def __next__(self):
         return next(self._inner)
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
     def close(self) -> None:
         if self._attempts is not None:
             self._attempts[self._path] = self._attempts.get(self._path, 0) + 1
@@ -115,17 +121,27 @@ class TrackedListing:
 
 
 def track_closes(
-    monkeypatch: pytest.MonkeyPatch, faulty: Path, *, also: dict[Path, object] | None = None,
+    monkeypatch: pytest.MonkeyPatch, faulty: Path | Callable[[Path], bool], *,
+    also: dict[Path, object] | None = None,
     fault: object = errno.EIO, release: bool = True, times: int | None = None,
     attempts: dict[Path, int] | None = None,
 ) -> dict[Path, bool]:
+    """Proxy every listing; ``faulty`` names the listing (or predicate) whose close fails."""
     original = os.scandir
     closed: dict[Path, bool] = {}
-    faults = {faulty: fault, **(also or {})}
+    extra = also or {}
 
-    def scandir(path):
+    def fault_for(target: Path) -> object:
+        if target in extra:
+            return extra[target]
+        hit = faulty(target) if callable(faulty) else target == faulty
+        return fault if hit else None
+
+    def scandir(path="."):
+        if isinstance(path, int):  # descriptor-based listings (shutil.rmtree) pass through
+            return original(path)
         target = Path(os.fsdecode(path))
-        return TrackedListing(original(path), target, faults.get(target), closed,
+        return TrackedListing(original(path), target, fault_for(target), closed,
                               release=release, times=times, attempts=attempts)
 
     monkeypatch.setattr(os, "scandir", scandir)

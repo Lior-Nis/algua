@@ -151,3 +151,30 @@ def test_sync_failure_diagnostics_never_carry_raw_output(
         chain.append(current)
         current = current.__cause__ or current.__context__
     assert all(SECRET not in str(item) for item in chain)
+
+
+def test_a_listing_close_failure_while_provisioning_is_environment_incompatible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests._walk_faults import track_closes
+
+    environment = tmp_path / "environment"
+    armed: list[bool] = []
+    track_closes(
+        monkeypatch, fault=RuntimeError,
+        faulty=lambda path: bool(armed) and path == environment)  # only the inventory walk
+    monkeypatch.setattr(planner_environment, "installer_version", lambda: UV_VERSION)
+    key = build_environment_key(_inputs(), "a" * 64, uv_version=UV_VERSION)
+
+    def runner(argv, **_kwargs):
+        if argv[1] == "venv":
+            uv_like_venv(environment)
+        else:
+            armed.append(True)  # uv sync is done; the inventory walk runs next
+        return BoundedCompletion(0, b"", b"")
+
+    with pytest.raises(EnvironmentIncompatible) as caught:
+        provision_environment(tmp_path / "inputs", environment, _inputs(), key, runner=runner)
+
+    assert not isinstance(caught.value, EnvironmentUnavailable)
+    assert "could not be closed" in str(caught.value)

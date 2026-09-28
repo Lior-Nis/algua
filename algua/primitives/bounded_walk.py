@@ -31,11 +31,14 @@ class TraversalLimitExceeded(ValueError):
 
 
 class WalkCleanupError(RuntimeError):
-    """Closing a directory listing raised `GeneratorExit`.
+    """Closing a directory listing failed with an ordinary (non-interrupt) error.
 
-    Raised from the walk in its place, with the `GeneratorExit` as the cause, because
-    `generator.close()` treats a `GeneratorExit` raised during abandonment as normal completion
-    and would silently discard the cleanup failure. It is an ordinary failure, not an interrupt.
+    Raised from the walk in place of that error, which becomes its cause, so every consumer can
+    translate a cleanup failure into its own typed error without also capturing listing or
+    permission errors. A `GeneratorExit` from a close is reported the same way, because
+    `generator.close()` would otherwise treat it as normal completion and silently discard it.
+    Interrupts (`KeyboardInterrupt`, `SystemExit` and other non-`Exception` failures) are never
+    wrapped.
     """
 
 
@@ -50,8 +53,8 @@ class TreeEntry:
 def _close(listing: Any) -> None:
     try:
         listing.close()
-    except GeneratorExit as exc:
-        raise WalkCleanupError("closing a directory listing raised GeneratorExit") from exc
+    except (Exception, GeneratorExit) as exc:
+        raise WalkCleanupError("a directory listing could not be closed") from exc
 
 
 def _close_all(stack: list[tuple[Any, str]]) -> BaseException | None:

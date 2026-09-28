@@ -5,12 +5,12 @@ import os
 import shutil
 import stat
 import tempfile
-from collections.abc import Generator
-from contextlib import AbstractContextManager
+from collections.abc import Generator, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from algua.primitives.atomic_io import fsync_dir, fsync_file, fsync_parents
-from algua.primitives.bounded_walk import TreeEntry, scoped_walk
+from algua.primitives.bounded_walk import TreeEntry, WalkCleanupError, scoped_walk
 from algua.primitives.flock import file_lock
 from algua.primitives.no_replace import rename_noreplace
 from algua.registry.artifact_contract import MAX_PATH_BYTES
@@ -31,11 +31,18 @@ class EnvironmentStoreError(ValueError):
     """A published environment is missing, corrupt, or unsafe."""
 
 
-def _tree(root: Path) -> AbstractContextManager[Generator[TreeEntry, None, None]]:
-    return scoped_walk(
-        root, max_files=MAX_ENVIRONMENT_FILES, max_directories=MAX_ENVIRONMENT_DIRECTORIES,
-        max_path_bytes=MAX_PATH_BYTES,
-    )
+@contextmanager
+def _tree(root: Path) -> Iterator[Generator[TreeEntry, None, None]]:
+    """Walk an environment tree; a listing that cannot be closed is a typed store error."""
+    try:
+        with scoped_walk(
+            root, max_files=MAX_ENVIRONMENT_FILES, max_directories=MAX_ENVIRONMENT_DIRECTORIES,
+            max_path_bytes=MAX_PATH_BYTES,
+        ) as tree:
+            yield tree
+    except WalkCleanupError as exc:
+        raise EnvironmentStoreError(
+            "an environment directory listing could not be closed") from exc
 
 
 def _cleanup(path: Path) -> None:

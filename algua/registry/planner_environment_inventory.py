@@ -9,7 +9,7 @@ import sys
 from email.parser import HeaderParser
 from pathlib import Path
 
-from algua.primitives.bounded_walk import TraversalLimitExceeded, scoped_walk
+from algua.primitives.bounded_walk import TraversalLimitExceeded, WalkCleanupError, scoped_walk
 from algua.registry.artifact_contract import (
     MAX_PATH_BYTES,
     ArtifactFile,
@@ -209,6 +209,9 @@ def inventory_environment(root: Path) -> InstalledInventory:
                         distributions.append(_metadata_identity(text))
     except TraversalLimitExceeded as exc:
         raise EnvironmentIncompatible(f"environment exceeds the {exc.kind} bound") from exc
+    except WalkCleanupError as exc:
+        raise EnvironmentIncompatible(
+            "an environment directory listing could not be closed") from exc
     implied = {
         parent.as_posix()
         for entry in (*(item.path for item in files), *(link.path for link in links))

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from algua.primitives.bounded_walk import TraversalLimitExceeded, bounded_walk
+from algua.primitives.bounded_walk import TraversalLimitExceeded, WalkCleanupError, bounded_walk
 from tests._walk_faults import count_scandir_pulls, fail_scandir_once, track_closes
 
 
@@ -219,10 +219,10 @@ def test_an_abandoned_walk_closes_every_handle_and_reports_the_cleanup_failure(
         if entry.relative == "d1/d2/d3":
             break
 
-    with pytest.raises(OSError) as caught:
+    with pytest.raises(WalkCleanupError) as caught:
         walk.close()
 
-    assert caught.value.errno == errno.EIO
+    assert caught.value.__cause__.errno == errno.EIO
     assert closed and all(closed.values()), closed
 
 
@@ -237,10 +237,10 @@ def test_the_deepest_cleanup_failure_is_reported_when_several_closes_fail(
         if entry.relative == "d1/d2/d3":
             break
 
-    with pytest.raises(OSError) as caught:
+    with pytest.raises(WalkCleanupError) as caught:
         walk.close()
 
-    assert caught.value.errno == errno.ENOSPC  # d1/d2 is closed before d1
+    assert caught.value.__cause__.errno == errno.ENOSPC  # d1/d2 is closed before d1
     assert all(closed.values()), closed
 
 
@@ -260,9 +260,13 @@ def test_an_abandoned_walk_closes_every_handle_whatever_a_close_raises(
     closed = track_closes(monkeypatch, faulty=tmp_path / "d1", fault=fault)
     walk = _abandon_at_d3(tmp_path)
 
-    with pytest.raises(fault):
+    # Ordinary failures are reported as a WalkCleanupError caused by them; interrupts are not.
+    reported = fault if not issubclass(fault, Exception) else WalkCleanupError
+    with pytest.raises(reported) as caught:
         walk.close()
 
+    if reported is WalkCleanupError:
+        assert type(caught.value.__cause__) is fault
     assert len(closed) == 3 and all(closed.values()), closed
 
 
@@ -336,10 +340,10 @@ def test_an_abandoned_stacked_listing_that_fails_once_before_release_is_retried(
     closed = track_closes(monkeypatch, faulty=tmp_path / "d1", release=False, times=1)
     walk = _abandon_at_d3(tmp_path)
 
-    with pytest.raises(OSError) as caught:
+    with pytest.raises(WalkCleanupError) as caught:
         walk.close()
 
-    assert caught.value.errno == errno.EIO
+    assert caught.value.__cause__.errno == errno.EIO
     assert len(closed) == 3 and all(closed.values()), closed
 
 
@@ -364,7 +368,7 @@ def test_the_cleanup_retry_is_bounded_to_one_extra_attempt(
         monkeypatch, faulty=tmp_path / "d1", release=False, attempts=attempts)
     walk = _abandon_at_d3(tmp_path)
 
-    with pytest.raises(OSError):
+    with pytest.raises(WalkCleanupError):
         walk.close()
 
     assert attempts[tmp_path / "d1"] == 2  # one pass plus exactly one retry, never unbounded
@@ -462,10 +466,10 @@ def test_an_exhausted_listing_whose_close_fails_once_is_released_by_cleanup(
     closed = track_closes(
         monkeypatch, faulty=tmp_path / "d1/d2/d3", release=False, times=1)
 
-    with pytest.raises(OSError) as caught:
+    with pytest.raises(WalkCleanupError) as caught:
         _walk(tmp_path)
 
-    assert caught.value.errno == errno.EIO
+    assert caught.value.__cause__.errno == errno.EIO
     assert all(closed.values()), closed  # the failed close was retried, not dropped
 
 
@@ -507,8 +511,8 @@ def test_a_failing_close_of_an_exhausted_directory_still_closes_the_rest(
     _chain(tmp_path)
     closed = track_closes(monkeypatch, faulty=tmp_path / "d1/d2/d3")
 
-    with pytest.raises(OSError) as caught:
+    with pytest.raises(WalkCleanupError) as caught:
         _walk(tmp_path)
 
-    assert caught.value.errno == errno.EIO
+    assert caught.value.__cause__.errno == errno.EIO
     assert closed and all(closed.values()), closed

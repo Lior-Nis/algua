@@ -178,3 +178,26 @@ def test_database_diagnostic_is_sanitized_but_remains_retryable(tmp_path, monkey
         "code": "db_unavailable",
         "retryable": True,
     }
+
+
+@pytest.mark.parametrize(
+    ("target", "code"),
+    [("bundle", "frozen_bundle_corrupt"), ("environment", "frozen_environment_corrupt")],
+)
+def test_a_listing_close_failure_during_verify_keeps_the_frozen_code(
+    tmp_path, monkeypatch, target: str, code: str,
+) -> None:
+    from tests._walk_faults import track_closes
+    from tests.test_frozen_artifact_offline import _publish
+
+    store, db, manifest = _publish(tmp_path)
+    monkeypatch.setenv("ALGUA_DB_PATH", str(db))
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(store))
+    locator = manifest.bundle.locator if target == "bundle" else manifest.environment.locator
+    track_closes(monkeypatch, faulty=store / locator, fault=RuntimeError)
+
+    invocation = runner.invoke(app, ["deployment", "verify", manifest.digest])
+
+    payload = json.loads(invocation.stdout)
+    assert invocation.exit_code != 0
+    assert (payload["ok"], payload["code"], payload["retryable"]) == (False, code, False)

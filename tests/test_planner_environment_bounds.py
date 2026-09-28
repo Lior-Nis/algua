@@ -349,6 +349,32 @@ def test_inventory_keeps_its_typed_refusal_when_closing_the_walk_fails(
     assert closed and all(closed.values()), closed
 
 
+@pytest.mark.parametrize("fault", [RuntimeError, ValueError, 5])
+def test_an_inventory_listing_close_failure_is_environment_incompatible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: object,
+) -> None:
+    env = _environment(tmp_path)
+    closed = track_closes(monkeypatch, faulty=env, fault=fault)
+
+    with pytest.raises(EnvironmentIncompatible, match="could not be closed"):
+        inventory_environment(env)
+
+    assert closed and all(closed.values()), closed
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_an_interrupt_while_closing_an_inventory_listing_is_not_translated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interrupt: type[BaseException],
+) -> None:
+    env = _environment(tmp_path)
+    closed = track_closes(monkeypatch, faulty=env, fault=interrupt)
+
+    with pytest.raises(interrupt):
+        inventory_environment(env)
+
+    assert closed and all(closed.values()), closed
+
+
 @pytest.mark.parametrize(
     "name",
     [b"cafe\xcc\x81", b"pkg ", b"pkg.", b"p\\kg", b"\xffpkg"],

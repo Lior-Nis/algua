@@ -419,3 +419,33 @@ def test_sealing_keeps_its_typed_refusal_when_closing_fails(
         environment_store._seal_and_sync(stage)
 
     assert closed and all(closed.values()), closed
+
+
+@pytest.mark.parametrize("fault", [RuntimeError, ValueError, 5])
+def test_a_published_environment_listing_close_failure_is_a_typed_store_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: object,
+) -> None:
+    stage = _stage(tmp_path)
+    descriptor = _descriptor(stage)
+    published = publish_environment(tmp_path / "store", stage, descriptor)
+    closed = track_closes(monkeypatch, faulty=published, fault=fault)
+
+    with pytest.raises(EnvironmentStoreError) as caught:
+        verify_published_environment(tmp_path / "store", descriptor)
+
+    assert "could not be closed" in str(caught.value.__cause__)
+    assert closed and all(closed.values()), closed
+
+
+def test_a_sealing_listing_close_failure_is_a_typed_store_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from algua.registry import environment_store
+
+    stage = _stage(tmp_path)
+    closed = track_closes(monkeypatch, faulty=stage, fault=RuntimeError)
+
+    with pytest.raises(EnvironmentStoreError, match="could not be closed"):
+        environment_store._seal_and_sync(stage)
+
+    assert closed and all(closed.values()), closed

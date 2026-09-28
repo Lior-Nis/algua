@@ -96,11 +96,12 @@ def test_an_early_exit_still_reports_the_cleanup_failure(
     _chain(tmp_path)
     closed = track_closes(monkeypatch, faulty=tmp_path / "d1", fault=RuntimeError)
 
-    with pytest.raises(RuntimeError), _scoped(tmp_path) as tree:
+    with pytest.raises(walk_module.WalkCleanupError) as caught, _scoped(tmp_path) as tree:
         for entry in tree:
             if entry.relative == "d1/d2/d3":
                 break
 
+    assert type(caught.value.__cause__) is RuntimeError
     assert all(closed.values()), closed
 
 
@@ -132,7 +133,7 @@ def test_an_early_scope_exit_retries_a_listing_that_failed_before_release(
     _chain(tmp_path)
     closed = track_closes(monkeypatch, faulty=tmp_path / "d1", release=False, times=1)
 
-    with pytest.raises(OSError), _scoped(tmp_path) as tree:
+    with pytest.raises(walk_module.WalkCleanupError), _scoped(tmp_path) as tree:
         for entry in tree:
             if entry.relative == "d1/d2/d3":
                 break
