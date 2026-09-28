@@ -502,6 +502,25 @@ These identities are non-cyclic. An environment-only change does not change `bun
 - [x] [Review][Patch] Keep a consumer's typed validation error primary when closing the walk also
   fails, through one shared scoped-walk seam that every production `bounded_walk` consumer uses,
   while still closing every listing [algua/primitives/bounded_walk.py:50]
+- [ ] [Review][Patch] Accept every valid HTTPS wheel URL supported by the pinned uv acquisition
+  path while deriving a separate canonical identity for duplicate ownership, rather than rejecting
+  authoritative query-bearing, IPv6 or RFC sub-delimiter URLs
+  [algua/registry/planner_environment_lock.py:33]
+- [ ] [Review][Patch] Give every non-exhausted stacked directory listing a bounded cleanup retry
+  after a close fails before releasing it, without stopping cleanup of the remaining listings
+  [algua/primitives/bounded_walk.py:41]
+- [ ] [Review][Patch] Select a recorded cleanup interrupt by explicit presence rather than exception
+  truthiness, so a falsey `BaseException` subclass cannot be demoted
+  [algua/primitives/bounded_walk.py:60]
+- [ ] [Review][Patch] Surface a listing close that raises `GeneratorExit` during generator
+  abandonment instead of allowing `generator.close()` to suppress the cleanup failure
+  [algua/primitives/bounded_walk.py:95]
+- [ ] [Review][Patch] Translate ordinary scoped-walk close failures after otherwise successful
+  traversal into each consumer's stable artifact/environment error taxonomy while preserving typed
+  consumer refusals and real interrupts [algua/registry/artifact_store.py:100]
+- [ ] [Review][Patch] Replace the regex-only direct-call guard with AST/import-aware enforcement so
+  an aliased or module-qualified `bounded_walk` call cannot bypass the required `scoped_walk` seam
+  [tests/primitives/test_scoped_walk.py:99]
 
 ## Development notes
 
