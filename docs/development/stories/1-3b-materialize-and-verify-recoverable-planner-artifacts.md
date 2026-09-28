@@ -302,6 +302,30 @@ These identities are non-cyclic. An environment-only change does not change `bun
   fixed filesystem closure for integration so the normal root gate does not create thousands of
   source files or scale with a mutable interpreter recursion limit
   [tests/test_module_refresh.py:264]
+- [ ] [Review][Patch] Restore parent bindings changed by transient imports even when attempted code
+  removes its own child entry from `sys.modules` before failing
+  [algua/primitives/module_refresh.py:116]
+- [ ] [Review][Patch] Fail preflight on importable sourceless bytecode or other non-source family
+  entries that a dynamic import could execute outside the statically validated source closure
+  [algua/primitives/module_refresh.py:146]
+- [ ] [Review][Patch] Constrain fresh package search locations to the exact prevalidated family
+  roots before any child import so package `__init__` cannot extend `__path__` into an unscanned tree
+  [algua/primitives/module_refresh.py:91]
+- [ ] [Review][Patch] Reject a nested refresh transaction on the same thread while retaining safe
+  same-thread re-entrancy for ordinary serialized imports
+  [algua/primitives/module_refresh.py:43]
+- [ ] [Review][Patch] Reinitialize the private refresh lock in a forked child so a vanished owner
+  cannot leave every later strategy load permanently blocked
+  [algua/primitives/module_refresh.py:44]
+- [ ] [Review][Patch] Translate family-tree inspection `OSError` failures into the stable
+  `ModuleRefreshError` contract with bounded non-host-specific diagnostics
+  [algua/primitives/module_refresh.py:150]
+- [ ] [Review][Patch] Limit rollback namespace snapshots to package/direct-parent binding state so
+  refresh cost does not scale with every global in every loaded scientific module
+  [algua/primitives/module_refresh.py:102]
+- [ ] [Review][Patch] Replace the deadlock regression's scheduling sleep with an event handshake
+  proving the refresher reached the contested import before the blocked importer is released
+  [tests/test_module_refresh.py:613]
 
 ## Development notes
 
