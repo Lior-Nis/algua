@@ -2,16 +2,13 @@
 from __future__ import annotations
 
 import platform
-import re
 import shutil
 import subprocess
 import sys
 import sysconfig
-import tomllib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
 
 from algua.primitives.bounded_subprocess import (
     BoundedCompletion,
@@ -21,7 +18,6 @@ from algua.primitives.bounded_subprocess import (
 from algua.registry.artifact_contract import BuildInputs
 from algua.registry.environment_contract import (
     EnvironmentKey,
-    InstalledDistribution,
     InstalledInventory,
     InterpreterIdentity,
 )
@@ -34,6 +30,7 @@ from algua.registry.planner_environment_inventory import (
     inventory_environment,
     scrubbed_environment,
 )
+from algua.registry.planner_environment_lock import locked_wheels, validate_lock
 from algua.registry.planner_environment_outage import is_locked_wheel_outage
 from algua.registry.planner_environment_probe import verify_environment
 
@@ -99,73 +96,6 @@ def _by_path(inputs: tuple[FrozenFile, ...]) -> dict[str, FrozenFile]:
     if set(result) != expected:
         raise EnvironmentIncompatible("environment build inputs are incomplete")
     return result
-
-
-def locked_wheels(raw: bytes) -> dict[str, tuple[str, str]]:
-    """Validate the committed lock and map every locked wheel URL to its canonical identity.
-
-    Total over arbitrary bytes: any malformation is `EnvironmentIncompatible`. Each registry
-    package must carry a PEP 503 canonical name and a bounded version, and no wheel URL may be
-    locked for two packages.
-    """
-    try:
-        payload = tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-        raise EnvironmentIncompatible("committed uv lock is invalid") from exc
-    packages = payload.get("package")
-    if not isinstance(packages, list):
-        raise EnvironmentIncompatible("committed uv lock has no package inventory")
-    result: dict[str, tuple[str, str]] = {}
-    for package in packages:
-        if not isinstance(package, dict):
-            raise EnvironmentIncompatible("committed uv lock package is invalid")
-        source = package.get("source")
-        name: Any = package.get("name")
-        if name == "algua" and source == {"editable": "."}:
-            continue
-        if not isinstance(source, dict) or set(source) != {"registry"}:
-            raise EnvironmentIncompatible(
-                "local, editable, URL and VCS dependencies are unsupported")
-        version: Any = package.get("version")
-        try:
-            identity = InstalledDistribution(name, version)
-        except ValueError as exc:
-            raise EnvironmentIncompatible(
-                "locked package name or version is not canonical") from exc
-        wheels = package.get("wheels")
-        if not isinstance(wheels, list) or not wheels:
-            raise EnvironmentIncompatible("every locked registry package requires a wheel")
-        for wheel in wheels:
-            if not isinstance(wheel, dict):
-                raise EnvironmentIncompatible("locked wheel metadata is invalid")
-            url = wheel.get("url")
-            digest = wheel.get("hash")
-            if not isinstance(url, str) or not isinstance(digest, str):
-                raise EnvironmentIncompatible("locked wheel URL or hash is not canonical")
-            # `urlsplit` silently strips tabs, newlines and leading spaces and normalizes the
-            # scheme or an empty query/fragment, so only a printable URL that round-trips exactly
-            # is one canonical key for duplicate detection and outage evidence.
-            if not url.isprintable():
-                raise EnvironmentIncompatible("locked wheel URL contains non-printable characters")
-            try:
-                parsed = urlsplit(url)
-                netloc = parsed.hostname
-            except ValueError as exc:
-                raise EnvironmentIncompatible("locked wheel URL is malformed") from exc
-            if (
-                urlunsplit(parsed) != url or parsed.scheme != "https" or not netloc
-                or parsed.username is not None or parsed.password is not None or parsed.fragment
-                or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
-            ):
-                raise EnvironmentIncompatible("locked wheel URL or hash is not canonical")
-            if url in result:
-                raise EnvironmentIncompatible("a wheel URL is locked for more than one package")
-            result[url] = (identity.name, identity.version)
-    return result
-
-
-def validate_lock(raw: bytes) -> None:
-    locked_wheels(raw)
 
 
 def build_environment_key(

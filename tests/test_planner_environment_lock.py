@@ -124,11 +124,107 @@ def test_url_aliases_cannot_evade_duplicate_detection(alias: str) -> None:
         planner_environment.locked_wheels(lock)
 
 
-def test_repository_lock_has_canonical_identities() -> None:
-    wheels = planner_environment.locked_wheels((REPO / "uv.lock").read_bytes())
+MALFORMED_WHEEL_URLS = {
+    "uppercase-host": "HTTPS://files.pythonhosted.org/x.whl".replace("HTTPS", "https").replace(
+        "files", "FILES"),
+    "mixed-case-host": "https://Files.PythonHosted.org/x.whl",
+    "trailing-dot-host": "https://files.pythonhosted.org./x.whl",
+    "ipv6-literal": "https://[::1]/x.whl",
+    "underscore-host": "https://files_python.org/x.whl",
+    "overlong-hostname": "https://" + ".".join(["a" * 63] * 4) + "/x.whl",
+    "default-port": "https://files.pythonhosted.org:443/x.whl",
+    "empty-port": "https://files.pythonhosted.org:/x.whl",
+    "zero-port": "https://files.pythonhosted.org:0/x.whl",
+    "port-out-of-range": "https://files.pythonhosted.org:65536/x.whl",
+    "huge-port": "https://files.pythonhosted.org:99999999999/x.whl",
+    "leading-zero-port": "https://files.pythonhosted.org:0443/x.whl",
+    "non-numeric-port": "https://files.pythonhosted.org:https/x.whl",
+    "credentials": "https://user@files.pythonhosted.org/x.whl",
+    "empty-userinfo": "https://@files.pythonhosted.org/x.whl",
+    "inner-space": "https://files.pythonhosted.org/x y.whl",
+    "trailing-space": "https://files.pythonhosted.org/x.whl ",
+    "non-ascii": "https://files.pythonhosted.org/café.whl",
+    "short-escape": "https://files.pythonhosted.org/x%2.whl",
+    "non-hex-escape": "https://files.pythonhosted.org/x%zz.whl",
+    "lowercase-escape": "https://files.pythonhosted.org/x%2b1.whl",
+    "escaped-unreserved": "https://files.pythonhosted.org/%41.whl",
+    "escaped-tilde": "https://files.pythonhosted.org/x%7E.whl",
+    "query": "https://files.pythonhosted.org/x.whl?sig=abc",
+    "fragment": "https://files.pythonhosted.org/x.whl#sha256=abc",
+    "empty-segment": "https://files.pythonhosted.org//x.whl",
+    "dot-segment": "https://files.pythonhosted.org/./x.whl",
+    "dot-dot-segment": "https://files.pythonhosted.org/a/../x.whl",
+    "backslash": "https://files.pythonhosted.org/a\\\\x.whl",
+    "angle-bracket": "https://files.pythonhosted.org/<x>.whl",
+    "raw-sub-delimiter": "https://files.pythonhosted.org/torch-2.4.0+cpu-py3-none-any.whl",
+    "raw-at-sign": "https://files.pythonhosted.org/a@b.whl",
+    "no-path": "https://files.pythonhosted.org",
+    "not-a-wheel": "https://files.pythonhosted.org/x.tar.gz",
+    "http": "http://files.pythonhosted.org/x.whl",
+}
 
-    assert wheels
-    assert all(url.startswith("https://") for url in wheels)
+
+@pytest.mark.parametrize("toml_url", MALFORMED_WHEEL_URLS.values(),
+                         ids=MALFORMED_WHEEL_URLS.keys())
+def test_locked_wheel_urls_must_be_one_canonical_https_identity(toml_url: str) -> None:
+    with pytest.raises(EnvironmentIncompatible):
+        planner_environment.locked_wheels(_lock(wheels=_wheel(toml_url)))
+
+
+CANONICAL_WHEEL_URLS = [
+    "https://files.pythonhosted.org/packages/aa/bb/six-1.17.0-py2.py3-none-any.whl",
+    "https://download.example.org:8443/whl/torch-2.4.0%2Bcpu-cp312-cp312-linux_x86_64.whl",
+    "https://mirror-1.example.org/simple/pkg/pkg-1.0-py3-none-any.whl",
+    "https://" + ".".join(["a" * 63] * 3 + ["b" * 61]) + ":65535/x.whl",
+]
+
+
+@pytest.mark.parametrize("url", CANONICAL_WHEEL_URLS)
+def test_canonical_https_wheel_urls_are_accepted_as_their_own_identity(url: str) -> None:
+    assert planner_environment.locked_wheels(_lock(wheels=_wheel(url))) == {
+        url: ("six", "1.17.0")}
+
+
+SEMANTIC_ALIASES = {
+    "host-case": ("https://files.pythonhosted.org/x.whl", "https://FILES.pythonhosted.org/x.whl"),
+    "default-port": ("https://files.pythonhosted.org/x.whl",
+                     "https://files.pythonhosted.org:443/x.whl"),
+    "escape-case": ("https://files.pythonhosted.org/x%2B1.whl",
+                    "https://files.pythonhosted.org/x%2b1.whl"),
+    "escaped-unreserved": ("https://files.pythonhosted.org/A.whl",
+                           "https://files.pythonhosted.org/%41.whl"),
+    "dot-segment": ("https://files.pythonhosted.org/x.whl",
+                    "https://files.pythonhosted.org/./x.whl"),
+    "trailing-dot-host": ("https://files.pythonhosted.org/x.whl",
+                          "https://files.pythonhosted.org./x.whl"),
+    "escaped-vs-raw-plus": ("https://files.pythonhosted.org/x%2Bcpu.whl",
+                            "https://files.pythonhosted.org/x+cpu.whl"),
+}
+
+
+@pytest.mark.parametrize("pair", SEMANTIC_ALIASES.values(), ids=SEMANTIC_ALIASES.keys())
+def test_semantic_aliases_cannot_claim_a_second_wheel_owner(pair: tuple[str, str]) -> None:
+    canonical, alias = pair
+    lock = _lock(wheels=_wheel(canonical), extra=(
+        "[[package]]\nname = 'other'\nversion = '1.0'\n"
+        "source = { registry = 'https://pypi.org/simple' }\n" + _wheel(alias) + "\n"))
+
+    with pytest.raises(EnvironmentIncompatible):
+        planner_environment.locked_wheels(lock)
+
+
+def test_repository_lock_has_canonical_identities() -> None:
+    import tomllib
+
+    raw = (REPO / "uv.lock").read_bytes()
+    wheels = planner_environment.locked_wheels(raw)
+    locked = [
+        wheel["url"] for package in tomllib.loads(raw.decode())["package"]
+        for wheel in package.get("wheels", [])
+    ]
+
+    assert len(locked) == 1785
+    assert sorted(wheels) == sorted(locked)  # every real locked wheel URL is its own identity
 
 
 def test_provision_refuses_a_malformed_lock_before_running_uv(
