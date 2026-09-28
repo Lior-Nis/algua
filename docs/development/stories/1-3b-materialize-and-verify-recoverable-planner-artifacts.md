@@ -644,31 +644,31 @@ These identities are non-cyclic. An environment-only change does not change `bun
 
 #### Review findings against `48f9934` (2026-09-28)
 
-- [ ] [Review][Patch] Keep a lazy body's entry state path-correlated instead of joining the
+- [x] [Review][Patch] Keep a lazy body's entry state path-correlated instead of joining the
   enclosing scope's final bindings into every generator and coroutine, so a raw alias reached
   only on a sibling path where the object does not exist cannot create a false positive (Todoist
   6hfPmMP337jqHpGG) [tests/primitives/test_scoped_walk.py:446]
-- [ ] [Review][Patch] Preserve a returned lazy object's captured closure environment separately
+- [x] [Review][Patch] Preserve a returned lazy object's captured closure environment separately
   from later caller bindings, so a factory-local shadow cannot be overwritten by a caller-local
   rebind while genuine globals still retain Python's late-binding behavior (Todoist
   6hfPmMMPmhrfqvjG) [tests/primitives/test_scoped_walk.py:535]
-- [ ] [Review][Patch] Propagate returned lazy objects from feasible return states rather than a
+- [x] [Review][Patch] Propagate returned lazy objects from feasible return states rather than a
   syntax-only name-to-one-node scan: ignore unreachable returns, resolve simple aliases and
   conditional results, and retain every definition that can reach a return (Todoist
   6hfPvjHrFwhGvmxp) [tests/primitives/test_scoped_walk.py:535]
-- [ ] [Review][Patch] Keep lazy objects created only as discarded comprehension temporaries
+- [x] [Review][Patch] Keep lazy objects created only as discarded comprehension temporaries
   confined to comprehension evaluation while preserving objects that actually escape in the
   result or through a modeled side effect (Todoist 6hfPvjP4PqJ74J2G)
   [tests/primitives/test_scoped_walk.py:573]
-- [ ] [Review][Patch] Evaluate a class comprehension's first iterable in class state and its body
+- [x] [Review][Patch] Evaluate a class comprehension's first iterable in class state and its body
   in lexical/module state, matching Python's nested comprehension scope so class-local shadows
   cannot hide a raw module alias (Todoist 6hfPvjR73hhFw8fG)
   [tests/primitives/test_scoped_walk.py:573]
-- [ ] [Review][Patch] Separate per-object lazy environments from the shared bindings map and cache
+- [x] [Review][Patch] Separate per-object lazy environments from the shared bindings map and cache
   repeated syntax summaries where needed, preventing the measured superlinear scan growth as live
   lazy objects accumulate (Todoist 6hfPvjhRQ6jVqfgp)
   [tests/primitives/test_scoped_walk.py:516]
-- [ ] [Review][Patch] Classify long unary-`not` chains iteratively or with an explicit safe bound,
+- [x] [Review][Patch] Classify long unary-`not` chains iteratively or with an explicit safe bound,
   so a valid module cannot crash repository hygiene with `RecursionError` (Todoist
   6hfPWRXC8MMwMrcG) [tests/primitives/test_scoped_walk.py:305]
 
@@ -1090,6 +1090,50 @@ uv run lint-imports
   URL grammars, and a bare-name reference check subsumed by the import check). The full
   5,065-test root gate (`-p no:randomly`), ruff, mypy, all 28 import contracts and
   `git diff --check` pass.
+- Review findings against `48f9934` (7 test-only patches, `tests/primitives/test_scoped_walk.py`):
+  62 new cases (241 to 303 guard-file tests). Run against the `48f9934` analyzer, 41 fail and 21
+  pass before and after as preservation proofs. Every fixture is transient raw-then-safe: the
+  alias is raw only between a call and a later safe rebind, so a final-state join cannot supply
+  the flag. Entry correlation (`:550`): a generator, handler, `match` case and generator
+  expression made only on the branch opposite a final raw alias were flagged (4 false
+  positives). A lazy body now starts only from what its objects saw. A lazy function no object
+  of which is made in its scope still reads the final names, which is pinned by a positive case.
+  Closures (`:376`, `:606`, `:626`): factory-local assignment, parameter, import, match capture,
+  `def` and handler shadows, plus a shadow while the caller alias was raw at the call, were all
+  overwritten by the caller (8 false positives). A returned object now reads its factory's own
+  names from the closure. `global` names, comprehension targets and a caller-scope generator
+  returned by a shadowing factory stay late-bound. Returns (`:651`, `_ReturnFlow` `:1011`): an
+  alias, callee alias, conditional, `and`, walrus and same-name conditional definition missed
+  the raw caller alias (6 false negatives). A return after a return, under a false literal or
+  replaced by a `finally` return manufactured an object (3 false positives). Returned objects now
+  come from feasible `return` states, and a `return` leaves through every `finally`.
+  Comprehension temporaries (`:427`): a generator only passed to `bool`/`next`, tested by a
+  filter, unpacked by `*` or passed to `any` escaped (7 false positives, including a class
+  comprehension). The result, a walrus or a method argument still escapes: tuple, list, set and
+  dict displays, conditional and `and` results, nested results, dict values, and a stored call
+  after a same-function temporary. Class comprehensions (`:684`): a module alias the class
+  shadows was missed in the element, filter, later iterable and a nested comprehension (4 false
+  negatives), and a class-only alias was flagged in the body (1 false positive). The first
+  iterable still reads the class. Complexity: lazy views no longer live in the shared bindings.
+  `_live_generators` sums the bindings entries each statement reads, which is deterministic, not
+  wall-clock. At 100/200/400 live generator expressions the sum was 10,709/41,409/162,809
+  (quadratic) and is now 309/609/1,209. A local 400-object scan took 2.76 s and now takes 0.011 s
+  (0.006/0.008/0.011 s at 200/300/400). `_runs_later`, comprehension escapes and return
+  summaries are cached per node. Recursion (`:311`, `:366`, `:714`): under a pinned default
+  recursion limit (1,000, because a plugin raises it to 3,000 under pytest), 1,100 nested `not`s
+  raised `RecursionError` in `while`/`if` tests, an assignment, a function body, a filter and a
+  literal display (7 cases). `_static_truth`, `_static_number`, `_condition`, `_expression` and
+  `_own_nodes` now iterate, and the 1,101-`not` case keeps its body reachable. 46 mutations
+  were run on copies outside the checkout, each with a 90 s cap. An earlier in-place run was
+  killed by the environment before it finished; its partial output is not claimed, and the one
+  mutant it left applied was restored before re-verification. In the first bounded pass, 38
+  mutants failed an assertion, 7 survived and one (a views-in-bindings mutant that also copied
+  shadow keys) timed out. Seven new cases closed the survivors: a closure snapshot at the call,
+  closure names applied to a caller generator, a literal `if`/`and` return, per-site object
+  identity, deferral inside a class comprehension and a recursive literal `not`. A faithful
+  views-in-bindings mutant fails the near-linear assertion. All 46 now fail an assertion. The
+  full 5,378-test root gate (`-p no:randomly`), ruff, mypy, all 28 import contracts and
+  `git diff --check` pass.
 
 ### Completion Notes
 
@@ -1505,3 +1549,8 @@ uv run lint-imports
   visible cleanup `GeneratorExit`, frozen error taxonomy for listing-close failures, an
   import-aware scoped-walk guard); the full 5,065-test root gate, ruff, mypy, all 28 import
   contracts and `git diff --check` pass.
+- 2026-09-28: Addressed all 7 review findings against `48f9934` test-first (path-correlated lazy
+  entry, closure-captured names of returned objects, feasible-return object propagation,
+  confined comprehension temporaries, Python class-comprehension scope, near-linear lazy
+  observation, iterative `not`-chain classification); the full 5,378-test root gate, ruff, mypy,
+  all 28 import contracts and `git diff --check` pass.
