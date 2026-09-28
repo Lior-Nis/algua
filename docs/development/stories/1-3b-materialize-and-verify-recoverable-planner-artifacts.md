@@ -326,6 +326,27 @@ These identities are non-cyclic. An environment-only change does not change `bun
 - [x] [Review][Patch] Replace the deadlock regression's scheduling sleep with an event handshake
   proving the refresher reached the contested import before the blocked importer is released
   [tests/test_module_refresh.py:613]
+- [ ] [Review][Patch] Resolve and validate every family spec against its exact deterministic
+  in-root source path so a poisoned path-entry finder or stale loaded-package spec cannot make
+  preflight inspect one tree while execution loads another
+  [algua/primitives/module_refresh.py:152]
+- [ ] [Review][Patch] Recover a forked child's complete inherited refresh transaction state by
+  restoring its pre-refresh modules/bindings, removing inherited guards, resetting transaction
+  state and replacing the vanished owner's lock before later loads proceed
+  [algua/primitives/module_refresh.py:55]
+- [ ] [Review][Patch] Validate the committed fresh family graph so every reached entry remains a
+  source-backed `ModuleType`, is identically bound in `sys.modules` and on its direct parent, and
+  every package retains its exact confined `__path__`
+  [algua/primitives/module_refresh.py:165]
+- [ ] [Review][Patch] Translate source stat/read/parse failures into bounded path-free
+  `ModuleRefreshError` diagnostics rather than leaking raw `OSError` or absolute-path `SyntaxError`
+  [algua/primitives/module_source_scan.py:116]
+- [ ] [Review][Patch] Reject non-regular importable source entries such as FIFOs, sockets and
+  devices during preflight so a dynamic source import cannot block or execute unsupported content
+  [algua/primitives/module_source_scan.py:50]
+- [ ] [Review][Patch] Translate bytecode-purge failures into the stable bounded refresh error
+  contract and explicitly prove partial cache deletion cannot commit or mutate the module graph
+  [algua/primitives/module_refresh.py:217]
 
 ## Development notes
 
