@@ -359,10 +359,10 @@ These identities are non-cyclic. An environment-only change does not change `bun
   second thread in the child cannot acquire a replacement lock and enter the still-active partial
   transaction before its owner commits or rolls back
   [algua/primitives/module_refresh.py:72]
-- [ ] [Review][Patch] Pin the exact concrete `ModuleSpec` and original `SourceFileLoader` identity
+- [x] [Review][Patch] Pin the exact concrete `ModuleSpec` and original `SourceFileLoader` identity
   and state handed to the import system so executed code cannot commit a forged spec subclass or a
   same-shaped replacement loader with altered behavior
-  [algua/primitives/module_refresh.py:220]
+  [algua/primitives/module_commit_check.py:62]
 
 ## Development notes
 
@@ -567,6 +567,22 @@ uv run lint-imports
   attribute also fails closed. `module_refresh.py` stays at 299 lines, under the size-ratchet
   floor, by tightening prose rather than raising a pin. All 25 bundled strategies still refresh
   twice through `_reload_strategy_closure`.
+- Tenth review round: 7 new cases. The fix pushed `module_refresh.py` to 306 lines, over the
+  size-ratchet floor, so the commit-time validation (recorded facts, exact binding and metadata
+  checks) first moved unchanged into the protected `module_commit_check.py` (CODEOWNERS and
+  hygiene list) with the full refresh suite green. On that carved baseline 5 of 6 initial cases
+  failed red: a `__class__` swap of a member's spec and of the root's own spec to a `ModuleSpec`
+  subclass, a same-shaped `SourceFileLoader` (same name and path) bound to both the spec and
+  `__loader__`, and an instance `get_code` or `get_data` attribute injected onto the original
+  loader all committed. A loader `__class__` swap to a subclass was already refused by the exact
+  loader type and is kept as a regression; a same-shaped loader bound only to the spec was added
+  after green to pin the spec-loader identity independently of `__loader__`. Every case proves
+  complete rollback of family entries and parent bindings. Six mutations were run and all are
+  killed: dropping the exact spec class, the spec-loader identity, the module-loader identity,
+  the exact loader class or the loader-state snapshot check, and re-reading the loader from the
+  live spec instead of the recorded original. `module_refresh.py` is 246 lines and
+  `module_commit_check.py` 90. The full 4,499-test root gate (`-p no:randomly`), ruff, mypy and
+  all 28 import contracts pass.
 
 ### Completion Notes
 
@@ -708,6 +724,17 @@ uv run lint-imports
   reset and recovery. The import-quiescent precondition, the accepted in-process/no-sandbox
   residual and every live, authority, deployment and capital wall are unchanged; malicious
   strategy sandboxing remains out of scope.
+- Tenth review round complete: when the guard hands a family spec to the import system it records
+  the original `SourceFileLoader` object and an immutable snapshot of its complete instance
+  state. Commit requires the handed-out spec object to be exactly a `ModuleSpec`, both its
+  `loader` and the module's `__loader__` to be that original loader object, still exactly a
+  `SourceFileLoader`, and its instance state to equal the snapshot with exact key and value
+  types, alongside the existing recorded spec/module metadata checks; only identity and
+  exact-type comparisons are used. A spec class swap, a same-shaped replacement loader or an
+  injected loader operation rolls the complete transaction back. The commit validation lives in
+  the carved, protected `module_commit_check.py`. Mutation of the shared stdlib classes
+  themselves stays inside the accepted in-process/no-sandbox residual; the import-quiescent
+  precondition and every live, authority, deployment and capital wall are unchanged.
 
 ### File List
 
@@ -734,6 +761,7 @@ uv run lint-imports
 - `algua/strategies/loader.py`
 - `algua/primitives/module_refresh.py`
 - `algua/primitives/module_source_scan.py`
+- `algua/primitives/module_commit_check.py`
 - `CODEOWNERS`
 - `docs/development/sprint-status.yaml`
 - `docs/contracts/cli-error-envelope.md`
@@ -799,3 +827,7 @@ uv run lint-imports
 - 2026-09-28: Addressed all 3 ninth-round review patches test-first (canonical frozen package
   root, recorded source-spec facts and module metadata validated at commit, owner-fork lock
   preservation); the full 4,492-test root gate, ruff, mypy and all 28 import contracts pass.
+- 2026-09-28: Addressed the tenth-round review patch test-first (exact handed-out `ModuleSpec`
+  class and original `SourceFileLoader` identity and instance state validated at commit) and
+  carved the protected `module_commit_check.py`; the full 4,499-test root gate, ruff, mypy and
+  all 28 import contracts pass.
