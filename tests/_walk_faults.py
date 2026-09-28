@@ -72,3 +72,56 @@ def count_scandir_pulls(monkeypatch: pytest.MonkeyPatch) -> dict[Path, int]:
 
     monkeypatch.setattr(os, "scandir", scandir)
     return pulls
+
+
+class TrackedListing:
+    """A scandir proxy that records whether its real listing was released.
+
+    A faulty proxy raises its fault from `close()`; by default it releases the listing first, and
+    with `release=False` it raises before releasing. `times` bounds how many closes fail.
+    """
+
+    def __init__(self, inner, path: Path, fault, closed: dict[Path, bool], *,
+                 release: bool = True, times: int | None = None) -> None:
+        self._inner = inner
+        self._path = path
+        self._fault = fault
+        self._release = release
+        self._times = times
+        self._closed = closed
+        closed[path] = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._inner)
+
+    def close(self) -> None:
+        failing = self._fault is not None and (self._times is None or self._times > 0)
+        if failing and self._times is not None:
+            self._times -= 1
+        if self._release or not failing:
+            self._inner.close()
+            self._closed[self._path] = True
+        if failing:
+            if isinstance(self._fault, int):
+                raise OSError(self._fault, "injected close fault")
+            raise self._fault("injected close fault")
+
+
+def track_closes(
+    monkeypatch: pytest.MonkeyPatch, faulty: Path, *, also: dict[Path, object] | None = None,
+    fault: object = errno.EIO, release: bool = True, times: int | None = None,
+) -> dict[Path, bool]:
+    original = os.scandir
+    closed: dict[Path, bool] = {}
+    faults = {faulty: fault, **(also or {})}
+
+    def scandir(path):
+        target = Path(os.fsdecode(path))
+        return TrackedListing(original(path), target, faults.get(target), closed,
+                        release=release, times=times)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    return closed
