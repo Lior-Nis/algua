@@ -398,34 +398,40 @@ These identities are non-cyclic. An environment-only change does not change `bun
 - [x] [Review][Patch] Make the fourteenth-round pointer correction internally consistent by naming
   the actual membership guard at `module_commit_check.py:105`, not the `optional` tuple at line 104
   [docs/development/stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md:391]
-- [ ] [Review][Patch] Publish bundle and environment directories with an atomic no-replace primitive
+- [x] [Review][Patch] Publish bundle and environment directories with an atomic no-replace primitive
   so the final operation itself cannot replace a destination created after the existence check;
   verify an `EEXIST` winner and fail closed when no supported no-replace primitive exists
   [algua/registry/artifact_store.py:165]
-- [ ] [Review][Patch] Make bundle and environment tree walks fail closed on traversal errors and
+- [x] [Review][Patch] Make bundle and environment tree walks fail closed on traversal errors and
   enforce the protected bundle file-count bound while inventorying, before memory can grow past it
   [algua/registry/artifact_store.py:82]
-- [ ] [Review][Patch] Make installed-environment inventory complete and resource-bounded: reject
+- [x] [Review][Patch] Make installed-environment inventory complete and resource-bounded: reject
   uninventoried empty directories, cap file count/per-file/aggregate bytes, and read distribution
   metadata through an explicit byte bound
   [algua/registry/planner_environment_inventory.py:88]
-- [ ] [Review][Patch] Run the final interpreter probe without installed startup hooks, bound both
+- [x] [Review][Patch] Run the final interpreter probe without installed startup hooks, bound both
   output streams, explicitly expose only the environment import roots needed for the `algua`
   check, and reject non-object or non-canonical probe JSON through `EnvironmentIncompatible`
   [algua/registry/planner_environment_inventory.py:146]
-- [ ] [Review][Patch] Bound uv version/create/sync output and normalize launch-time `OSError`
+- [x] [Review][Patch] Bound uv version/create/sync output and normalize launch-time `OSError`
   failures so no provisioning command can exhaust memory or escape the typed incompatibility
   boundary despite its timeout
   [algua/registry/planner_environment.py:49]
-- [ ] [Review][Patch] Classify retryable environment unavailability only from positive evidence of
+- [x] [Review][Patch] Classify retryable environment unavailability only from positive evidence of
   a locked compatible-wheel acquisition outage using bounded stdout and stderr; ambiguous timeout,
   checksum, TLS/configuration and malformed wheel-URL failures must default to non-retryable
   incompatibility
   [algua/registry/planner_environment.py:97]
-- [ ] [Review][Patch] Exercise real offline final-locator verification without checkout, Git, uv or
+- [x] [Review][Patch] Exercise real offline final-locator verification without checkout, Git, uv or
   network, plus per-digest-lock and post-publication final-verification fault boundaries, instead
   of satisfying the mandatory matrix through verifier stubs
   [tests/test_frozen_artifact_verification.py:20]
+- [ ] [Review][Patch] Pin a `uv sync` argv that the repository's uv 0.9.26 accepts: `--no-env-file`
+  is a `uv run` option, so the normative sync argv exits with `unexpected argument
+  '--no-env-file'` and real locked provisioning can never succeed. Correcting it changes the keyed
+  sync argv, the environment-key golden vector and the normative companion together, so it needs
+  its own reviewed contract change rather than an incidental patch
+  [algua/registry/planner_environment.py:47]
 
 ## Development notes
 
@@ -738,6 +744,31 @@ uv run lint-imports
   `:105` tests them); the rollback finding names the snapshot line. `module_refresh.py` is 264
   lines. The full 4,568-test root gate (`-p no:randomly`), ruff, mypy and all 28 import
   contracts pass.
+- Publication review chunk 2 (baseline `932cf2e`): all 7 accepted patches first failed red.
+  No-replace: the primitive was absent; a winner inserted after the existence check made the
+  final `os.rename` fail `ENOTEMPTY` instead of verifying it, and an empty destination directory
+  was silently replaced, for both stores. Walks: a smuggled bundle subtree verified clean, an
+  environment whose `lib/` listing failed was published unsealed before failing, a writable file
+  and an omitted inventory subtree went unseen; listing faults are injected at `os.scandir`, not
+  through permission bits. Inventory: three empty-directory shapes were accepted and non-UTF-8
+  METADATA leaked `UnicodeDecodeError`. The locked no-dev environment built with the normative
+  flags (minus `--no-env-file`, see the new finding) has 23,849 files, 861.4 MiB, a 160.0 MiB
+  largest file, 115.9 KiB largest METADATA and zero empty directories, so no staging
+  normalization is added; the protected bounds are 100,000 entries, 512 MiB per file, 4 GiB
+  aggregate and 1 MiB METADATA, and the dev superset (25,593 files, 949.7 MiB) is proven to fit.
+  Probe: a malicious `.pth` executed, and uv's own `_virtualenv.pth` imported its shim and wrote
+  `__pycache__` into the build environment (`-I` ignores `PYTHONDONTWRITEBYTECODE`), failing the
+  next inventory. uv: launch `OSError`s and output overflow escaped raw and non-zero venv/version
+  exits passed. Retry: malformed locked wheel URLs leaked raw `ValueError`; the recognizer's
+  matrix (8 retryable, 22 not) is anchored on one verbatim uv 0.9.26 connection-refused report.
+  Offline: a child process imports the verifier from a package copy under an audit hook that
+  refuses checkout/Git access, network and every subprocess except the published interpreter,
+  whose `-I -S` probe must run exactly once at its final locator. 84 mutations were run: 81 are
+  killed, one is equivalent (CPython constructs `FileExistsError` from `OSError(EEXIST)`) and two
+  exposed redundant guards that were removed (a METADATA size pre-check subsumed by the bounded
+  read, a duplicate-key hook subsumed by canonical equality); eleven initial survivors were
+  closed with new cases. The full 4,751-test root gate (`-p no:randomly`), ruff, mypy and all 28
+  import contracts pass.
 
 ### Completion Notes
 
@@ -931,6 +962,21 @@ uv run lint-imports
   thirteenth-round finding points at the membership test. The import-quiescent precondition, the
   accepted in-process/no-sandbox residual and every live, authority, deployment and capital wall
   are unchanged.
+- Publication review chunk 2 complete: final bundle and environment publication uses the
+  protected `renameat2(RENAME_NOREPLACE)` primitive (an `EEXIST` winner is verified, a missing
+  primitive fails closed with no replacement fallback); every verification and sealing walk
+  propagates traversal errors and the bundle file-count bound precedes list growth; the
+  environment inventory is complete (every directory implied by an entry) and bounded before
+  every read; the final probe runs `-I -S` with only the direct site-packages root and accepts
+  one canonical identity object through a protected bounded-subprocess seam that kills the
+  process group; uv version/venv/sync output is bounded and launch failures are incompatible;
+  retry requires exact positive evidence of a locked HTTPS wheel outage; and offline
+  verification plus lock and post-publication faults run the real verifier. Because the probe no
+  longer processes `.pth` files, an `algua` reachable only through a `.pth` path entry is outside
+  its `find_spec` check (an installed `algua` distribution is still refused by metadata); Story
+  1.3c's runtime import policy should decide whether site processing is permitted. The keyed
+  argv, identity schemas, golden digests and every live, authority, deployment and capital wall
+  are unchanged; the `--no-env-file` incompatibility is recorded as an open finding.
 
 ### File List
 
@@ -958,6 +1004,10 @@ uv run lint-imports
 - `algua/primitives/module_refresh.py`
 - `algua/primitives/module_source_scan.py`
 - `algua/primitives/module_commit_check.py`
+- `algua/primitives/no_replace.py`
+- `algua/primitives/strict_walk.py`
+- `algua/primitives/bounded_subprocess.py`
+- `algua/registry/planner_environment_outage.py`
 - `CODEOWNERS`
 - `docs/development/sprint-status.yaml`
 - `docs/contracts/cli-error-envelope.md`
@@ -973,6 +1023,16 @@ uv run lint-imports
 - `tests/test_repo_hygiene.py`
 - `tests/test_strategy_loader.py`
 - `tests/test_module_refresh.py`
+- `tests/_venv_fixture.py`
+- `tests/_walk_faults.py`
+- `tests/primitives/test_bounded_subprocess.py`
+- `tests/primitives/test_strict_walk.py`
+- `tests/test_frozen_artifact_offline.py`
+- `tests/test_no_replace.py`
+- `tests/test_planner_environment_bounds.py`
+- `tests/test_planner_environment_outage.py`
+- `tests/test_planner_environment_probe.py`
+- `tests/test_planner_environment_uv.py`
 
 ### Change Log
 
@@ -1045,3 +1105,9 @@ uv run lint-imports
 - 2026-09-28: Addressed the fifteenth-round review patch (documentation only: the fourteenth-round
   pointer correction now names the membership guard at `module_commit_check.py:105`);
   `git diff --check` and `tests/test_repo_hygiene.py` (8 tests) pass.
+- 2026-09-28: Addressed all 7 publication review chunk-2 patches test-first (atomic no-replace
+  publication, fail-closed bounded walks, complete bounded environment inventory, isolated
+  bounded interpreter probe, bounded typed uv subprocesses, positive-evidence retry, real offline
+  and fault acceptance) with three protected primitives and a protected outage recognizer;
+  recorded the uv 0.9.26 `--no-env-file` argv incompatibility as an open finding; the full
+  4,751-test root gate, ruff, mypy and all 28 import contracts pass.
