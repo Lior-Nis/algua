@@ -375,6 +375,25 @@ def test_an_interrupt_while_closing_an_inventory_listing_is_not_translated(
     assert closed and all(closed.values()), closed
 
 
+def test_a_walk_cleanup_error_raised_by_the_inventory_body_is_not_relabeled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from algua.primitives.bounded_walk import WalkCleanupError
+
+    env = _environment(tmp_path)
+    body_error = WalkCleanupError("raised by the consumer body, not by closing a listing")
+
+    def failing_digest(*_args, **_kwargs):
+        raise body_error
+
+    monkeypatch.setattr(inventory_module, "_file_digest", failing_digest)
+
+    with pytest.raises(WalkCleanupError) as caught:
+        inventory_environment(env)
+
+    assert caught.value is body_error
+
+
 @pytest.mark.parametrize(
     "name",
     [b"cafe\xcc\x81", b"pkg ", b"pkg.", b"p\\kg", b"\xffpkg"],

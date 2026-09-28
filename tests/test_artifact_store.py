@@ -503,6 +503,25 @@ def test_an_interrupt_while_closing_a_bundle_listing_is_not_translated(
     assert closed and all(closed.values()), closed
 
 
+def test_a_walk_cleanup_error_raised_by_the_bundle_consumer_body_is_not_relabeled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from algua.primitives.bounded_walk import WalkCleanupError
+
+    root = publish_bundle(tmp_path, _files(), _descriptor())
+    body_error = WalkCleanupError("raised by the consumer body, not by closing a listing")
+
+    def failing_entry(*_args, **_kwargs):
+        raise body_error
+
+    monkeypatch.setattr(artifact_store, "ArtifactFile", failing_entry)
+
+    with pytest.raises(WalkCleanupError) as caught:
+        artifact_store._inventory(root)
+
+    assert caught.value is body_error
+
+
 def _foreign_stage(parent: Path) -> Path:
     """Another builder's in-progress stage; this attempt must never remove it."""
     parent.mkdir(parents=True, exist_ok=True)

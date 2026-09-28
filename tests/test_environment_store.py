@@ -449,3 +449,23 @@ def test_a_sealing_listing_close_failure_is_a_typed_store_error(
         environment_store._seal_and_sync(stage)
 
     assert closed and all(closed.values()), closed
+
+
+def test_a_walk_cleanup_error_raised_by_the_sealing_body_is_not_relabeled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from algua.primitives.bounded_walk import WalkCleanupError
+    from algua.registry import environment_store
+
+    stage = _stage(tmp_path)
+    body_error = WalkCleanupError("raised by the consumer body, not by closing a listing")
+
+    def failing_fsync(*_args, **_kwargs):
+        raise body_error
+
+    monkeypatch.setattr(environment_store, "fsync_file", failing_fsync)
+
+    with pytest.raises(WalkCleanupError) as caught:
+        environment_store._seal_and_sync(stage)
+
+    assert caught.value is body_error

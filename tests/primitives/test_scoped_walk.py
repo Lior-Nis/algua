@@ -128,6 +128,56 @@ def test_a_completed_scope_closes_cleanly(tmp_path: Path) -> None:
     assert "d1/d2/f4" in relatives
 
 
+class TypedCleanupFailure(RuntimeError):
+    """Stands in for a consumer's typed cleanup error."""
+
+
+def _translating(root: Path):
+    return walk_module.scoped_walk(
+        root, max_files=100, max_directories=100, max_path_bytes=1024,
+        cleanup_error=lambda: TypedCleanupFailure("listing could not be closed"))
+
+
+def test_the_walks_own_exhausted_close_failure_is_translated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _chain(tmp_path)
+    closed = track_closes(monkeypatch, faulty=tmp_path / "d1/d2/d3", fault=RuntimeError)
+
+    with pytest.raises(TypedCleanupFailure) as caught, _translating(tmp_path) as tree:
+        for _entry in tree:
+            pass
+
+    assert type(caught.value.__cause__) is walk_module.WalkCleanupError
+    assert all(closed.values()), closed
+
+
+def test_the_walks_own_close_failure_after_an_early_exit_is_translated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _chain(tmp_path)
+    closed = track_closes(monkeypatch, faulty=tmp_path / "d1", fault=RuntimeError)
+
+    with pytest.raises(TypedCleanupFailure), _translating(tmp_path) as tree:
+        for entry in tree:
+            if entry.relative == "d1/d2/d3":
+                break
+
+    assert all(closed.values()), closed
+
+
+def test_a_walk_cleanup_error_raised_by_the_body_is_never_translated(tmp_path: Path) -> None:
+    _chain(tmp_path)
+    body_error = walk_module.WalkCleanupError("raised by the consumer body itself")
+
+    with pytest.raises(walk_module.WalkCleanupError) as caught, _translating(tmp_path) as tree:
+        for entry in tree:
+            if entry.relative == "d1/d2/d3":
+                raise body_error
+
+    assert caught.value is body_error
+
+
 def test_an_early_scope_exit_retries_a_listing_that_failed_before_release(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

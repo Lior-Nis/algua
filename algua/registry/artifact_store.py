@@ -6,17 +6,12 @@ import os
 import shutil
 import stat
 import tempfile
-from collections.abc import Generator, Iterator
-from contextlib import contextmanager
+from collections.abc import Iterator
+from contextlib import AbstractContextManager
 from pathlib import Path
 
 from algua.primitives.atomic_io import fsync_parents, fsync_tree
-from algua.primitives.bounded_walk import (
-    TraversalLimitExceeded,
-    TreeEntry,
-    WalkCleanupError,
-    scoped_walk,
-)
+from algua.primitives.bounded_walk import TraversalLimitExceeded, TreeEntry, scoped_walk
 from algua.primitives.flock import file_lock
 from algua.primitives.no_replace import rename_noreplace
 from algua.registry.artifact_contract import (
@@ -33,17 +28,13 @@ class ArtifactStoreError(ValueError):
     """Published immutable content is unsafe, corrupt, or inconsistent."""
 
 
-@contextmanager
-def _tree(root: Path) -> Iterator[Generator[TreeEntry, None, None]]:
-    """Walk a bundle tree; a listing that cannot be closed is a typed store error."""
-    try:
-        with scoped_walk(
-            root, max_files=MAX_BUNDLE_FILES, max_directories=MAX_BUNDLE_DIRECTORIES,
-            max_path_bytes=MAX_PATH_BYTES,
-        ) as tree:
-            yield tree
-    except WalkCleanupError as exc:
-        raise ArtifactStoreError("a bundle directory listing could not be closed") from exc
+def _tree(root: Path) -> AbstractContextManager[Iterator[TreeEntry]]:
+    """Walk a bundle tree; a listing of this walk that cannot be closed is a typed store error."""
+    return scoped_walk(
+        root, max_files=MAX_BUNDLE_FILES, max_directories=MAX_BUNDLE_DIRECTORIES,
+        max_path_bytes=MAX_PATH_BYTES,
+        cleanup_error=lambda: ArtifactStoreError("a bundle directory listing could not be closed"),
+    )
 
 
 def resolve_locator(

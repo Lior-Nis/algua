@@ -15,7 +15,7 @@ consumer's own error primary when closing also fails.
 from __future__ import annotations
 
 import os
-from collections.abc import Generator, Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -138,10 +138,36 @@ def bounded_walk(
         raise
 
 
+class _ScopedTree:
+    """The iterator a scoped walk hands its consumer.
+
+    It remembers the exact `WalkCleanupError` its own walk raised, so the scope can tell a
+    cleanup failure of this walk from one the consumer's body raised itself.
+    """
+
+    def __init__(self, walk: Generator[TreeEntry, None, None]) -> None:
+        self._walk = walk
+        self.cleanup_failure: WalkCleanupError | None = None
+
+    def __iter__(self) -> _ScopedTree:
+        return self
+
+    def __next__(self) -> TreeEntry:
+        try:
+            return next(self._walk)
+        except WalkCleanupError as exc:
+            self.cleanup_failure = exc
+            raise
+
+    def close(self) -> None:
+        self._walk.close()
+
+
 @contextmanager
 def scoped_walk(
     root: Path, *, max_files: int, max_directories: int, max_path_bytes: int,
-) -> Iterator[Generator[TreeEntry, None, None]]:
+    cleanup_error: Callable[[], Exception] | None = None,
+) -> Iterator[Iterator[TreeEntry]]:
     """A `bounded_walk` that is always closed when the consumer's block exits.
 
     If the block raised (a consumer's typed refusal, say), that error stays primary: closing the
@@ -149,18 +175,29 @@ def scoped_walk(
     an interrupt while closing still propagates, caused by the block's error. If the block
     finished or stopped early, a failure while closing is reported, as for any abandoned walk.
     Errors raised by the traversal itself reach the block unchanged.
+
+    With ``cleanup_error``, a cleanup failure of this walk -- one raised while the block iterated
+    or while closing it -- is reported as ``cleanup_error()`` caused by it. A `WalkCleanupError`
+    the block raised by any other means is not this walk's cleanup failure and stays primary.
     """
-    walk = bounded_walk(
+    tree = _ScopedTree(bounded_walk(
         root, max_files=max_files, max_directories=max_directories,
         max_path_bytes=max_path_bytes,
-    )
+    ))
     try:
-        yield walk
+        yield tree
     except BaseException as active:
         try:
-            walk.close()
+            tree.close()
         except BaseException as failure:  # every listing is closed; decide what to report
             if isinstance(active, Exception) and not isinstance(failure, Exception):
                 raise failure from active
+        if cleanup_error is not None and active is tree.cleanup_failure:
+            raise cleanup_error() from active
         raise
-    walk.close()
+    try:
+        tree.close()
+    except WalkCleanupError as exc:
+        if cleanup_error is None:
+            raise
+        raise cleanup_error() from exc
