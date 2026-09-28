@@ -5,14 +5,21 @@ import os
 import shutil
 import stat
 import tempfile
+from collections.abc import Generator
+from contextlib import closing
 from pathlib import Path
 
 from algua.primitives.atomic_io import fsync_dir, fsync_file, fsync_parents
+from algua.primitives.bounded_walk import TreeEntry, bounded_walk
 from algua.primitives.flock import file_lock
 from algua.primitives.no_replace import rename_noreplace
-from algua.primitives.strict_walk import strict_walk
+from algua.registry.artifact_contract import MAX_PATH_BYTES
 from algua.registry.artifact_store import resolve_locator
-from algua.registry.environment_contract import EnvironmentDescriptor
+from algua.registry.environment_contract import (
+    MAX_ENVIRONMENT_DIRECTORIES,
+    MAX_ENVIRONMENT_FILES,
+    EnvironmentDescriptor,
+)
 from algua.registry.planner_environment import (
     EnvironmentIncompatible,
     inventory_environment,
@@ -22,6 +29,13 @@ from algua.registry.planner_environment import (
 
 class EnvironmentStoreError(ValueError):
     """A published environment is missing, corrupt, or unsafe."""
+
+
+def _tree(root: Path) -> closing[Generator[TreeEntry, None, None]]:
+    return closing(bounded_walk(
+        root, max_files=MAX_ENVIRONMENT_FILES, max_directories=MAX_ENVIRONMENT_DIRECTORIES,
+        max_path_bytes=MAX_PATH_BYTES,
+    ))
 
 
 def _cleanup(path: Path) -> None:
@@ -38,36 +52,37 @@ def _cleanup(path: Path) -> None:
 
 def _seal_and_sync(root: Path) -> None:
     directories: list[Path] = []
-    for dirpath, dirnames, filenames in strict_walk(root, topdown=False):
-        directory = Path(dirpath)
-        directories.append(directory)
-        for name in dirnames:
-            child = directory / name
-            if child.is_symlink():
-                raise EnvironmentStoreError("environment contains a directory symlink")
-        for name in filenames:
-            path = directory / name
-            if path.is_symlink():
+    with _tree(root) as tree:
+        for entry in tree:
+            if entry.is_symlink:
+                if entry.path.is_dir():
+                    raise EnvironmentStoreError("environment contains a directory symlink")
                 continue
-            info = path.lstat()
+            if entry.is_dir:
+                directories.append(entry.path)
+                continue
+            info = entry.path.lstat()
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 raise EnvironmentStoreError("environment contains unsafe file content")
-            path.chmod(0o555 if info.st_mode & stat.S_IXUSR else 0o444)
-            fsync_file(path)
+            entry.path.chmod(0o555 if info.st_mode & stat.S_IXUSR else 0o444)
+            fsync_file(entry.path)
+    # Reversed pre-order seals and syncs every directory after all of its descendants.
+    for directory in (*reversed(directories), root):
         directory.chmod(0o555)
         fsync_dir(directory)
 
 
 def _assert_sealed(root: Path) -> None:
-    for dirpath, _dirnames, filenames in strict_walk(root):
-        directory = Path(dirpath)
-        if directory.is_symlink() or stat.S_IMODE(directory.stat().st_mode) != 0o555:
-            raise EnvironmentStoreError("environment directory permissions drifted")
-        for name in filenames:
-            path = directory / name
-            if path.is_symlink():
+    if root.is_symlink() or stat.S_IMODE(root.stat().st_mode) != 0o555:
+        raise EnvironmentStoreError("environment directory permissions drifted")
+    with _tree(root) as tree:
+        for entry in tree:
+            if entry.is_symlink:
                 continue
-            if stat.S_IMODE(path.stat().st_mode) not in {0o444, 0o555}:
+            permissions = stat.S_IMODE(entry.path.lstat().st_mode)
+            if entry.is_dir and permissions != 0o555:
+                raise EnvironmentStoreError("environment directory permissions drifted")
+            if not entry.is_dir and permissions not in {0o444, 0o555}:
                 raise EnvironmentStoreError("environment file permissions drifted")
 
 

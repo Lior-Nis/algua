@@ -16,7 +16,7 @@ from algua.registry.artifact_store import (
     verify_bundle,
 )
 from algua.registry.frozen_source import FrozenFile
-from tests._walk_faults import fail_scandir_once
+from tests._walk_faults import count_scandir_pulls, fail_scandir_once
 
 
 def _files() -> tuple[FrozenFile, ...]:
@@ -329,6 +329,71 @@ def test_inventory_enforces_the_file_count_bound_before_growth(
 
     assert "file-count" in str(caught.value.__cause__)
     assert len(constructed) <= len(_files())
+
+
+def _writable(root: Path):
+    import contextlib
+
+    @contextlib.contextmanager
+    def opened():
+        root.chmod(0o755)
+        try:
+            yield root
+        finally:
+            root.chmod(0o555)
+
+    return opened()
+
+
+def test_verify_bounds_empty_directory_fanout_before_retaining_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = publish_bundle(tmp_path, _files(), _descriptor())
+    with _writable(root):
+        fanout = root / "zz-fanout"
+        fanout.mkdir()
+        for index in range(300):
+            (fanout / f"d{index:03d}").mkdir(mode=0o555)
+        fanout.chmod(0o555)
+    monkeypatch.setattr(artifact_store, "MAX_BUNDLE_DIRECTORIES", 5, raising=False)
+    pulls = count_scandir_pulls(monkeypatch)
+
+    with pytest.raises(ArtifactStoreError) as caught:
+        verify_bundle(tmp_path, _descriptor())
+
+    assert "directory-count" in str(caught.value.__cause__)
+    assert pulls.get(fanout, 0) <= 6
+
+
+def test_verify_bounds_one_directory_with_huge_file_fanout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = publish_bundle(tmp_path, _files(), _descriptor())
+    with _writable(root):
+        for index in range(300):
+            (root / f"zz-{index:03d}").touch(mode=0o444)
+    monkeypatch.setattr(artifact_store, "MAX_BUNDLE_FILES", len(_files()))
+    pulls = count_scandir_pulls(monkeypatch)
+
+    with pytest.raises(ArtifactStoreError) as caught:
+        verify_bundle(tmp_path, _descriptor())
+
+    assert "file-count" in str(caught.value.__cause__)
+    assert pulls[root] <= len(_files()) + 3
+
+
+def test_protected_bundle_directory_bound_is_explicit() -> None:
+    from algua.registry.artifact_contract import MAX_BUNDLE_DIRECTORIES
+
+    assert MAX_BUNDLE_DIRECTORIES == 10_000
+
+
+def test_verify_rejects_a_writable_bundle_directory(tmp_path: Path) -> None:
+    root = publish_bundle(tmp_path, _files(), _descriptor())
+    (root / "algua").chmod(0o755)
+
+    with pytest.raises(ArtifactStoreError):
+        verify_bundle(tmp_path, _descriptor())
 
 
 def _foreign_stage(parent: Path) -> Path:

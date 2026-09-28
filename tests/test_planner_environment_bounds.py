@@ -11,12 +11,14 @@ from algua.registry import planner_environment_inventory as inventory_module
 from algua.registry.environment_contract import (
     MAX_DISTRIBUTION_METADATA_BYTES,
     MAX_ENVIRONMENT_BYTES,
+    MAX_ENVIRONMENT_DIRECTORIES,
     MAX_ENVIRONMENT_FILE_BYTES,
     MAX_ENVIRONMENT_FILES,
 )
 from algua.registry.planner_environment_errors import EnvironmentIncompatible
 from algua.registry.planner_environment_inventory import inventory_environment
 from tests._venv_fixture import SITE_PACKAGES, uv_like_venv
+from tests._walk_faults import count_scandir_pulls
 
 
 def _environment(tmp_path: Path) -> Path:
@@ -197,6 +199,15 @@ def test_a_directory_holding_only_interpreter_links_is_inventoried(tmp_path: Pat
         "bin/python", "bin/python3", "bin/python3.12"}
 
 
+def test_an_interpreter_link_to_a_directory_is_refused(tmp_path: Path) -> None:
+    env = _environment(tmp_path)
+    (env / "bin/python3").unlink()
+    (env / "bin/python3").symlink_to("../lib", target_is_directory=True)
+
+    with pytest.raises(EnvironmentIncompatible, match="symlink"):
+        inventory_environment(env)
+
+
 def _malformed_path(env: Path, shape: str) -> Path:
     site = env / SITE_PACKAGES
     if shape == "overlong":
@@ -268,11 +279,12 @@ def test_non_utf8_metadata_is_incompatible(tmp_path: Path) -> None:
 def test_protected_environment_bounds_are_explicit() -> None:
     # Sized from the locked no-dev environment built with the normative uv flags (Story 1.3b
     # chunk-2 evidence): 23,849 files, 861.4 MiB, largest file 160.0 MiB, largest METADATA
-    # 115.9 KiB, zero empty directories.
+    # 115.9 KiB, 3,147 directories, zero empty directories.
     assert MAX_ENVIRONMENT_FILES == 100_000
     assert MAX_ENVIRONMENT_FILE_BYTES == 512 * 1024 * 1024
     assert MAX_ENVIRONMENT_BYTES == 4 * 1024 * 1024 * 1024
     assert MAX_DISTRIBUTION_METADATA_BYTES == 1024 * 1024
+    assert MAX_ENVIRONMENT_DIRECTORIES == 25_000
 
 
 def test_repository_environment_fits_the_protected_bounds() -> None:
@@ -283,8 +295,10 @@ def test_repository_environment_fits_the_protected_bounds() -> None:
     total = 0
     largest = 0
     largest_metadata = 0
+    directories = 0
     for directory, dirnames, names in os.walk(sys.prefix):
         dirnames[:] = [name for name in dirnames if name != "__pycache__"]
+        directories += len(dirnames)
         for name in names:
             path = Path(directory) / name
             info = path.lstat()
@@ -300,3 +314,41 @@ def test_repository_environment_fits_the_protected_bounds() -> None:
     assert total <= MAX_ENVIRONMENT_BYTES
     assert largest <= MAX_ENVIRONMENT_FILE_BYTES
     assert 0 < largest_metadata <= MAX_DISTRIBUTION_METADATA_BYTES
+    assert 0 < directories <= MAX_ENVIRONMENT_DIRECTORIES
+
+
+def test_empty_directory_fanout_is_bounded_before_retaining_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = _environment(tmp_path)
+    fanout = env / SITE_PACKAGES / "zz-fanout"
+    fanout.mkdir()
+    for index in range(300):
+        (fanout / f"d{index:03d}").mkdir()
+    baseline = sum(1 for path in env.rglob("*") if path.is_dir() and path.parent != fanout)
+    monkeypatch.setattr(inventory_module, "MAX_ENVIRONMENT_DIRECTORIES", baseline, raising=False)
+    pulls = count_scandir_pulls(monkeypatch)
+
+    with pytest.raises(EnvironmentIncompatible, match="directory-count"):
+        inventory_environment(env)
+
+    assert pulls.get(fanout, 0) <= baseline + 1
+
+
+def test_one_directory_with_huge_file_fanout_is_bounded_while_streaming(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = _environment(tmp_path)
+    baseline = inventory_environment(env)
+    entries = len(baseline.files) + len(baseline.interpreter_links)
+    fanout = env / SITE_PACKAGES / "zz-fanout"
+    fanout.mkdir()
+    for index in range(300):
+        (fanout / f"f{index:03d}.py").touch()
+    monkeypatch.setattr(inventory_module, "MAX_ENVIRONMENT_FILES", entries)
+    pulls = count_scandir_pulls(monkeypatch)
+
+    with pytest.raises(EnvironmentIncompatible, match="file-count"):
+        inventory_environment(env)
+
+    assert pulls.get(fanout, 0) <= entries + 1

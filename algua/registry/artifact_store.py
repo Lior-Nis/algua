@@ -6,18 +6,33 @@ import os
 import shutil
 import stat
 import tempfile
+from collections.abc import Generator
+from contextlib import closing
 from pathlib import Path
 
 from algua.primitives.atomic_io import fsync_parents, fsync_tree
+from algua.primitives.bounded_walk import TraversalLimitExceeded, TreeEntry, bounded_walk
 from algua.primitives.flock import file_lock
 from algua.primitives.no_replace import rename_noreplace
-from algua.primitives.strict_walk import strict_walk
-from algua.registry.artifact_contract import MAX_BUNDLE_FILES, ArtifactFile, BundleDescriptor
+from algua.registry.artifact_contract import (
+    MAX_BUNDLE_DIRECTORIES,
+    MAX_BUNDLE_FILES,
+    MAX_PATH_BYTES,
+    ArtifactFile,
+    BundleDescriptor,
+)
 from algua.registry.frozen_source import MAX_BUNDLE_BYTES, MAX_FILE_BYTES, FrozenFile
 
 
 class ArtifactStoreError(ValueError):
     """Published immutable content is unsafe, corrupt, or inconsistent."""
+
+
+def _tree(root: Path) -> closing[Generator[TreeEntry, None, None]]:
+    return closing(bounded_walk(
+        root, max_files=MAX_BUNDLE_FILES, max_directories=MAX_BUNDLE_DIRECTORIES,
+        max_path_bytes=MAX_PATH_BYTES,
+    ))
 
 
 def resolve_locator(
@@ -67,8 +82,9 @@ def _write_stage(stage: Path, files: tuple[FrozenFile, ...]) -> None:
         finally:
             os.close(fd)
         destination.chmod(0o555 if item.mode == "100755" else 0o444)
-    directories = [Path(path) for path, _dirs, _files in strict_walk(stage, topdown=False)]
-    for directory in directories:
+    with _tree(stage) as tree:
+        directories = [entry.path for entry in tree if entry.is_dir]
+    for directory in (*reversed(directories), stage):
         directory.chmod(0o555)
     fsync_tree(stage)
 
@@ -81,42 +97,38 @@ def _inventory(root: Path) -> tuple[ArtifactFile, ...]:
     entries: list[ArtifactFile] = []
     directories: set[str] = set()
     total = 0
-    for dirpath, dirnames, filenames in strict_walk(root):
-        directory = Path(dirpath)
-        if directory != root:
-            directories.add(directory.relative_to(root).as_posix())
-        if directory.is_symlink() or stat.S_IMODE(directory.stat().st_mode) != 0o555:
-            raise ArtifactStoreError("bundle directory is linked or writable")
-        for dirname in dirnames:
-            child = directory / dirname
-            if child.is_symlink():
-                raise ArtifactStoreError("bundle contains a directory symlink")
-        for filename in filenames:
-            if len(entries) >= MAX_BUNDLE_FILES:
-                raise ArtifactStoreError("bundle exceeds the file-count bound")
-            path = directory / filename
-            info = path.lstat()
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-                raise ArtifactStoreError("bundle contains a link or non-regular file")
-            permissions = stat.S_IMODE(info.st_mode)
-            if permissions not in {0o444, 0o555}:
-                raise ArtifactStoreError("bundle file permissions drifted")
-            if info.st_size > MAX_FILE_BYTES:
-                raise ArtifactStoreError("bundle file exceeds the per-file bound")
-            digest = hashlib.sha256()
-            size = 0
-            with path.open("rb") as handle:
-                while chunk := handle.read(1024 * 1024):
-                    size += len(chunk)
-                    digest.update(chunk)
-            total += size
-            if total > MAX_BUNDLE_BYTES:
-                raise ArtifactStoreError("bundle exceeds the aggregate size bound")
-            entries.append(ArtifactFile(
-                path=path.relative_to(root).as_posix(),
-                mode="100755" if permissions == 0o555 else "100644",
-                size=size, sha256=digest.hexdigest(),
-            ))
+    try:
+        with _tree(root) as tree:
+            for entry in tree:
+                info = entry.path.lstat()
+                if entry.is_dir:
+                    if stat.S_IMODE(info.st_mode) != 0o555:
+                        raise ArtifactStoreError("bundle directory is linked or writable")
+                    directories.add(entry.relative)
+                    continue
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    raise ArtifactStoreError("bundle contains a link or non-regular file")
+                permissions = stat.S_IMODE(info.st_mode)
+                if permissions not in {0o444, 0o555}:
+                    raise ArtifactStoreError("bundle file permissions drifted")
+                if info.st_size > MAX_FILE_BYTES:
+                    raise ArtifactStoreError("bundle file exceeds the per-file bound")
+                digest = hashlib.sha256()
+                size = 0
+                with entry.path.open("rb") as handle:
+                    while chunk := handle.read(1024 * 1024):
+                        size += len(chunk)
+                        digest.update(chunk)
+                total += size
+                if total > MAX_BUNDLE_BYTES:
+                    raise ArtifactStoreError("bundle exceeds the aggregate size bound")
+                entries.append(ArtifactFile(
+                    path=entry.relative,
+                    mode="100755" if permissions == 0o555 else "100644",
+                    size=size, sha256=digest.hexdigest(),
+                ))
+    except TraversalLimitExceeded as exc:
+        raise ArtifactStoreError(f"bundle exceeds the {exc.kind} bound") from exc
     implied = {
         parent.as_posix()
         for entry in entries

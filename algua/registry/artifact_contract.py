@@ -19,6 +19,10 @@ MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_BUNDLE_BYTES = 512 * 1024 * 1024
 MAX_SOURCE_FILES = 10_000
 MAX_BUNDLE_FILES = MAX_SOURCE_FILES + 2  # exported source plus the two generated files
+# Traversal bound on implied bundle directories (the repository's source tree has 36): a
+# verifier counts every directory before retaining it, so empty-directory fanout cannot grow
+# memory without ever reaching the file bound.
+MAX_BUNDLE_DIRECTORIES = 10_000
 MAX_PATH_BYTES = 1_024
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _HEX32 = re.compile(r"^[0-9a-f]{32}$")

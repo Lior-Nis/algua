@@ -18,8 +18,10 @@ BASE_INTERPRETER = "base-interpreter"
 MAX_IDENTITY_CHARS = 128
 # Protected installed-environment bounds. Sized from the locked no-dev environment built with the
 # normative uv flags (23,849 files, 861.4 MiB, largest file 160.0 MiB, largest METADATA
-# 115.9 KiB) with 3-9x headroom. Raising one requires protected review and a contract version.
+# 115.9 KiB, 3,147 directories) with 3-9x headroom. Raising one requires protected review and a
+# contract version.
 MAX_ENVIRONMENT_FILES = 100_000
+MAX_ENVIRONMENT_DIRECTORIES = 25_000
 MAX_ENVIRONMENT_FILE_BYTES = 512 * 1024 * 1024
 MAX_ENVIRONMENT_BYTES = 4 * 1024 * 1024 * 1024
 MAX_DISTRIBUTION_METADATA_BYTES = 1024 * 1024

@@ -16,7 +16,7 @@ from algua.registry.environment_store import (
 )
 from algua.registry.planner_environment import current_interpreter_identity, inventory_environment
 from tests._venv_fixture import uv_like_venv
-from tests._walk_faults import fail_scandir_once
+from tests._walk_faults import count_scandir_pulls, fail_scandir_once
 
 
 def _stage(root: Path, name: str = "build-environment") -> Path:
@@ -344,3 +344,43 @@ def test_post_publication_verification_fault_leaves_a_valid_immutable_object(
     assert sorted(path.name for path in target.parent.iterdir()) == [
         ".reserve-foreign", target.name]
     assert (foreign / "partial").read_text() == "another builder"
+
+
+def test_published_seal_check_bounds_directory_fanout_before_the_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from algua.registry import environment_store
+
+    stage = _stage(tmp_path)
+    descriptor = _descriptor(stage)
+    published = publish_environment(tmp_path / "store", stage, descriptor)
+    site = published / "lib/python3.12/site-packages"
+    site.chmod(0o755)
+    fanout = site / "zz-fanout"
+    fanout.mkdir()
+    for index in range(300):
+        (fanout / f"d{index:03d}").mkdir(mode=0o555)
+    fanout.chmod(0o555)
+    site.chmod(0o555)
+    monkeypatch.setattr(environment_store, "MAX_ENVIRONMENT_DIRECTORIES", 10, raising=False)
+    pulls = count_scandir_pulls(monkeypatch)
+
+    with pytest.raises(EnvironmentStoreError) as caught:
+        verify_published_environment(tmp_path / "store", descriptor)
+
+    assert "directory-count" in str(caught.value.__cause__)
+    assert pulls.get(fanout, 0) <= 11
+
+
+@pytest.mark.parametrize("relative", ["", "lib", "lib/python3.12/site-packages"])
+def test_published_seal_check_rejects_a_writable_directory(
+    tmp_path: Path, relative: str,
+) -> None:
+    stage = _stage(tmp_path)
+    descriptor = _descriptor(stage)
+    published = publish_environment(tmp_path / "store", stage, descriptor)
+    (published / relative if relative else published).chmod(0o755)
+
+    with pytest.raises(EnvironmentStoreError) as caught:
+        verify_published_environment(tmp_path / "store", descriptor)
+    assert "permissions drifted" in str(caught.value.__cause__)
