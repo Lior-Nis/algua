@@ -30,6 +30,7 @@ def _verify(env: Path) -> None:
 
 
 def test_probe_never_runs_installed_startup_hooks(tmp_path: Path) -> None:
+    """Defense in depth: the inventory refuses these hooks, and the probe never runs them."""
     env = uv_like_venv(tmp_path / "env")
     site = env / SITE_PACKAGES
     markers = {name: tmp_path / f"{name}-ran" for name in ("pth", "sitecustomize", "usercustomize")}
@@ -40,8 +41,12 @@ def test_probe_never_runs_installed_startup_hooks(tmp_path: Path) -> None:
             f"import pathlib; pathlib.Path({str(markers[name])!r}).touch()\n"
             "print('{\"hijacked\": true}')\n")
 
-    _verify(env)
+    with pytest.raises(EnvironmentIncompatible):
+        inventory_environment(env)
+    identity, has_algua = inventory_module._probe(env)
 
+    assert identity == current_interpreter_identity().to_dict()
+    assert has_algua is False
     assert not [name for name, marker in markers.items() if marker.exists()]
 
 
@@ -49,7 +54,7 @@ def test_probe_leaves_the_uv_startup_shim_unimported_and_writes_no_bytecode(
     tmp_path: Path,
 ) -> None:
     env = uv_like_venv(tmp_path / "env")
-    assert (env / SITE_PACKAGES / "_virtualenv.pth").read_text() == "import _virtualenv\n"
+    assert (env / SITE_PACKAGES / "_virtualenv.pth").read_bytes() == b"import _virtualenv"
 
     _verify(env)
     _verify(env)  # a probe that imported the shim would have left bytecode for the inventory

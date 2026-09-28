@@ -1,9 +1,10 @@
 """A standard-library venv shaped like the relocatable environment `uv venv` creates.
 
-`uv venv` (0.9.26) writes `_virtualenv.pth` and `_virtualenv.py` into site-packages, creates the
-`lib64 -> lib` link that provisioning removes, and leaves no empty directory. The standard-library
-builder instead leaves an empty `include/` tree and an empty site-packages, which the complete
-inventory correctly refuses, so fixtures normalize to the uv shape here.
+`uv venv` (0.9.26) writes `_virtualenv.pth` (exactly `import _virtualenv`, no newline) and its
+`_virtualenv.py` shim into site-packages, creates the `lib64 -> lib` link that provisioning
+removes, and leaves no empty directory. The standard-library builder instead leaves an empty
+`include/` tree and an empty site-packages, which the complete inventory correctly refuses, so
+fixtures normalize to the uv shape here, using uv's verbatim startup bytes.
 """
 from __future__ import annotations
 
@@ -12,6 +13,8 @@ import venv
 from pathlib import Path
 
 SITE_PACKAGES = "lib/python3.12/site-packages"
+UV_SHIM = (Path(__file__).parent / "fixtures/uv-0.9.26-virtualenv-shim.py.txt").read_bytes()
+UV_PTH = b"import _virtualenv"
 
 
 def uv_like_venv(path: Path) -> Path:
@@ -23,6 +26,6 @@ def uv_like_venv(path: Path) -> Path:
     if include.is_dir() and not any(item.is_file() for item in include.rglob("*")):
         shutil.rmtree(include)
     site = path / SITE_PACKAGES
-    (site / "_virtualenv.py").write_text('"""uv virtualenv startup shim fixture."""\n')
-    (site / "_virtualenv.pth").write_text("import _virtualenv\n")
+    (site / "_virtualenv.py").write_bytes(UV_SHIM)
+    (site / "_virtualenv.pth").write_bytes(UV_PTH)
     return path

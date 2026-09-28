@@ -41,6 +41,7 @@
 /algua/registry/planner_environment_inventory.py @Lior-Nis
 /algua/registry/planner_environment_errors.py @Lior-Nis
 /algua/registry/planner_environment_outage.py @Lior-Nis
+/algua/registry/planner_environment_startup.py @Lior-Nis
 /algua/registry/artifact_preparation.py  @Lior-Nis
 /algua/registry/artifact_recording.py    @Lior-Nis
 /algua/registry/artifact_verification.py @Lior-Nis
