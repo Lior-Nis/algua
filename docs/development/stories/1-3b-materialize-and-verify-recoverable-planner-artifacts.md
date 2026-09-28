@@ -395,6 +395,9 @@ These identities are non-cyclic. An environment-only change does not change `bun
   parent bindings as an explicit present bit plus value, so a sentinel-valued entry cannot survive
   rollback or erase a pre-existing binding
   [algua/primitives/module_refresh.py:176]
+- [ ] [Review][Patch] Make the fourteenth-round pointer correction internally consistent by naming
+  the actual membership guard at `module_commit_check.py:105`, not the `optional` tuple at line 104
+  [docs/development/stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md:391]
 
 ## Development notes
 
