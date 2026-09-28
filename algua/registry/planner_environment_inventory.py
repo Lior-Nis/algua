@@ -169,10 +169,13 @@ def inventory_environment(root: Path) -> InstalledInventory:
     try:
         with closing(tree):
             for entry in tree:
-                if entry.is_dir:
-                    directories.add(entry.relative)
-                    continue
+                # Every entry, directories included, is canonical before it is retained or used;
+                # the walk descends only after this check, so a malformed directory's subtree is
+                # never listed.
                 relative = _canonical(entry.relative)
+                if entry.is_dir:
+                    directories.add(relative)
+                    continue
                 path = entry.path
                 if entry.is_symlink:
                     if path.is_dir():

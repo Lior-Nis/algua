@@ -245,6 +245,29 @@ def test_malformed_paths_are_refused_before_their_content_is_read(
     assert target not in hashed
 
 
+@pytest.mark.parametrize(
+    "name",
+    [b"cafe\xcc\x81", b"pkg ", b"pkg.", b"p\\kg", b"\xffpkg"],
+    ids=["non-nfc", "trailing-space", "trailing-dot", "backslash", "undecodable"],
+)
+def test_malformed_directories_are_refused_before_their_subtree_is_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: bytes,
+) -> None:
+    env = _environment(tmp_path)
+    malformed = Path(os.fsdecode(bytes(env / SITE_PACKAGES) + b"/" + name))
+    (malformed / "nested").mkdir(parents=True)
+    (malformed / "module.py").write_bytes(b"x" * 4096)
+    (malformed / "nested/deeper.py").write_bytes(b"y" * 4096)
+    pulls = count_scandir_pulls(monkeypatch)
+    hashed = _count_hashes(monkeypatch)
+
+    with pytest.raises(EnvironmentIncompatible, match="path"):
+        inventory_environment(env)
+
+    assert malformed not in pulls
+    assert not [path for path in hashed if malformed in path.parents]
+
+
 def test_distribution_metadata_is_read_through_an_explicit_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
