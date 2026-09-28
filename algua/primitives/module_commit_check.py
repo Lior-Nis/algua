@@ -52,16 +52,18 @@ def require_committed_family(package: str, specs: dict[str, SourceSpecFacts]) ->
     ``sys.modules`` and on its direct parent (itself exactly a ``ModuleType``), and the spec and
     module still carry its recorded facts (``_intact``). The exact type is checked before any
     dictionary is read: a subclass (even one swapped in through ``__class__``) can answer
-    attribute access, ``__path__`` included, differently from the dictionary validated here."""
+    attribute access, ``__path__`` included, differently from the dictionary validated here.
+    Every lookup defaults to ``_ABSENT``, never ``None``, so a missing entry is never mistaken
+    for a valid ``None``."""
     for name in sorted({*specs, *(name for name in sys.modules if within(name, package))}):
-        module, facts = sys.modules.get(name), specs.get(name)
+        module, facts = sys.modules.get(name, _ABSENT), specs.get(name)
         parent_name, _, child = name.rpartition(".")
-        holder = sys.modules.get(parent_name) if parent_name else None
+        holder = sys.modules.get(parent_name, _ABSENT) if parent_name else None
         if not (
             facts is not None and type(module) is ModuleType
-            and vars(module).get("__spec__") is facts.spec
+            and vars(module).get("__spec__", _ABSENT) is facts.spec
             and (type(holder) is ModuleType or not parent_name)
-            and (holder is None or vars(holder).get(child) is module)
+            and (holder is None or vars(holder).get(child, _ABSENT) is module)
             and _intact(module, facts)
         ):
             raise ModuleRefreshError(
@@ -80,25 +82,32 @@ def _intact(module: ModuleType, facts: SourceSpecFacts) -> bool:
     submodules list (importlib appends a child while loading it and pops it after) still the
     original object and empty, and ``_initializing`` exactly ``False`` (absent when handed out,
     ``True`` while executing, ``False`` once the load completed). The spec is read from its own
-    dictionary; only identity and exact-type comparisons are used, never a permissive ``__eq__``."""
+    dictionary; only identity and exact-type comparisons are used, never a permissive ``__eq__``.
+    A missing entry is ``_ABSENT``, never ``None``: an ordinary module's ``None`` search locations
+    and a cache-less spec's ``None`` cache must be PRESENT, while ``__path__`` (ordinary module)
+    and ``__cached__`` (no cache), which the import system never sets, must be absent."""
     spec, attrs, loader = facts.spec, vars(module), facts.loader
     if not (type(spec) is ModuleSpec and type(loader) is SourceFileLoader):
         return False
     book = vars(spec)
-    if not (book.get("loader") is loader and attrs.get("__loader__") is loader
+    if not (book.get("loader", _ABSENT) is loader and attrs.get("__loader__", _ABSENT) is loader
             and book.get("loader_state", _ABSENT) is None
             and book.get("_set_fileattr", _ABSENT) is facts.located
-            and book.get("_uninitialized_submodules") is facts.pending and not facts.pending
+            and book.get("_uninitialized_submodules", _ABSENT) is facts.pending
+            and not facts.pending
             and book.get("_initializing", _ABSENT) is False):
         return False
     search = None if facts.search is None else list(facts.search)
     return all(_exact(value, expected) for value, expected in (
         ([list(item) for item in vars(loader).items()], [list(item) for item in facts.state]),
-        (book.get("name"), facts.name), (book.get("origin"), facts.origin),
-        (book.get("_cached"), facts.cached),
-        (book.get("submodule_search_locations"), search), (attrs.get("__name__"), facts.name),
-        (attrs.get("__package__"), facts.name if search else facts.name.rpartition(".")[0]),
-        (attrs.get("__file__"), facts.origin), (attrs.get("__cached__"), facts.cached),
+        (book.get("name", _ABSENT), facts.name), (book.get("origin", _ABSENT), facts.origin),
+        (book.get("_cached", _ABSENT), facts.cached),
+        (book.get("submodule_search_locations", _ABSENT), search),
+        (attrs.get("__name__", _ABSENT), facts.name),
+        (attrs.get("__package__", _ABSENT),
+         facts.name if search else facts.name.rpartition(".")[0]),
+        (attrs.get("__file__", _ABSENT), facts.origin),
+        (attrs.get("__cached__", _ABSENT), _ABSENT if facts.cached is None else facts.cached),
         (attrs.get("__path__", _ABSENT), _ABSENT if search is None else search)))
 
 

@@ -1871,3 +1871,57 @@ def test_forged_module_spec_bookkeeping_never_commits(family, case) -> None:
     the load completes, so that completed state, not the pre-load absence, is the one required. A
     rebound, removed, forged or merely equal replacement value rolls the transaction back."""
     _assert_never_commits(family, _SPEC_BOOKKEEPING_FORGERIES[case])
+
+
+_METADATA_DELETIONS = {
+    "search-locations-removed": (
+        "from . import helper\ndel helper.__spec__.submodule_search_locations\n"),
+    "own-search-locations-removed": "del __spec__.submodule_search_locations\n",
+    "package-search-locations-removed": (
+        "import sys\ndel sys.modules[__package__].__spec__.submodule_search_locations\n"),
+    "spec-name-removed": "from . import helper\ndel helper.__spec__.name\n",
+    "spec-loader-removed": "from . import helper\ndel helper.__spec__.loader\n",
+    "module-spec-removed": "from . import helper\ndel helper.__spec__\n",
+    "module-loader-removed": "from . import helper\ndel helper.__loader__\n",
+    "module-name-removed": "from . import helper\ndel helper.__name__\n",
+    "module-package-removed": "from . import helper\ndel helper.__package__\n",
+    "module-cached-removed": "from . import helper\ndel helper.__cached__\n",
+    "package-path-removed": "import sys\ndel sys.modules[__package__].__path__\n",
+}
+
+
+@pytest.mark.parametrize("case", sorted(_METADATA_DELETIONS))
+def test_deleted_spec_or_module_metadata_never_commits(family, case) -> None:
+    """A recorded fact whose valid value is ``None`` (an ordinary module's
+    ``submodule_search_locations``) is not satisfied by its absence: every spec and module
+    metadata lookup at commit distinguishes a missing entry from ``None``, so deleting any of them
+    rolls the complete transaction back."""
+    _assert_never_commits(family, _METADATA_DELETIONS[case])
+
+
+_NO_BYTECODE_CACHE_FORGERIES = {
+    "spec-cached-removed": "from . import helper\ndel helper.__spec__._cached\n",
+    "module-cached-forged-none": "from . import helper\nhelper.__cached__ = None\n",
+    "own-spec-cached-removed": "del __spec__._cached\n",
+}
+
+
+@pytest.mark.parametrize("case", sorted(_NO_BYTECODE_CACHE_FORGERIES))
+def test_without_a_bytecode_cache_a_deleted_or_forged_cache_entry_never_commits(
+        family, monkeypatch, case) -> None:
+    """Without a cache tag a source spec's valid cache is ``None`` and its module has no
+    ``__cached__``: deleting the spec's ``None`` cache, or adding a ``None`` ``__cached__`` the
+    import system never sets, is a divergence from the recorded state and never commits."""
+    monkeypatch.setattr(sys.implementation, "cache_tag", None)
+    _assert_never_commits(family, _NO_BYTECODE_CACHE_FORGERIES[case])
+
+
+def test_a_family_without_a_bytecode_cache_refreshes_normally(family, monkeypatch) -> None:
+    """The valid ``None`` cache and absent ``__cached__`` of a cache-less import commit."""
+    monkeypatch.setattr(sys.implementation, "cache_tag", None)
+    family.write("helper", "VALUE = 1\n")
+    family.write("strat", "from . import helper\nVALUE = helper.VALUE + 1\n")
+    fresh = refresh_package_closure(family.package, f"{family.package}.strat")
+    helper = family.mod("helper")
+    assert fresh.VALUE == 2 and fresh.helper is helper and family.mod("strat") is fresh
+    assert vars(helper.__spec__)["_cached"] is None and "__cached__" not in vars(helper)
