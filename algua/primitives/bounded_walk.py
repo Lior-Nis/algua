@@ -30,12 +30,28 @@ class TraversalLimitExceeded(ValueError):
         self.kind = kind
 
 
+class WalkCleanupError(RuntimeError):
+    """Closing a directory listing raised `GeneratorExit`.
+
+    Raised from the walk in its place, with the `GeneratorExit` as the cause, because
+    `generator.close()` treats a `GeneratorExit` raised during abandonment as normal completion
+    and would silently discard the cleanup failure. It is an ordinary failure, not an interrupt.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class TreeEntry:
     path: Path
     relative: str
     is_dir: bool
     is_symlink: bool
+
+
+def _close(listing: Any) -> None:
+    try:
+        listing.close()
+    except GeneratorExit as exc:
+        raise WalkCleanupError("closing a directory listing raised GeneratorExit") from exc
 
 
 def _close_all(stack: list[tuple[Any, str]]) -> BaseException | None:
@@ -54,7 +70,7 @@ def _close_all(stack: list[tuple[Any, str]]) -> BaseException | None:
     while stack:
         listing, _prefix = stack.pop()
         try:
-            listing.close()
+            _close(listing)
         except BaseException as exc:  # caught only to finish closing; reported below
             failed.append(listing)
             if first is None:
@@ -63,7 +79,7 @@ def _close_all(stack: list[tuple[Any, str]]) -> BaseException | None:
                 interrupt = exc
     for listing in failed:
         try:
-            listing.close()
+            _close(listing)
         except BaseException as exc:  # a bounded retry; only an interrupt can change the report
             if interrupt is None and not isinstance(exc, Exception):
                 interrupt = exc
@@ -83,7 +99,7 @@ def bounded_walk(
             entry = next(listing, None)
             if entry is None:
                 # Unstack only after a successful close, so a failed close is retried in cleanup.
-                listing.close()
+                _close(listing)
                 stack.pop()
                 continue
             relative = prefix + entry.name
@@ -106,7 +122,7 @@ def bounded_walk(
         # An abandoned walk has no error of its own, so a cleanup failure is the one to report.
         failure = _close_all(stack)
         if failure is not None:
-            raise failure from None
+            raise failure from failure.__cause__  # hides only the abandonment signal
         raise
     except BaseException as active:
         # The active error stays primary over ordinary cleanup failures; every remaining handle

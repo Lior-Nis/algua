@@ -394,6 +394,67 @@ def test_a_retry_interrupt_is_never_dropped(
     assert closed[tmp_path] and closed[tmp_path / "d1/d2"], closed
 
 
+def _is_walk_cleanup_error(exc: BaseException) -> bool:
+    import algua.primitives.bounded_walk as walk_module
+
+    return type(exc) is getattr(walk_module, "WalkCleanupError", None)
+
+
+def test_a_generator_exit_from_a_close_is_visible_when_a_walk_is_abandoned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _chain(tmp_path)
+    closed = track_closes(monkeypatch, faulty=tmp_path / "d1", fault=GeneratorExit)
+    walk = _abandon_at_d3(tmp_path)
+
+    with pytest.raises(RuntimeError) as caught:
+        walk.close()  # generator.close() would silently swallow a raw GeneratorExit
+
+    assert _is_walk_cleanup_error(caught.value)
+    assert isinstance(caught.value.__cause__, GeneratorExit)
+    assert all(closed.values()), closed
+
+
+def test_a_generator_exit_from_an_exhausted_close_is_reported_to_the_consumer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _chain(tmp_path)
+    closed = track_closes(monkeypatch, faulty=tmp_path / "d1/d2/d3", fault=GeneratorExit)
+
+    with pytest.raises(RuntimeError) as caught:
+        _walk(tmp_path)
+
+    assert _is_walk_cleanup_error(caught.value)
+    assert isinstance(caught.value.__cause__, GeneratorExit)
+    assert all(closed.values()), closed
+
+
+def test_a_generator_exit_from_a_close_never_displaces_an_active_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _chain(tmp_path)
+    closed = track_closes(monkeypatch, faulty=tmp_path / "d1", fault=GeneratorExit)
+
+    with pytest.raises(TraversalLimitExceeded):
+        _walk(tmp_path, files=1)
+
+    assert all(closed.values()), closed
+
+
+def test_a_transient_generator_exit_from_an_exhausted_close_is_still_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _chain(tmp_path)
+    closed = track_closes(
+        monkeypatch, faulty=tmp_path / "d1/d2/d3", fault=GeneratorExit, release=False, times=1)
+
+    with pytest.raises(RuntimeError) as caught:  # a raw GeneratorExit must never reach the loop
+        _walk(tmp_path)
+
+    assert _is_walk_cleanup_error(caught.value)
+    assert all(closed.values()), closed
+
+
 def test_an_exhausted_listing_whose_close_fails_once_is_released_by_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

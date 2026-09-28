@@ -44,6 +44,36 @@ def test_a_consumer_error_stays_primary_when_closing_the_walk_fails(
     assert len(closed) == 3 and all(closed.values()), closed
 
 
+def test_a_generator_exit_from_a_close_is_visible_after_an_early_scope_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _chain(tmp_path)
+    closed = track_closes(monkeypatch, faulty=tmp_path / "d1", fault=GeneratorExit)
+
+    with pytest.raises(RuntimeError) as caught, _scoped(tmp_path) as tree:
+        for entry in tree:
+            if entry.relative == "d1/d2/d3":
+                break
+
+    assert type(caught.value) is getattr(walk_module, "WalkCleanupError", None)
+    assert isinstance(caught.value.__cause__, GeneratorExit)
+    assert all(closed.values()), closed
+
+
+def test_a_generator_exit_from_a_close_never_displaces_a_consumer_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _chain(tmp_path)
+    closed = track_closes(monkeypatch, faulty=tmp_path / "d1", fault=GeneratorExit)
+
+    with pytest.raises(TypedRefusal), _scoped(tmp_path) as tree:
+        for entry in tree:
+            if entry.relative == "d1/d2/d3":
+                raise TypedRefusal("consumer refused this entry")
+
+    assert all(closed.values()), closed
+
+
 @pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
 def test_a_cleanup_interrupt_is_never_swallowed_by_a_consumer_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interrupt: type[BaseException],
