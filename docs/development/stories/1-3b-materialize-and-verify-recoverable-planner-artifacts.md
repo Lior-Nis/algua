@@ -383,6 +383,10 @@ These identities are non-cyclic. An environment-only change does not change `bun
   `None` value for ordinary modules so deletion of required nullable spec metadata always refuses
   commit and rolls back
   [algua/primitives/module_commit_check.py:99]
+- [ ] [Review][Patch] Check absent-only module metadata by key membership rather than comparing
+  with the importable `_ABSENT` sentinel so executed family code cannot install that sentinel as
+  a present `__cached__` or `__path__` value and satisfy an absence requirement
+  [algua/primitives/module_commit_check.py:110]
 
 ## Development notes
 
