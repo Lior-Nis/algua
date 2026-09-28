@@ -670,3 +670,57 @@ def test_failed_refresh_restores_parent_bindings_of_self_removed_transient_impor
         assert vars(top)["ext"] == "pre-existing"
     else:
         assert "ext" not in vars(top)
+
+
+@pytest.mark.parametrize(
+    "case", ["sourceless-module", "extension-module", "bytecode-only-package", "pycache-module"])
+def test_importable_non_source_family_entries_fail_closed_before_any_purge(
+        family, monkeypatch, case) -> None:
+    """Sourceless bytecode or an extension module anywhere in the family tree is importable by a
+    dynamic edge the static closure cannot see, yet it is neither validated source nor purged, so
+    the tree scan refuses it before discovery, purge or execution."""
+    family.write("strat", "VALUE = 1\n")
+    importlib.import_module(f"{family.package}.strat")
+    source = family.dir.parent / "compiled_source.py"
+    source.write_text("VALUE = 'stale'\n")
+    if case == "sourceless-module":
+        py_compile.compile(str(source), cfile=str(family.dir / "dyn.pyc"))
+        family.write("strat", (
+            "import importlib\nVALUE = importlib.import_module(__package__ + '.dyn').VALUE\n"))
+    elif case == "extension-module":
+        (family.dir / f"ext{importlib.machinery.EXTENSION_SUFFIXES[0]}").write_bytes(b"\0")
+    elif case == "bytecode-only-package":
+        (family.dir / "sub").mkdir()
+        py_compile.compile(str(source), cfile=str(family.dir / "sub" / "__init__.pyc"))
+    else:
+        (family.dir / "__pycache__").mkdir(exist_ok=True)
+        py_compile.compile(str(source), cfile=str(family.dir / "__pycache__" / "evil.pyc"))
+    before = family.entries()
+    cached = Path(py_compile.compile(str(family.dir / "strat.py")))
+
+    def discovery(*_args: object) -> None:
+        raise AssertionError("source discovery ran before the family-tree entry scan")
+
+    monkeypatch.setattr(module_refresh, "_static_closure", discovery)
+    with pytest.raises(ModuleRefreshError, match="non-source"):
+        _refresh(family)
+
+    assert cached.is_file(), "a refused refresh must not purge anything"
+    after = family.entries()
+    assert set(after) == set(before) and all(after[k] is v for k, v in before.items())
+
+
+def test_generated_bytecode_caches_and_data_files_do_not_block_a_refresh(family) -> None:
+    """Normal ``__pycache__`` entries (tagged, so not importable by name) and non-importable data
+    files stay admissible: the source-only scope refuses only importable non-source entries."""
+    family.write("helper", "VALUE = 1\n")
+    family.write("strat", "from .helper import VALUE\n")
+    py_compile.compile(str(family.dir / "helper.py"), optimize=1)
+    py_compile.compile(str(family.dir / "strat.py"))
+    (family.dir / "notes.json").write_text("{}")
+    importlib.import_module(f"{family.package}.strat")
+    family.write("helper", "VALUE = 2\n")
+
+    _refresh(family)
+
+    assert family.mod("strat").VALUE == 2

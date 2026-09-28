@@ -40,6 +40,9 @@ class ModuleRefreshError(ImportError):
 
 
 _ABSENT = object()
+# Loader suffixes that execute something other than validated source (sourceless or compiled).
+_NON_SOURCE_SUFFIXES = (
+    *importlib.machinery.BYTECODE_SUFFIXES, *importlib.machinery.EXTENSION_SUFFIXES)
 # Re-entrant: a supported caller that runs inside a refresh on the same thread must not self-block.
 _REFRESH_LOCK = threading.RLock()
 
@@ -114,7 +117,7 @@ def _refresh_attempt(package: str, root: str) -> ModuleType:
     locations = list(package_spec.submodule_search_locations)
     for location in locations:
         _require_unlinked(location, package)
-        _require_unlinked_tree(location, package)
+        _require_source_tree(location, package)
     _require_acyclic(_static_closure(package, root))
     _purge_package_bytecode(locations)
     for name in [name for name in sys.modules if _within(name, package)]:
@@ -172,10 +175,11 @@ def _require_unlinked(path: str, name: str) -> None:
         raise ModuleRefreshError(f"{name!r} source lies at or under a symlink", name=name)
 
 
-def _require_unlinked_tree(location: str, name: str) -> None:
+def _require_source_tree(location: str, name: str) -> None:
     """Fail closed if ANY entry of the complete tree under ``location`` is a symlink (file,
-    directory or dangling), scanning without following links: a dynamic import can reach any
-    file, not only the static closure, and the bytecode purge never descends into a link."""
+    directory or dangling) or an importable non-source module, scanning without following links:
+    a dynamic import can reach any file, not only the static closure, the bytecode purge never
+    descends into a link, and sourceless bytecode or an extension is never current source."""
     pending = [location]
     while pending:
         with os.scandir(pending.pop()) as entries:
@@ -185,6 +189,20 @@ def _require_unlinked_tree(location: str, name: str) -> None:
                         f"{name!r} source tree contains a symlink: {entry.name!r}", name=name)
                 if entry.is_dir(follow_symlinks=False):
                     pending.append(entry.path)
+                elif _importable_non_source(entry.name):
+                    raise ModuleRefreshError(
+                        f"{name!r} source tree contains an importable non-source module: "
+                        f"{entry.name!r}", name=name)
+
+
+def _importable_non_source(file_name: str) -> bool:
+    """Whether a finder would load ``file_name`` as a module (its stem has no dot) through a
+    sourceless or extension loader. Tagged ``__pycache__`` files such as ``m.cpython-312.pyc``
+    are not importable by name, so normal cached bytecode stays admissible."""
+    return any(
+        file_name.endswith(suffix) and "." not in file_name[:-len(suffix)]
+        for suffix in _NON_SOURCE_SUFFIXES
+    )
 
 
 def _within(name: str, package: str) -> bool:
