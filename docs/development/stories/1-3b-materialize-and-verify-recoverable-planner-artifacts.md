@@ -451,6 +451,41 @@ These identities are non-cyclic. An environment-only change does not change `bun
   its own reviewed contract change rather than an incidental patch
   [algua/registry/planner_environment.py:47]
 
+#### Review round against `7877b8a` (2026-09-28)
+
+- [ ] [Review][Patch] Enforce `MAX_FILE_BYTES` while streaming each bundle file's digest, so a
+  file that grows after its `lstat` size check fails closed instead of being read without bound
+  [algua/registry/artifact_store.py:112]
+- [ ] [Review][Patch] Reject locked wheel URLs containing control or other non-printable
+  characters and require an exact canonical URL round-trip before insertion and duplicate
+  detection [algua/registry/planner_environment.py:145]
+- [ ] [Review][Patch] Canonicalize every environment entry, directories included, before retaining
+  or using it, so a malformed directory path fails before its subtree is read
+  [algua/registry/planner_environment_inventory.py:171]
+- [ ] [Review][Patch] Close every stacked `scandir` iterator even when one close raises, preserving
+  the correct active or cleanup exception [algua/primitives/bounded_walk.py:66]
+- [ ] [Review][Patch] Translate dangling or unreadable required interpreter-link failures to
+  `EnvironmentIncompatible` instead of leaking raw `OSError`/`RuntimeError`
+  [algua/registry/planner_environment_inventory.py:177]
+- [ ] [Review][Patch] Enforce `MAX_PYVENV_CFG_BYTES` before hashing `pyvenv.cfg` and avoid a
+  needless second bounded read of the same bytes
+  [algua/registry/planner_environment_inventory.py:190]
+- [ ] [Review][Patch] Synchronize the protected Story 1.3b companion with `MAX_BUNDLE_DIRECTORIES`
+  (10,000), `MAX_ENVIRONMENT_DIRECTORIES` (25,000), `MAX_PYVENV_CFG_BYTES` (64 KiB) and the
+  uv 0.9.26 startup-file policy, including version and retention behavior for recorded
+  environments; documentation alignment only, no authority or scope change
+  [docs/development/specs/spec-story-1-3b-artifact-environment-contract/artifact-environment-contract.md]
+- [ ] [Review][Patch] Repair the stale checked `strict_walk.py` pointer to `bounded_walk.py` and its
+  consumer locations
+  [docs/development/stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md:436]
+- [x] [Review][Defer] The normative `uv sync` argv's `--no-env-file` flag is rejected by uv 0.9.26.
+  Pre-existing, already tracked by the open finding above and intentionally outside this round:
+  `SYNC_FLAGS`, the golden vectors and the normative sync argv are unchanged. Recorded in
+  `deferred-work.md` [algua/registry/planner_environment.py:47]
+- Dismissed (not implemented): fd/`openat` hardening against hostile same-UID path replacement;
+  the normative contract explicitly accepts same-UID hostile replacement as the no-sandbox
+  residual.
+
 ## Development notes
 
 - Prefer focused modules: `registry/artifact_contract.py`, `registry/frozen_source.py`,
