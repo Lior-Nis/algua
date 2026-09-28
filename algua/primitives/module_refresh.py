@@ -23,7 +23,10 @@ progress. This is not a claim of arbitrary ``importlib`` concurrency safety: the
 import-quiescent for everything else. A direct import of a family module (or of anything the
 refresh imports) from another thread, or a supported call made from inside a module body another
 thread is initializing, while a refresh runs is unsupported and may observe a partially rebuilt
-family or deadlock.
+family or deadlock. A child forked while another thread runs a refresh restores the pre-refresh
+module state, drops the inherited guard and transaction and gets a fresh lock; CPython's own
+per-module import locks that the vanished thread held for the modules it was initializing are
+not reset, so re-importing exactly those modules in that child is likewise unsupported.
 """
 from __future__ import annotations
 
@@ -53,17 +56,30 @@ _ABSENT = object()
 _REFRESH_LOCK = threading.RLock()
 # Per-thread: set while THIS thread runs a refresh transaction, so a nested refresh is refused.
 _TRANSACTION = threading.local()
+# Process-wide: (owner thread ident, pre-refresh ``sys.modules``, guard) of the running transaction,
+# so a forked child can undo a transaction whose owner thread does not exist there.
+_ACTIVE: tuple[int, dict[str, ModuleType], _ImportGuard] | None = None
 
 
-def _reinitialize_after_fork() -> None:
-    """Only the forking thread survives in a child, so a lock held by any other thread would
-    never be released there: the child starts with a fresh, unowned refresh lock."""
-    global _REFRESH_LOCK
+def _recover_after_fork() -> None:
+    """Only the forking thread survives in a child. A lock held by any other thread would never be
+    released there, so the child always starts with a fresh, unowned lock. A transaction another
+    thread was running will never finish there either, so the child restores its pre-refresh
+    modules and recorded direct parent bindings, removes the inherited guard and resets the
+    transaction state. A transaction owned by the forking thread itself is left alone: that thread
+    goes on in the child and commits or rolls back as usual."""
+    global _ACTIVE, _REFRESH_LOCK, _TRANSACTION
     _REFRESH_LOCK = threading.RLock()
+    if _ACTIVE is None or _ACTIVE[0] == threading.get_ident():
+        return
+    _, before, guard = _ACTIVE
+    _ACTIVE, _TRANSACTION = None, threading.local()
+    sys.meta_path[:] = [finder for finder in sys.meta_path if not isinstance(finder, _ImportGuard)]
+    _restore_modules(before, guard.bindings)
 
 
 if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=_reinitialize_after_fork)
+    os.register_at_fork(after_in_child=_recover_after_fork)
 
 
 def serialized_import(name: str) -> ModuleType:
@@ -107,8 +123,9 @@ def _refresh_locked(package: str, root: str) -> ModuleType:
     failure from preflight to the fresh import, including a ``BaseException``, restores it. The
     snapshot is ``sys.modules`` itself plus, recorded by the guard, the direct parent binding of
     each module the import system loads; no module namespace is copied wholesale."""
-    before = dict(sys.modules)
-    guard = _ImportGuard()
+    global _ACTIVE
+    before, guard = dict(sys.modules), _ImportGuard()
+    _ACTIVE = (threading.get_ident(), before, guard)
     sys.meta_path.insert(0, guard)
     try:
         return _refresh_attempt(package, root, guard)
@@ -118,6 +135,7 @@ def _refresh_locked(package: str, root: str) -> ModuleType:
     finally:
         if guard in sys.meta_path:
             sys.meta_path.remove(guard)
+        _ACTIVE = None
 
 
 class _ImportGuard:

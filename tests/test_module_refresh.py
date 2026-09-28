@@ -1298,3 +1298,168 @@ def test_a_fresh_family_graph_that_is_not_exactly_bound_never_commits(family, ca
     assert set(after) == set(before) and all(after[k] is v for k, v in before.items())
     assert vars(sys.modules[family.top])["fam"] is parent_binding
     assert vars(parent_binding)["helper"] is before[f"{family.package}.helper"]
+
+
+_MID_REFRESH_FORK_PROBE = """
+import os, sys, threading, traceback
+root = sys.argv[1]
+sys.path.insert(0, root)
+from algua.primitives import module_refresh
+import gate_fork
+import top_fork.fam.strat
+top = sys.modules["top_fork"]
+old = {k: v for k, v in sys.modules.items() if k.startswith("top_fork.fam")}
+old_binding = vars(top)["fam"]
+with open(os.path.join(root, "top_fork", "fam", "strat.py"), "w") as handle:
+    handle.write("import top_fork.ext\\nimport gate_fork\\ngate_fork.entered.set()\\n"
+                 "assert gate_fork.release.wait(30)\\nVALUE = 2\\n")
+errors = []
+def refresh():
+    try:
+        module_refresh.refresh_package_closure("top_fork.fam", "top_fork.fam.strat")
+    except BaseException as exc:
+        errors.append(exc)
+refresher = threading.Thread(target=refresh, daemon=True)
+refresher.start()
+# Handshake: the refresher is parked inside the transaction (family dropped, a fresh package and a
+# new external module imported, the guard installed, the lock held) before the fork.
+assert gate_fork.entered.wait(10)
+pid = os.fork()
+if pid == 0:
+    code = 0
+    try:
+        now = {k: v for k, v in sys.modules.items() if k.startswith("top_fork.fam")}
+        if set(now) != set(old) or any(now[k] is not old[k] for k in old):
+            code = 11
+        elif vars(top).get("fam") is not old_binding:
+            code = 12
+        elif "top_fork.ext" in sys.modules or "ext" in vars(top):
+            code = 13
+        elif any(type(f).__name__ == "_ImportGuard" for f in sys.meta_path):
+            code = 14
+        elif not module_refresh._REFRESH_LOCK.acquire(timeout=5):
+            code = 15
+        elif module_refresh._ACTIVE is not None or getattr(
+                module_refresh._TRANSACTION, "active", False):
+            code = 16
+        elif (module_refresh.serialized_import("top_fork.fam.strat")
+              is not old["top_fork.fam.strat"]):
+            code = 17
+        else:
+            module_refresh._REFRESH_LOCK.release()
+            # CPython's own per-module import lock for strat stays held by the vanished thread
+            # that was executing its body (import-quiescent precondition), so the later refresh
+            # goes through a root that thread was not initializing.
+            fresh = module_refresh.refresh_package_closure("top_fork.fam", "top_fork.fam.other")
+            if fresh.VALUE != 3 or sys.modules["top_fork.fam.other"] is not fresh:
+                code = 18
+    except BaseException:
+        traceback.print_exc()
+        code = 19
+    os._exit(code)
+_, status = os.waitpid(pid, 0)
+gate_fork.release.set()
+refresher.join(30)
+print(os.waitstatus_to_exitcode(status), flush=True)
+os._exit(0 if not errors and not refresher.is_alive() else 5)
+"""
+
+
+def _fork_probe_tree(tmp_path: Path) -> None:
+    (tmp_path / "top_fork" / "fam").mkdir(parents=True)
+    (tmp_path / "top_fork" / "ext").mkdir()
+    for package in ("top_fork", "top_fork/fam", "top_fork/ext"):
+        (tmp_path / package / "__init__.py").write_text("")
+    (tmp_path / "top_fork" / "fam" / "strat.py").write_text("VALUE = 1\n")
+    (tmp_path / "top_fork" / "fam" / "other.py").write_text("VALUE = 3\n")
+    (tmp_path / "gate_fork.py").write_text(
+        "import threading\nentered = threading.Event()\nrelease = threading.Event()\n")
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork-only platform behavior")
+def test_a_fork_mid_refresh_recovers_the_pre_refresh_state_in_the_child(tmp_path) -> None:
+    """A fork while ANOTHER thread is mid-refresh leaves the child a transaction nobody will
+    finish: a partially rebuilt family, a new external module and its parent binding, the guard
+    and a lock owned by a vanished thread. The child restores the pre-refresh modules and direct
+    parent bindings, removes the guard, resets the transaction and replaces the lock, so warm loads
+    and a later refresh in the child proceed; the parent's own refresh is unaffected."""
+    _fork_probe_tree(tmp_path)
+
+    result = subprocess.run(
+        [sys.executable, "-W", "ignore::DeprecationWarning", "-c", _MID_REFRESH_FORK_PROBE,
+         str(tmp_path)],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert result.stdout.strip() == "0", (result.stdout, result.stderr)
+
+
+_OWNER_FORK_PROBE = """
+import os, sys
+sys.path.insert(0, sys.argv[1])
+from algua.primitives.module_refresh import refresh_package_closure
+import top_fork.fam.strat
+with open(os.path.join(sys.argv[1], "top_fork", "fam", "strat.py"), "w") as handle:
+    handle.write("import os\\nimport top_fork.ext\\nPID = os.fork()\\nVALUE = 2\\n")
+fresh = refresh_package_closure("top_fork.fam", "top_fork.fam.strat")
+committed = sys.modules["top_fork.fam.strat"] is fresh and fresh.VALUE == 2
+if fresh.PID == 0:
+    os._exit(0 if committed else 21)
+_, status = os.waitpid(fresh.PID, 0)
+print(os.waitstatus_to_exitcode(status), flush=True)
+os._exit(0 if committed else 22)
+"""
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork-only platform behavior")
+def test_a_fork_by_the_refreshing_thread_itself_continues_the_transaction(tmp_path) -> None:
+    """When the thread running the refresh forks (from a module body), that same thread goes on
+    in the child and finishes the transaction there, so the child must NOT roll it back."""
+    _fork_probe_tree(tmp_path)
+
+    result = subprocess.run(
+        [sys.executable, "-W", "ignore::DeprecationWarning", "-c", _OWNER_FORK_PROBE,
+         str(tmp_path)],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert result.stdout.strip() == "0", (result.stdout, result.stderr)
+
+
+_AFTER_REFRESH_FORK_PROBE = """
+import os, sys, threading
+sys.path.insert(0, sys.argv[1])
+from algua.primitives.module_refresh import refresh_package_closure
+import top_fork.fam.strat
+with open(os.path.join(sys.argv[1], "top_fork", "fam", "strat.py"), "w") as handle:
+    handle.write("VALUE = 2\\n")
+done = {}
+worker = threading.Thread(target=lambda: done.update(
+    root=refresh_package_closure("top_fork.fam", "top_fork.fam.strat")))
+worker.start()
+worker.join(30)
+pid = os.fork()
+if pid == 0:
+    kept = sys.modules["top_fork.fam.strat"] is done["root"] and done["root"].VALUE == 2
+    os._exit(0 if kept else 31)
+_, status = os.waitpid(pid, 0)
+print(os.waitstatus_to_exitcode(status), flush=True)
+"""
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork-only platform behavior")
+def test_a_fork_after_a_completed_refresh_keeps_the_committed_family(tmp_path) -> None:
+    """A finished transaction leaves no recovery record behind, so a later fork never rolls a
+    committed refresh back in the child."""
+    _fork_probe_tree(tmp_path)
+
+    result = subprocess.run(
+        [sys.executable, "-W", "ignore::DeprecationWarning", "-c", _AFTER_REFRESH_FORK_PROBE,
+         str(tmp_path)],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert result.stdout.strip() == "0", (result.stdout, result.stderr)
