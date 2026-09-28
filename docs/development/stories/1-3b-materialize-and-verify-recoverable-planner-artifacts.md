@@ -4,7 +4,7 @@ baseline_commit: 24c4a2bc138822c5a74ea0ed91d6d5f03c402d97
 
 # Story 1.3b: Materialize and verify recoverable planner artifacts
 
-Status: in-progress
+Status: review
 
 Prepared: 2026-09-27. Baseline: Story 1.3a merge `24c4a2b` (PR #674).
 Epic: 1. Parent: Story 1.3. Requirements: FR4, FR6, FR9–FR10 and NFR1, NFR3–NFR8.
@@ -674,35 +674,35 @@ These identities are non-cyclic. An environment-only change does not change `bun
 
 #### Review findings against `962fb2e` (2026-09-28)
 
-- [ ] [Review][Patch] Preserve a post-scope creation state for externally or cross-scope invoked
+- [x] [Review][Patch] Preserve a post-scope creation state for externally or cross-scope invoked
   lazy functions without reintroducing impossible sibling-path states into objects already
   created in the defining scope (Todoist 6hfQ8rC7977WmvXp)
   [tests/primitives/test_scoped_walk.py:558]
-- [ ] [Review][Patch] Restrict Boolean return propagation to operands that can actually be the
+- [x] [Review][Patch] Restrict Boolean return propagation to operands that can actually be the
   expression result, including the always-truthy identity of generator and coroutine objects
   (Todoist 6hfQ933hvw6PVvVG) [tests/primitives/test_scoped_walk.py:1053]
-- [ ] [Review][Patch] Include assignment-expression targets owned by a lambda when deriving its
+- [x] [Review][Patch] Include assignment-expression targets owned by a lambda when deriving its
   closure locals, without collecting targets owned by nested scopes (Todoist 6hfQ932C86Xm2fGp)
   [tests/primitives/test_scoped_walk.py:380]
-- [ ] [Review][Patch] Treat lazy objects passed to unknown named calls as escaping unless the
+- [x] [Review][Patch] Treat lazy objects passed to unknown named calls as escaping unless the
   callee is explicitly proven non-retaining, so a callee cannot stash an object until after a raw
   rebind (Todoist 6hfQ94C4qGggxjWp) [tests/primitives/test_scoped_walk.py:436]
-- [ ] [Review][Patch] Make the lazy-flow complexity regression measure actual object-state copy
+- [x] [Review][Patch] Make the lazy-flow complexity regression measure actual object-state copy
   work rather than the number of binding keys, and remove the remaining quadratic live-object
   update behavior (Todoist 6hfQ949RRWWvrqvp) [tests/primitives/test_scoped_walk.py:635]
-- [ ] [Review][Patch] Honor `global` and `nonlocal` declarations when deriving the actual free
+- [x] [Review][Patch] Honor `global` and `nonlocal` declarations when deriving the actual free
   variables of a returned lazy object, so a declaration cannot be mistaken for a safe factory
   local (Todoist 6hfQ9Rm5JgMc3Mrp) [tests/primitives/test_scoped_walk.py:651]
-- [ ] [Review][Patch] Propagate relevant declared writes from a followed same-scope helper call,
+- [x] [Review][Patch] Propagate relevant declared writes from a followed same-scope helper call,
   with recursion and complexity bounds, before checking subsequent direct or lazy walk use
   (Todoist 6hfQ9Rqc6X7wf35G) [tests/primitives/test_scoped_walk.py:664]
-- [ ] [Review][Patch] Distinguish constructing or truth-testing a temporary lazy object from
+- [x] [Review][Patch] Distinguish constructing or truth-testing a temporary lazy object from
   advancing it, so `bool(gen())` does not execute the generator body (Todoist
   6hfQ9VrR8mjGPv4p) [tests/primitives/test_scoped_walk.py:626]
-- [ ] [Review][Patch] Traverse deeply nested conditional lazy-value expressions iteratively under
+- [x] [Review][Patch] Traverse deeply nested conditional lazy-value expressions iteratively under
   an explicit node bound rather than crashing repository hygiene with `RecursionError` (Todoist
   6hfQ9Rq8R3RWMr3G) [tests/primitives/test_scoped_walk.py:389]
-- [ ] [Review][Patch] Project return-summary cache keys onto names relevant to the summarized
+- [x] [Review][Patch] Project return-summary cache keys onto names relevant to the summarized
   function so unrelated accumulated definitions cannot cause quadratic cache growth (Todoist
   6hfQ9RmmQ7HwXJ3p) [tests/primitives/test_scoped_walk.py:643]
 
@@ -1168,6 +1168,76 @@ uv run lint-imports
   views-in-bindings mutant fails the near-linear assertion. All 46 now fail an assertion. The
   full 5,378-test root gate (`-p no:randomly`), ruff, mypy, all 28 import contracts and
   `git diff --check` pass.
+- Review findings against `962fb2e` (10 patches, `tests/primitives/test_scoped_walk.py` only):
+  16 new cases (303 to 319 guard-file tests). 6hfQ8rC7977WmvXp: a lazy object called from
+  another function's body, not the scope that defines it, was invisible, since only same-scope
+  calls were followed; `_called` now also follows a call from a resolved function's own scope,
+  forwarding only the names that function does not shadow with a local of its own (`_shadow`),
+  and `_scope`'s deferred loop runs a second pass so a sibling discovered only while resolving a
+  later sibling still reaches the earlier one (new positive
+  `generator-invoked-from-another-function-sees-a-feasible-sibling-alias`; the impossible
+  sibling-path negative is unchanged). 6hfQ933hvw6PVvVG: `gen() and None` wrongly propagated the
+  always-truthy generator as a possible return; `_ReturnFlow._truth` treats a call whose every
+  feasible callee only ever hands back a lazy object (no `__bool__`/`__len__`) as always truthy,
+  and an operand that definitely continues the chain is dropped unless nothing follows it (new
+  `factory-and-discards-an-always-truthy-generator` negative and
+  `factory-returning-the-last-operand-after-a-decided-boolean` positive). 6hfQ932C86Xm2fGp:
+  `_locals` gave a lambda only its parameters, so a walrus bound inside it leaked as a free name a
+  returned generator expression would read from the caller; a lambda's one-expression body is now
+  walked like a function's statements, picking up the walrus through the existing Store-context
+  `Name` handling (new `lambda-walrus-hides-a-caller-alias-from-a-generator-expression` negative).
+  6hfQ94C4qGggxjWp and 6hfQ9VrR8mjGPv4p: `_escaping` treated any plain-named call (`stash(gen())`)
+  as non-retaining, same as `bool(gen())`; a narrow `NON_RETAINING_CALLS = {bool, next, any, all}`
+  allowlist now decides retention, so an unknown callee is conservatively retaining (new
+  `generator-stashed-by-an-unknown-named-callee-escapes` positive) while `bool`/`next`/`any`
+  truth-testing/advancing stays a comprehension temporary (new
+  `generator-only-bool-tested-in-a-comprehension-stays-inside` negative). 6hfQ949RRWWvrqvp: the
+  prior regression counted `len(bindings)`, near-constant regardless of live-object count, so a
+  `frozenset | {oid}` rebuild on every object made (O(n) copy per creation, O(n^2) total) was
+  invisible; a standalone reproduction of that rebuild measured 4,950/19,900/79,800/319,600 at
+  100/200/400/800 creations (~4x per doubling). ALIVE's value is now `_Alive`, a persistent
+  cons/join structure (O(1) `added`/`_alive_union`, nothing copied) whose `flattened()`/`__eq__`/
+  iteration walk an explicit stack, not recursion (a first recursive draft raised
+  `RecursionError` near 1,000 live objects); the rewritten test instruments actual node creation
+  and iteration and now measures 200/400/800/1,600 at the same counts (exactly linear; separately
+  verified to 3,200/6,400 with no `RecursionError`). `_Alive` is deliberately not a `frozenset`
+  subclass: `set(x)`/`frozenset(x)`/`set.update(x)` special-case an actual frozenset instance and
+  copy its table directly in C, bypassing any overridden `__iter__`; that was tried, silently
+  broke 14 escaping-comprehension tests, and was reverted before this design. 6hfQ9Rm5JgMc3Mrp: a
+  nested generator's own `global m` was still excluded from its returned closure whenever the
+  enclosing factory had a safe local `m`, since exclusion used the factory's blanket `_locals`
+  regardless of what the nested object itself declares; `_summarize` now subtracts each returned
+  object's own `_global`-declared names from that closure (new
+  `generator-declaring-global-bypasses-a-safe-factory-local` positive;
+  `generator-declaring-nonlocal-resolves-to-the-factory-local` pins that plain `nonlocal` is
+  unaffected). 6hfQ9Rqc6X7wf35G: a followed helper's `global`/`nonlocal` writes were never
+  reflected in the caller's flow state; `_effect` computes, once per function and cached, the
+  targets a call may leave a declared name holding across every feasible exit, using a bounded
+  single-level `_ReturnFlow` pass (a call it makes is never followed, so a self- or
+  mutually-recursive helper's in-flight call summarizes as having no effect, closing recursion
+  without an explicit depth counter), merged into the caller's bindings via `_set` (new
+  `helper-declaring-global-writes-into-the-caller-state` positive,
+  `self-recursive-global-writing-helper-still-reports-its-own-write` recursion-boundary positive,
+  `helper-writing-a-plain-local-leaves-the-caller-state-safe` and
+  `helper-writing-a-shadowing-parameter-leaves-the-caller-state-safe` negatives). 6hfQ9Rq8R3RWMr3G:
+  a comprehension result built as a deep right-nested ternary chain raised `RecursionError` in
+  both `_outcomes`'s `IfExp` branch and `_values`, confirmed at depths 500 and 900; both now
+  flatten the `orelse` chain with an explicit worklist bounded by `MAX_IFEXP_CHAIN` (10,000) AST
+  nodes instead of recursing one frame per `else` (new
+  `deep-ternary-chain-in-a-comprehension-result-is-reached`/`...-stays-clean` at depth 520; both
+  the flagged and clean branch were verified correct, not just non-crashing, up to depth 5,000).
+  6hfQ9RmmQ7HwXJ3p: `_returned`/`_effect` keyed their cache on the caller's entire scope state
+  minus parameters, so an unrelated function defined anywhere else in the module inflated every
+  other function's key; a reproduction with `count` independent generator/factory pairs measured
+  cache-entry size summed across all `_summarize` calls at 2,650/10,300/40,600/161,200 for
+  50/100/200/400 pairs (~4x per doubling). `_read_names`/`_entry` now project the cache key onto
+  only the plain names a function's own top-level code actually loads, and the same reproduction
+  now measures 50/100/200/400/800 (exactly linear; rewritten
+  `test_return_summary_cache_keys_stay_near_linear_in_the_factories` asserts the same ≤2.1x bound
+  with this deterministic, non-wall-clock instrumentation). All 319 tests in
+  `tests/primitives/test_scoped_walk.py` pass. The full 5,394-test root gate
+  (`-p no:randomly`, 527.47 s), ruff, mypy (332 source files), all 28 import contracts and
+  `git diff --check` pass.
 
 ### Completion Notes
 
@@ -1588,3 +1658,12 @@ uv run lint-imports
   confined comprehension temporaries, Python class-comprehension scope, near-linear lazy
   observation, iterative `not`-chain classification); the full 5,378-test root gate, ruff, mypy,
   all 28 import contracts and `git diff --check` pass.
+- 2026-09-28: Addressed all 10 review findings against `962fb2e` test-first, in
+  `tests/primitives/test_scoped_walk.py` only (cross-scope lazy-call visibility, always-truthy
+  Boolean return pruning, lambda-walrus closure locals, unknown-callee retention behind a narrow
+  non-retaining allowlist, an O(1) persistent alive-set replacing the quadratic frozenset rebuild,
+  per-object `global`/`nonlocal` closure exclusion, bounded same-scope helper effect propagation
+  with a recursion-closing guard, iterative deep-ternary-chain classification, and return-summary/
+  effect cache keys projected onto a function's actual reads); 16 new cases (303 to 319 guard-file
+  tests), all passing; the full 5,394-test root gate, ruff, mypy, all 28 import contracts and
+  `git diff --check` pass.

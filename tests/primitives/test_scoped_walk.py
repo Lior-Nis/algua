@@ -213,12 +213,121 @@ RAW_WALK = f"{WALK_MODULE}.bounded_walk"
 
 
 BUILTIN_GETATTR = "builtins.getattr"
+# narrow, explicit exceptions to "any call may retain its argument": built-ins that only
+# construct, test or advance what they are handed, never store or return it
+NON_RETAINING_CALLS = frozenset({"bool", "next", "any", "all"})
+# an explicit bound on how many `if`/`else` levels of one ternary chain are walked (iteratively,
+# not recursed into): comfortably past any chain a human would write, but finite, so a truly
+# pathological input still terminates rather than growing the walk without limit
+MAX_IFEXP_CHAIN = 10_000
 Function = ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
 Deferred = Function | ast.GeneratorExp  # analyzed after its scope's statements
 Comprehension = ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp
 ALIVE = "<alive>"  # the key naming the lazy objects that exist on some path to a point
-# each name mapped to every walk-relevant target it may hold on some path to this point
-Bindings = dict[str, frozenset[str]]
+
+
+class _Alive:
+    """A persistent, immutable set of live-object ids. Adding one, or joining what two paths each
+    have alive, is O(1) and shares every node already built rather than copying it, so a
+    straight-line run of N creations costs O(N) in total, not the O(N^2) that unioning a growing
+    `frozenset` on every one of them would. Iterating it, or comparing it for equality (needed for
+    a loop's fixpoint check, since two differently-built sets of the same ids must still compare
+    equal), instead flattens it: computed once per distinct node and cached, and walked with an
+    explicit stack rather than recursed into, since a long straight-line chain would otherwise
+    recurse one Python frame per id and exceed the recursion limit.
+
+    Deliberately not a `frozenset` subclass: `set(x)`, `frozenset(x)` and `set.update(x)` all
+    special-case an actual `frozenset` (or subclass) instance and copy its underlying hash table
+    directly in C, bypassing any Python-level `__iter__` override -- confirmed empirically before
+    this design was chosen -- so a lazily-flattened node would read as empty through those. Being
+    a genuinely different type, checked with `isinstance` at the few places `Bindings` reads or
+    writes ALIVE, is what keeps this sound."""
+
+    __slots__ = ("_oid", "_left", "_right", "_flat")
+
+    def __init__(
+        self, oid: str | None = None, left: frozenset[str] | _Alive | None = None,
+        right: frozenset[str] | _Alive | None = None,
+    ) -> None:
+        self._oid = oid
+        self._left = left
+        self._right = right
+        self._flat: frozenset[str] | None = None
+
+    def added(self, oid: str) -> _Alive:
+        return _Alive(oid=oid, left=self)
+
+    def flattened(self) -> frozenset[str]:
+        """``self``'s set, computed and cached once per distinct node: a straight run of N
+        `added` calls chains N nodes deep, so this walks that chain with an explicit stack (each
+        node visited once, children before their parent) rather than recursing, which would
+        raise ``RecursionError`` well before N reaches the default recursion limit. A child link
+        already holding an ordinary, already-materialized `frozenset` (rather than another
+        `_Alive` node still to flatten) is used as-is."""
+        if self._flat is not None:
+            return self._flat
+        stack: list[tuple[_Alive, bool]] = [(self, False)]
+        while stack:
+            node, expanded = stack.pop()
+            if node._flat is not None:
+                continue
+            if expanded:
+                own = frozenset((node._oid,)) if node._oid is not None else frozenset()
+                node._flat = _flat_of(node._left) | _flat_of(node._right) | own
+            else:
+                stack.append((node, True))
+                for child in (node._left, node._right):
+                    if isinstance(child, _Alive) and child._flat is None:
+                        stack.append((child, False))
+        return _flat_of(self)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.flattened())
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, _Alive):
+            return self.flattened() == other.flattened()
+        if isinstance(other, frozenset):
+            return self.flattened() == other
+        return NotImplemented
+
+
+def _flat_of(node: frozenset[str] | _Alive | None) -> frozenset[str]:
+    """A child link's already-materialized set: `_Alive`'s own cached flatten if it is one
+    (guaranteed populated -- `flattened` visits every child before its parent), the plain
+    `frozenset` itself if it is already one, or nothing at all for `None`."""
+    if node is None:
+        return frozenset()
+    if isinstance(node, _Alive):
+        flat = node._flat
+        assert flat is not None
+        return flat
+    return node
+
+
+def _alive_add(alive: frozenset[str] | _Alive | None, oid: str) -> _Alive:
+    """``alive`` with ``oid`` added, in O(1): everything already alive -- whether it is another
+    `_Alive` node or an ordinary, already-materialized `frozenset` -- stays reachable, untouched,
+    through the new node."""
+    return alive.added(oid) if isinstance(alive, _Alive) else _Alive(oid=oid, left=alive)
+
+
+def _alive_union(
+    a: frozenset[str] | _Alive | None, b: frozenset[str] | _Alive | None,
+) -> frozenset[str] | _Alive | None:
+    """Everything alive in ``a`` or ``b``, in O(1): a join over both, flattened only if and when
+    the result actually needs walking or comparing."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return _Alive(left=a, right=b)
+
+
+# each name mapped to every walk-relevant target it may hold on some path to this point, except
+# ALIVE, whose value is a `frozenset[str] | _Alive | None`, not a `frozenset[str]` alone (see
+# `_Alive` for why it is a genuinely different type rather than a `frozenset` subclass)
+Bindings = dict[str, frozenset[str] | _Alive]
 # a lazy object a call hands back: its function, and the names it reads from the closure of the
 # function that made it (whose own flow resolves them)
 Returned = tuple[Deferred, frozenset[str]]
@@ -264,7 +373,12 @@ def _relevant(target: str) -> bool:
 
 def _merge(into: Bindings, state: Bindings) -> None:
     for name, targets in state.items():
-        into[name] = into.get(name, frozenset()) | targets
+        if name == ALIVE:
+            merged = _alive_union(into.get(ALIVE), targets)
+            if merged is not None:
+                into[ALIVE] = merged
+        else:
+            into[name] = into.get(name, frozenset()) | targets
 
 
 def _join(*states: Bindings) -> Bindings:
@@ -373,20 +487,41 @@ def _own_nodes(nodes: Iterable[ast.AST]) -> Iterator[ast.AST]:
             stack.extend(reversed(list(ast.iter_child_nodes(node))))
 
 
+def _own_body(function: Function) -> list[ast.AST]:
+    """``function``'s own statements, or its one expression for a lambda, as a list."""
+    return [function.body] if isinstance(function, ast.Lambda) else list(function.body)
+
+
+def _declared(function: Function, kind: type | tuple[type, ...] = (ast.Global, ast.Nonlocal),
+              ) -> frozenset[str]:
+    """The names ``function``'s own code declares `global` and/or `nonlocal`, per ``kind``: a
+    lambda can declare neither, since its body is one expression, not a statement."""
+    if isinstance(function, ast.Lambda):
+        return frozenset()
+    return frozenset(
+        name for node in _own_nodes(_own_body(function)) if isinstance(node, kind)
+        for name in node.names)
+
+
+def _global(function: Deferred) -> frozenset[str]:
+    """The names ``function``'s own code declares `global`: only a `def` can, so a generator
+    expression (which cannot contain a `global` statement at all) never has any."""
+    return _declared(function, ast.Global) if isinstance(function, Function) else frozenset()
+
+
 def _locals(function: Function) -> frozenset[str]:
     """The names local to ``function``: its parameters and the names its own code binds, less
-    those it declares `global` or `nonlocal` and a comprehension's own targets."""
+    those it declares `global` or `nonlocal` and a comprehension's own targets. A lambda's body
+    is one expression, not a list of statements, but a walrus in it (unlike a comprehension's)
+    binds in the lambda's own scope, so it is walked exactly as a function's statements are."""
     names = _parameters(function)
-    if isinstance(function, ast.Lambda):
-        return frozenset(names)
-    nodes = list(_own_nodes(function.body))
+    nodes = list(_own_nodes(_own_body(function)))
     targets = {
         id(name) for node in nodes if isinstance(node, ast.comprehension)
         for name in ast.walk(node.target)}
-    declared: set[str] = set()
     for node in nodes:
         if isinstance(node, (ast.Global, ast.Nonlocal)):
-            declared.update(node.names)
+            continue  # accounted for by `_declared`, subtracted below
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             names.add(node.name)
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -397,43 +532,59 @@ def _locals(function: Function) -> frozenset[str]:
             names.add(node.name)
         elif isinstance(node, (ast.Name, ast.pattern)) and id(node) not in targets:
             names.update(_bound_names(node))
-    return frozenset(names - declared)
+    return frozenset(names) - _declared(function)
 
 
 def _values(node: ast.expr | None) -> set[ast.AST]:
-    """The expressions making the objects ``node``'s value may be, or hold as a display does."""
-    if isinstance(node, (ast.Call, ast.GeneratorExp)):
-        return {node}
-    parts: list[ast.expr | None]
-    if isinstance(node, ast.IfExp):
-        parts = [node.body, node.orelse]
-    elif isinstance(node, ast.BoolOp):
-        parts = [*node.values]
-    elif isinstance(node, ast.NamedExpr):
-        parts = [node.value]
-    elif isinstance(node, (ast.Tuple, ast.List, ast.Set)):
-        parts = [*node.elts]
-    elif isinstance(node, ast.Dict):
-        parts = [*node.keys, *node.values]
-    elif isinstance(node, (ast.ListComp, ast.SetComp)):
-        parts = [node.elt]
-    elif isinstance(node, ast.DictComp):
-        parts = [node.key, node.value]
-    else:
-        return set()
-    return set().union(*(_values(part) for part in parts))
+    """The expressions making the objects ``node``'s value may be, or hold as a display does.
+
+    Walked iteratively, with an explicit worklist bounded by MAX_IFEXP_CHAIN nodes visited,
+    rather than recursed into: a deeply right-nested ternary chain -- `a if c else b if c else
+    ...`, exactly the shape a comprehension result may hold -- would otherwise recurse one Python
+    frame per `else` and exceed the recursion limit well under a chain of hundreds of levels.
+    """
+    made: set[ast.AST] = set()
+    stack: list[ast.expr | None] = [node]
+    visited = 0
+    while stack and visited < MAX_IFEXP_CHAIN:
+        visited += 1
+        current = stack.pop()
+        if isinstance(current, (ast.Call, ast.GeneratorExp)):
+            made.add(current)
+        elif isinstance(current, ast.IfExp):
+            stack.append(current.body)
+            stack.append(current.orelse)
+        elif isinstance(current, ast.BoolOp):
+            stack.extend(current.values)
+        elif isinstance(current, ast.NamedExpr):
+            stack.append(current.value)
+        elif isinstance(current, (ast.Tuple, ast.List, ast.Set)):
+            stack.extend(current.elts)
+        elif isinstance(current, ast.Dict):
+            stack.extend(current.keys)
+            stack.extend(current.values)
+        elif isinstance(current, (ast.ListComp, ast.SetComp)):
+            stack.append(current.elt)
+        elif isinstance(current, ast.DictComp):
+            stack.append(current.key)
+            stack.append(current.value)
+    return made
 
 
 def _escaping(node: ast.ListComp | ast.SetComp | ast.DictComp) -> set[ast.AST]:
-    """The expressions whose objects outlive comprehension ``node``: those its result holds,
-    a walrus binds (in the enclosing scope) or a method call is handed, which may store them.
-    Any other object made in it, such as one only tested or passed to a plain call, is a
-    temporary of the comprehension."""
+    """The expressions whose objects outlive comprehension ``node``: those its result holds, a
+    walrus binds (in the enclosing scope), or a call is handed, since an unknown callee (a method
+    call or a plain call of a name that is not statically known) may keep it reachable. The
+    narrow, explicit exceptions in ``NON_RETAINING_CALLS`` are calls known to only construct and
+    test their argument, never store or return it; passing an object to one of them, and nothing
+    else, leaves it a temporary of the comprehension."""
     kept = _values(node)
     for inner in _own_nodes([node]):
         if isinstance(inner, ast.NamedExpr):
             kept |= _values(inner.value)
-        elif isinstance(inner, ast.Call) and not isinstance(inner.func, ast.Name):
+        elif isinstance(inner, ast.Call) and not (
+            isinstance(inner.func, ast.Name) and inner.func.id in NON_RETAINING_CALLS
+        ):
             for argument in (*inner.args, *(keyword.value for keyword in inner.keywords)):
                 kept |= _values(argument)
     return kept
@@ -537,11 +688,20 @@ class _WalkReferences:
         self._seen: dict[str, Bindings] = {}  # in the current scope, every state each object saw
         # in a class body: the lexical names it runs from, and the lazy objects it makes
         self._enclosing: tuple[Bindings, list[str]] | None = None
+        # the locals of every function scope currently being resolved, innermost last: a call
+        # from within one of them to a function defined elsewhere never sees a name it shadows
+        self._shadow: list[frozenset[str]] = []
         # syntax summaries, computed once per node
         self._later: dict[Deferred, bool] = {}
         self._escapes: dict[ast.AST, set[ast.AST]] = {}
+        self._reads: dict[Function, frozenset[str]] = {}
         self._returns: dict[tuple[Function, frozenset[tuple[str, frozenset[str]]]], list[Returned]]
         self._returns = {}
+        # the targets a call of a function may leave a global or nonlocal name of its own
+        # holding, from its own code alone; a function already being summarized (a direct or
+        # mutual recursive helper) summarizes as having none, closing the recursion
+        self._effects: dict[tuple[Function, frozenset[tuple[str, frozenset[str]]]], Bindings] = {}
+        self._summarizing: set[Function] = set()
 
     def module(self, tree: ast.Module) -> list[str]:
         self._scope(tree.body, {"getattr": frozenset({BUILTIN_GETATTR})})
@@ -551,20 +711,29 @@ class _WalkReferences:
         seen, self._seen = self._seen, {}
         deferred: list[Deferred] = []
         self._block(body, bindings, deferred)
-        for function in deferred:
-            calls = self._calls.get(function, [])
-            # a lazy body runs only while one of its objects exists, so from what those objects
-            # saw on their own paths; one never made here is made later, from the final names
-            reached = calls if calls and self._runs_later(function) else [bindings, *calls]
-            entry = _lexical(_join(*reached))
-            if isinstance(function, ast.GeneratorExp):
-                self._comprehension(function, entry, deferred)
-                continue
-            local = {k: v for k, v in entry.items() if k not in _parameters(function)}
-            if isinstance(function, ast.Lambda):
-                self._expression(function.body, local, deferred)
-            else:
-                self._scope(function.body, local)
+        # a sibling defined earlier may be called from another sibling's body, discovered only
+        # once that sibling is itself resolved; a second round sees every such call recorded by
+        # the first (duplicate self.uses lines from the retry are deduplicated on return)
+        for _ in range(2):
+            for function in deferred:
+                calls = self._calls.get(function, [])
+                # a lazy body runs only while one of its objects exists, so from what those
+                # objects saw on their own paths; one never made here is made later, from the
+                # final names
+                reached = calls if calls and self._runs_later(function) else [bindings, *calls]
+                entry = _lexical(_join(*reached))
+                if isinstance(function, ast.GeneratorExp):
+                    self._comprehension(function, entry, deferred)
+                    continue
+                local = {k: v for k, v in entry.items() if k not in _parameters(function)}
+                if isinstance(function, ast.Lambda):
+                    self._expression(function.body, local, deferred)
+                else:
+                    self._shadow.append(_locals(function))
+                    try:
+                        self._scope(function.body, local)
+                    finally:
+                        self._shadow.pop()
         self._seen = seen
 
     def _block(
@@ -610,7 +779,7 @@ class _WalkReferences:
             bindings.pop(name, None)
             return
         bindings[name] = targets
-        for oid in bindings.get(ALIVE, ()):
+        for oid in bindings.get(ALIVE, frozenset()):
             if name not in self._lazy[oid][1]:
                 seen = self._seen[oid]
                 seen[name] = seen.get(name, frozenset()) | targets
@@ -632,7 +801,7 @@ class _WalkReferences:
             seen = self._seen[oid] = {}
             self._calls.setdefault(function, []).append(seen)
         _merge(seen, {k: v for k, v in _lexical(bindings).items() if k not in closure})
-        bindings[ALIVE] = bindings.get(ALIVE, frozenset()) | {oid}
+        bindings[ALIVE] = _alive_add(bindings.get(ALIVE), oid)
 
     def _made(self, oid: str, bindings: Bindings) -> None:
         if self._enclosing:
@@ -640,9 +809,28 @@ class _WalkReferences:
         else:
             self._start(oid, bindings)  # it may run at any later point of the scope
 
+    def _read_names(self, function: Function) -> frozenset[str]:
+        """The plain names ``function``'s own top-level code may read (a `Load`-context `Name`),
+        not descending into a nested function or lambda -- which resolves its own free names
+        separately when its own turn comes. A return-summary or effect cache key is projected
+        onto this, not onto every name tracked in scope so far, so an unrelated function defined
+        earlier or later in the same module can never inflate it."""
+        if function not in self._reads:
+            self._reads[function] = frozenset(
+                node.id for node in _own_nodes(_own_body(function))
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load))
+        return self._reads[function]
+
+    def _entry(self, function: Function, state: Bindings) -> Bindings:
+        """``state`` projected to the names ``function`` may actually read: its parameters are
+        its own, freshly bound at the call, and any name it never reads cannot affect what it
+        does, so neither belongs in what a cache keys its summary or effect on."""
+        reads = self._read_names(function)
+        return {k: v for k, v in state.items() if k in reads and k not in _parameters(function)}
+
     def _returned(self, function: Function, state: Bindings) -> list[Returned]:
         """The lazy objects a call of ``function`` from ``state`` may hand back."""
-        entry = {k: v for k, v in state.items() if k not in _parameters(function)}
+        entry = self._entry(function, state)
         key = (function, frozenset(entry.items()))
         if key not in self._returns:
             self._returns[key] = self._summarize(function, entry)
@@ -657,17 +845,60 @@ class _WalkReferences:
         flow._block(body, entry, [])
         made = dict.fromkeys(flow.objects[t] for _, objects in flow.returns for t in objects)
         # an object made from ``function``'s own code reads its names from the closure; one made
-        # from a function of the caller's scope reads that scope's names
+        # from a function of the caller's scope reads that scope's names. A name the object
+        # itself declares `global` is never read from that closure, no matter what ``function``
+        # binds it to: `global` skips every enclosing function scope, straight to the module's.
         closure = _locals(function)
-        return [(lazy, closure if lazy in own else frozenset()) for lazy in made]
+        return [
+            (lazy, (closure - _global(lazy)) if lazy in own else frozenset())
+            for lazy in made
+        ]
+
+    def _effect(self, function: Function, state: Bindings) -> Bindings:
+        """The targets a call of ``function`` from ``state`` may leave one of its own declared
+        global or nonlocal names holding, from every feasible exit of its own code alone (falling
+        through the end, or any `return`). A call ``function`` makes is never followed -- this
+        bounds the work to ``function``'s own body regardless of how deep a call graph it sits in
+        -- so a directly or mutually recursive helper summarizes its own in-flight call as having
+        no effect, closing the recursion; the real answer, from its own code, is still cached
+        once computed."""
+        entry = self._entry(function, state)
+        key = (function, frozenset(entry.items()))
+        if key in self._effects:
+            return self._effects[key]
+        if function in self._summarizing:
+            return {}
+        declared = _declared(function)
+        if not declared:
+            effect: Bindings = {}
+        else:
+            self._summarizing.add(function)
+            try:
+                flow = _ReturnFlow(self)
+                work = dict(entry)
+                falls = flow._block(_own_body(function), work, [])
+                exits = ([work] if falls else []) + [s for s, _ in flow.returns]
+                merged = _lexical(_join(*exits)) if exits else {}
+                effect = {name: targets for name, targets in merged.items() if name in declared}
+            finally:
+                self._summarizing.discard(function)
+        self._effects[key] = effect
+        return effect
 
     def _called(
         self, function: Deferred, site: ast.AST, bindings: Bindings, deferred: list[Deferred],
     ) -> None:
-        """Record a call of ``function`` at ``site``; only a call in the scope that defines it is
-        followed."""
+        """Record a call of ``function`` at ``site``: a call in the scope that defines it, or one
+        made from another function's body, is followed; one from a class body is not (its own
+        names never leak to what it calls, and neither does the reverse). A call from another
+        function only ever forwards the names that function does not shadow with locals of its
+        own, since a local of that name is never the one the callee's free reference resolves to.
+        """
         if function not in deferred:
-            return
+            if self._enclosing or not self._shadow:
+                return
+            shadow = self._shadow[-1]
+            bindings = {k: v for k, v in bindings.items() if k == ALIVE or k not in shadow}
         # a class body runs at once, but what it calls reads the lexical names
         state = self._enclosing[0] if self._enclosing else _lexical(bindings)
         made: list[Returned]
@@ -676,6 +907,9 @@ class _WalkReferences:
         else:
             self._calls.setdefault(function, []).append(dict(state))
             made = self._returned(function, state)  # the lazy objects the call hands back
+            if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for name, targets in self._effect(function, state).items():
+                    self._set(name, targets, bindings)
         for lazy, closure in made:
             oid = f"{id(lazy)}@{id(site)}"  # one object per function and expression making it
             self._lazy[oid] = (lazy, closure, site)
@@ -700,14 +934,15 @@ class _WalkReferences:
                 self._unbind(generator.target, local)
                 for condition in generator.ifs:
                     truthy, falsy = self._condition(condition, local, deferred)
-                    alive.update(*(s.get(ALIVE, ()) for s in (truthy, falsy) if s is not None))
+                    alive.update(*(
+                        s.get(ALIVE, frozenset()) for s in (truthy, falsy) if s is not None))
                     if truthy is None:
                         return alive  # the filter is never true: the rest never runs
                     local = truthy  # only an item the filter keeps reaches what follows
             parts = (node.key, node.value) if isinstance(node, ast.DictComp) else (node.elt,)
             for part in parts:
                 self._expression(part, local, deferred)
-            return alive | set(local.get(ALIVE, ()))
+            return alive | set(local.get(ALIVE, frozenset()))
         finally:
             self._enclosing = enclosing
 
@@ -746,12 +981,26 @@ class _WalkReferences:
             settled = _either(decided)
             return (going, settled) if conjunction else (settled, going)
         if isinstance(node, ast.IfExp):
-            tested = self._condition(node.test, bindings, deferred)
-            outcomes = [
-                self._condition(branch, state, deferred)
-                for branch, state in zip((node.body, node.orelse), tested, strict=True)
-                if state is not None
-            ]
+            # a ternary chain nests only through `orelse`, so it is flattened and walked
+            # iteratively (bounded by MAX_IFEXP_CHAIN AST nodes) rather than recursed into one
+            # level per `else`, which would exceed the recursion limit well under a chain a
+            # comprehension result can realistically hold (hundreds of levels)
+            branches: list[tuple[ast.expr, ast.expr]] = []
+            tail: ast.expr = node
+            while isinstance(tail, ast.IfExp) and len(branches) < MAX_IFEXP_CHAIN:
+                branches.append((tail.test, tail.body))
+                tail = tail.orelse
+            outcomes: list[tuple[Bindings | None, Bindings | None]] = []
+            state: Bindings | None = bindings
+            for test, body in branches:
+                if state is None:
+                    break  # every earlier test decided true: this level never runs
+                truthy, falsy = self._condition(test, state, deferred)
+                if truthy is not None:
+                    outcomes.append(self._condition(body, truthy, deferred))
+                state = falsy
+            if state is not None:
+                outcomes.append(self._condition(tail, state, deferred))
             return _either(t for t, _ in outcomes), _either(f for _, f in outcomes)
         self._expression(node, bindings, deferred)
         return bindings, dict(bindings)
@@ -776,7 +1025,8 @@ class _WalkReferences:
             self._called(node, node, bindings, deferred)
             return
         if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp)):
-            made = self._comprehension(node, bindings, deferred) - set(bindings.get(ALIVE, ()))
+            already = set(bindings.get(ALIVE, frozenset()))
+            made = self._comprehension(node, bindings, deferred) - already
             escaping = self._escapes.get(node)
             if escaping is None:
                 escaping = self._escapes[node] = _escaping(node)
@@ -1034,13 +1284,30 @@ class _ReturnFlow(_WalkReferences):
         self.objects[target] = function
         return frozenset({target})
 
+    def _callees(self, node: ast.expr, bindings: Bindings) -> list[Deferred]:
+        return [
+            self._defined[t] for t in super()._resolved(node, bindings) if t in self._defined]
+
+    def _truth(self, node: ast.expr, bindings: Bindings) -> bool | None:
+        """`_static_truth`, extended: a call whose every feasible callee only ever hands back a
+        lazy object (a generator or coroutine, which has no `__bool__` or `__len__`) is always
+        truthy, and so is a generator expression written in place."""
+        truth = _static_truth(node)
+        if truth is not None:
+            return truth
+        if isinstance(node, ast.GeneratorExp):
+            return True
+        if isinstance(node, ast.Call):
+            callees = self._callees(node.func, bindings)
+            if callees and all(self._runs_later(callee) for callee in callees):
+                return True
+        return None
+
     def _resolved(self, node: ast.expr | None, bindings: Bindings) -> frozenset[str]:
         if isinstance(node, ast.GeneratorExp):
             return self._object(node, node)
         if isinstance(node, ast.Call):
-            callees = [
-                self._defined[t] for t in super()._resolved(node.func, bindings)
-                if t in self._defined]
+            callees = self._callees(node.func, bindings)
             return frozenset().union(*(
                 self._object(callee, node) for callee in callees if self._runs_later(callee)))
         parts: list[ast.expr] = []
@@ -1052,9 +1319,14 @@ class _ReturnFlow(_WalkReferences):
                      if truth in (None, taken)]
         elif isinstance(node, ast.BoolOp):
             conjunction = isinstance(node.op, ast.And)
-            for value in node.values:  # any operand evaluated may be the result
-                parts.append(value)
-                if _static_truth(value) is (not conjunction):
+            last = len(node.values) - 1
+            for index, value in enumerate(node.values):
+                truth = self._truth(value, bindings)
+                # an operand that definitely keeps the chain going is never itself the result,
+                # unless nothing follows it to become the result instead
+                if truth != conjunction or index == last:
+                    parts.append(value)
+                if truth is (not conjunction):
                     break  # it decides the result: the rest never runs
         else:
             return super()._resolved(node, bindings)
@@ -1236,6 +1508,14 @@ def test_the_guard_does_not_flag_shadowed_or_rebound_names(source: str) -> None:
 
 IMPORT_W = "import algua.primitives.bounded_walk as w\n"
 NOTS = "not " * 1100  # deeper than the default recursion limit
+IFEXP_CHAIN_DEPTH = 520  # at least 500, still comfortably under the default recursion limit
+
+
+def _ternary_chain_comprehension(leaf: str, depth: int = IFEXP_CHAIN_DEPTH) -> str:
+    """A comprehension whose result is one right-nested `a if c else b if c else ...` chain,
+    ``depth`` levels deep: too deep to classify by recursing one Python frame per `else`."""
+    chain = " if c else ".join([leaf] * (depth + 1))
+    return f"[{chain} for r in roots]\n"
 REACHED_ON_SOME_PATH = {
     "if-without-else-may-keep-module": "if c:\n    w = make()\nw.bounded_walk(root)\n",
     "else-branch-keeps-module": "if c:\n    w = make()\nelse:\n    w.bounded_walk(root)\n",
@@ -1376,6 +1656,17 @@ REACHED_ON_SOME_PATH = {
     "generator-from-an-earlier-iteration-sees-a-later-alias": (
         "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
         "for item in items:\n    m = w\n    m = make()\n    made = gen()\n"),
+    "generator-invoked-from-another-function-sees-a-feasible-sibling-alias": (
+        "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
+        "def runner():\n    next(gen())\n"
+        "if c:\n    m = w\nelse:\n    pass\nrunner()\nm = make()\n"),
+    # 6hfQ9Rqc6X7wf35G: a followed helper's declared global writes reach the caller's state
+    "helper-declaring-global-writes-into-the-caller-state": (
+        "m = make()\ndef mutate():\n    global m\n    m = w\n"
+        "mutate()\nm.bounded_walk(root)\n"),
+    "self-recursive-global-writing-helper-still-reports-its-own-write": (
+        "m = make()\ndef mutate():\n    global m\n    m = w\n    mutate()\n"
+        "mutate()\nm.bounded_walk(root)\n"),
     "generator-made-in-a-comprehension-advanced-later": (
         "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
         "items = [gen() for _ in range(2)]\nm = w\nnext(items[0])\nm = make()\n"),
@@ -1400,6 +1691,9 @@ REACHED_ON_SOME_PATH = {
     "lambda-factory-returned-generator-advanced-after-a-later-rebind": (
         "m = make()\ndef gen():\n    yield m.bounded_walk(root)\nfactory = lambda: gen()\n"
         "items = factory()\nm = w\nnext(items)\nm = make()\n"),
+    "lambda-factory-returned-generator-expression-sees-a-later-caller-alias": (
+        "factory = lambda: (m.bounded_walk(r) for r in roots)\n"
+        "items = factory()\nm = w\nnext(items)\nm = make()\n"),
     # 6hfPmMQ6h2xXcJ8G: a nested class body runs from the lexical names, not the outer class's
     "nested-class-calls-a-module-helper-an-outer-class-shadows": (
         "m = make()\ndef helper(root):\n    return m.bounded_walk(root)\nm = w\n"
@@ -1421,6 +1715,10 @@ REACHED_ON_SOME_PATH = {
         "m = make()\ndef factory():\n    global m\n    m = make()\n    def gen():\n"
         "        yield m.bounded_walk(root)\n    return gen()\n"
         "items = factory()\nm = w\nnext(items)\nm = make()\n"),
+    "generator-declaring-global-bypasses-a-safe-factory-local": (
+        "m = make()\ndef factory():\n    m = make()\n    def gen():\n"
+        "        global m\n        yield m.bounded_walk(root)\n    return gen()\n"
+        "items = factory()\nm = w\nnext(items)\nm = make()\n"),
     "factory-closure-captures-a-raw-local": (
         "def factory():\n    v = w\n    def gen():\n        yield v.bounded_walk(root)\n"
         "    return gen()\nitems = factory()\nnext(items)\n"),
@@ -1440,6 +1738,10 @@ REACHED_ON_SOME_PATH = {
     "factory-returning-a-boolean-operation": (
         "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
         "def factory():\n    return c and gen()\n"
+        "items = factory()\nm = w\nnext(items)\nm = make()\n"),
+    "factory-returning-the-last-operand-after-a-decided-boolean": (
+        "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
+        "def factory():\n    return None or gen()\n"
         "items = factory()\nm = w\nnext(items)\nm = make()\n"),
     "factory-returning-either-same-name-definition": (
         "m = make()\ndef factory():\n    if c:\n        def gen():\n"
@@ -1469,6 +1771,9 @@ REACHED_ON_SOME_PATH = {
     "generator-stored-by-a-method-call-escapes": (
         "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
         "[store.add(gen()) for _ in xs]\nm = w\nm = make()\n"),
+    "generator-stashed-by-an-unknown-named-callee-escapes": (
+        "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
+        "[stash(gen()) for _ in xs]\nm = w\nm = make()\n"),
     "generator-in-a-nested-comprehension-result-escapes": (
         "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
         "items = [[gen() for _ in ys] for _ in xs]\nm = w\nm = make()\n"),
@@ -1516,6 +1821,9 @@ REACHED_ON_SOME_PATH = {
     "not-chain-around-a-walk-in-an-assignment": f"flag = {NOTS}w.bounded_walk(root)\n",
     "not-chain-around-a-walk-in-a-function": (
         f"def check(root):\n    return {NOTS}w.bounded_walk(root)\n"),
+    # 6hfQ9Rq8R3RWMr3G: a deep ternary chain in a comprehension result is classified iteratively
+    "deep-ternary-chain-in-a-comprehension-result-is-reached": (
+        _ternary_chain_comprehension("w.bounded_walk(r)")),
 }
 
 
@@ -1616,6 +1924,13 @@ NOT_REACHED_ON_ANY_PATH = {
     "call-from-another-function-sees-module-names": (
         "m = make()\ndef other(root):\n    m = w\n    walk(root)\n"
         "def walk(root):\n    return m.bounded_walk(root)\n"),
+    # 6hfQ9Rqc6X7wf35G: a helper's plain (non-`global`/`nonlocal`) write never reaches the caller
+    "helper-writing-a-plain-local-leaves-the-caller-state-safe": (
+        "m = make()\ndef helper():\n    m = w\n"
+        "helper()\nm.bounded_walk(root)\n"),
+    "helper-writing-a-shadowing-parameter-leaves-the-caller-state-safe": (
+        "m = make()\ndef helper(m):\n    m = w\n"
+        "helper(make())\nm.bounded_walk(root)\n"),
     "body-and-handler-both-rebind": (
         "try:\n    w = make()\nexcept Exception:\n    w = other()\nw.bounded_walk(root)\n"),
     "handler-does-not-see-else-alias": (
@@ -1801,12 +2116,19 @@ NOT_REACHED_ON_ANY_PATH = {
         "m = make()\ndef factory():\n    m = make()\n    def gen():\n"
         "        yield m.bounded_walk(root)\n    return gen()\n"
         "items = factory()\nm = w\nnext(items)\nm = make()\n"),
+    "generator-declaring-nonlocal-resolves-to-the-factory-local": (
+        "m = make()\ndef factory():\n    m = make()\n    def gen():\n"
+        "        nonlocal m\n        yield m.bounded_walk(root)\n    return gen()\n"
+        "items = factory()\nm = w\nnext(items)\nm = make()\n"),
     "factory-parameter-hides-a-later-caller-alias": (
         "m = make()\ndef factory(m):\n    def gen():\n        yield m.bounded_walk(root)\n"
         "    return gen()\nitems = factory(make())\nm = w\nnext(items)\nm = make()\n"),
     "factory-local-shadow-hides-a-caller-alias-from-a-generator-expression": (
         "m = make()\ndef factory():\n    m = make()\n"
         "    return (m.bounded_walk(r) for r in roots)\n"
+        "items = factory()\nm = w\nnext(items)\nm = make()\n"),
+    "lambda-walrus-hides-a-caller-alias-from-a-generator-expression": (
+        "factory = lambda: (m := make()) and (m.bounded_walk(r) for r in roots)\n"
         "items = factory()\nm = w\nnext(items)\nm = make()\n"),
     "factory-local-import-hides-a-later-caller-alias": (
         "m = make()\ndef factory():\n    from os import path as m\n    def gen():\n"
@@ -1852,6 +2174,10 @@ NOT_REACHED_ON_ANY_PATH = {
         "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
         "def factory():\n    return 0 and gen()\n"
         "items = factory()\nm = w\nm = make()\n"),
+    "factory-and-discards-an-always-truthy-generator": (
+        "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
+        "def factory():\n    return gen() and None\n"
+        "items = factory()\nm = w\nnext(items)\nm = make()\n"),
     "factory-returning-a-value-its-generator-yields": (
         "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
         "def factory():\n    made = gen()\n    return next(made)\n"
@@ -1869,6 +2195,9 @@ NOT_REACHED_ON_ANY_PATH = {
     "generator-consumed-in-a-dict-comprehension-stays-inside": (
         "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
         "flags = {x: bool(gen()) for x in xs}\nm = w\nm = make()\n"),
+    "generator-only-bool-tested-in-a-comprehension-stays-inside": (
+        "m = make()\ndef gen():\n    yield m.bounded_walk(root)\n"
+        "[bool(gen()) for _ in xs]\nm = w\nm = make()\n"),
     "generator-expression-consumed-in-a-comprehension-stays-inside": (
         "m = make()\nflags = [any(m.bounded_walk(r) for r in roots) for _ in xs]\n"
         "m = w\nm = make()\n"),
@@ -1887,6 +2216,9 @@ NOT_REACHED_ON_ANY_PATH = {
         f"while [{NOTS}0]:\n    w = make()\n    break\nw.bounded_walk(root)\n"),
     "even-not-chain-filter-ends-the-comprehension": (
         f"[r for r in roots if {NOTS}0 if w.bounded_walk(r)]\n"),
+    # 6hfQ9Rq8R3RWMr3G: a deep ternary chain in a comprehension result is classified iteratively
+    "deep-ternary-chain-in-a-comprehension-result-stays-clean": (
+        _ternary_chain_comprehension("safe.bounded_walk(r)")),
 }
 
 
@@ -1907,20 +2239,92 @@ def _live_generators(count: int) -> str:
 def test_lazy_observation_stays_near_linear_in_the_live_objects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # 6hfPvjhRQ6jVqfgp: the shared bindings each statement reads must not grow with the objects
-    # alive in it, so the total a scan touches is linear in the module, not quadratic
+    # 6hfQ949RRWWvrqvp: `len(bindings)` stays near-constant (a handful of names) no matter how
+    # many objects are alive, so it cannot see a quadratic alive-set regression: instrument the
+    # ACTUAL live-object work instead -- every `_Alive` node built (`_alive_add`, one per object
+    # made, and `_alive_union`, one per branch join) and every oid an actual iteration
+    # (`_Alive.__iter__`, e.g. a rebind's late-binding update) walks. A `frozenset | {oid}`
+    # rebuild on every object made -- the regression this replaces -- would show as O(n^2)
+    # node-creation work (each of n creations copying the n-1 already alive); the real,
+    # `_Alive`-based path is O(1) per creation, and the whole run stays linear in the number of
+    # objects made.
+    created = 0
+    real_add, real_union = _alive_add, _alive_union
+
+    def counting_add(alive: frozenset[str] | None, oid: str) -> _Alive:
+        nonlocal created
+        created += 1
+        return real_add(alive, oid)
+
+    def counting_union(a: frozenset[str] | None, b: frozenset[str] | None) -> frozenset[str] | None:
+        nonlocal created
+        created += 1
+        return real_union(a, b)
+
     touched = 0
-    statement = _WalkReferences._statement
+    real_iter = _Alive.__iter__
 
-    def counting(self: _WalkReferences, node: ast.stmt, bindings: Bindings, *rest: object) -> bool:
+    def counting_iter(self: _Alive) -> Iterator[str]:
         nonlocal touched
-        touched += len(bindings)
-        return statement(self, node, bindings, *rest)  # type: ignore[arg-type]
+        for oid in real_iter(self):
+            touched += 1
+            yield oid
 
-    monkeypatch.setattr(_WalkReferences, "_statement", counting)
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "_alive_add", counting_add)
+    monkeypatch.setattr(module, "_alive_union", counting_union)
+    monkeypatch.setattr(_Alive, "__iter__", counting_iter)
     totals = {}
-    for count in (100, 200, 400):
-        touched = 0
+    for count in (100, 200, 400, 800):
+        created = touched = 0
         assert _direct_walk_uses(_live_generators(count), "algua.registry.consumer")
+        totals[count] = created + touched
+    assert totals[200] <= 2.1 * totals[100], totals
+    assert totals[400] <= 2.1 * totals[200], totals
+    assert totals[800] <= 2.1 * totals[400], totals
+
+
+def _accumulating_factories(count: int) -> str:
+    """``count`` independent generator+factory pairs, each called once. Every pair adds two more
+    defined names the module tracks (its generator and its factory), so a later factory's
+    return-summary cache key would grow with how many unrelated names came before it -- not with
+    what that factory itself reads -- unless the key is projected onto the latter."""
+    pairs = "".join(
+        f"def gen{i}():\n    yield m.bounded_walk(root)\n"
+        f"def factory{i}():\n    return gen{i}()\n"
+        f"items{i} = factory{i}()\n"
+        for i in range(count)
+    )
+    calls = "".join(f"next(items{i})\n" for i in range(count))
+    return f"{IMPORT_W}m = make()\n{pairs}m = w\n{calls}m = make()\n"
+
+
+def test_return_summary_cache_keys_stay_near_linear_in_the_factories(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 6hfQ9RmmQ7HwXJ3p: a return-summary cache key built from every name tracked in scope so far
+    # (rather than projected onto what the summarized function can actually read) grows with every
+    # unrelated function definition accumulated before it; over `count` independent factories that
+    # shows as O(n^2) total key-construction work (the i-th factory's key carrying ~2i unrelated
+    # names). Instrument the deterministic SIZE of the entry `_summarize` is actually called with
+    # (the cache key's real size) rather than wall clock, which a slow CI runner could mask either
+    # way.
+    touched = 0
+    real_summarize = _WalkReferences._summarize
+
+    def counting_summarize(
+        self: _WalkReferences, function: Function, entry: Bindings,
+    ) -> list[Returned]:
+        nonlocal touched
+        touched += len(entry)
+        return real_summarize(self, function, entry)
+
+    monkeypatch.setattr(_WalkReferences, "_summarize", counting_summarize)
+    totals = {}
+    for count in (50, 100, 200, 400):
+        touched = 0
+        assert _direct_walk_uses(_accumulating_factories(count), "algua.registry.consumer")
         totals[count] = touched
-    assert totals[200] <= 2.1 * totals[100] and totals[400] <= 2.1 * totals[200], totals
+    assert totals[100] <= 2.1 * totals[50], totals
+    assert totals[200] <= 2.1 * totals[100], totals
+    assert totals[400] <= 2.1 * totals[200], totals
