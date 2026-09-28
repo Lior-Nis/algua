@@ -599,6 +599,28 @@ These identities are non-cyclic. An environment-only change does not change `bun
   unconditional loop, and an actual deferred-function call from the endless-loop fixture
   (Todoist 6hfPWRXGjPGr9qgp) [tests/primitives/test_scoped_walk.py:833]
 
+#### Review findings against `3b80ed9` (2026-09-28)
+
+- [ ] [Review][Patch] Classify every side-effect-free literal and unary-literal `while` condition,
+  not only `ast.Constant`, so unreachable bodies and impossible zero-iteration exits do not enter
+  the binding join (Todoist 6hfPWRXC8MMwMrcG) [tests/primitives/test_scoped_walk.py:275]
+- [ ] [Review][Patch] Preserve separate truthy and falsey states through `and`/`or` and conditional
+  expressions so match-guard success cannot inherit failure-only aliases and later cases receive
+  only feasible false-guard bindings (Todoist 6hfPfM2QXfxpvjvp)
+  [tests/primitives/test_scoped_walk.py:416]
+- [ ] [Review][Patch] Give lambdas the bounded same-scope call identity used for plain definitions,
+  so a call before a later enclosing rebind cannot hide a raw walk (Todoist 6hfPfM48RRh6Mc2G)
+  [tests/primitives/test_scoped_walk.py:396]
+- [ ] [Review][Patch] Record import-time calls from class bodies against their enclosing bindings
+  while keeping class-local names isolated (Todoist 6hfPfM3X26Qxj9FG)
+  [tests/primitives/test_scoped_walk.py:573]
+- [ ] [Review][Patch] Model generator advancement and coroutine awaiting at execution time, or use
+  a bounded conservative state model that cannot miss an alias becoming raw after object creation
+  (Todoist 6hfPfM2HWPqcrXCG) [tests/primitives/test_scoped_walk.py:439]
+- [ ] [Review][Patch] Make the callback/endless-loop fixture prove the mechanism named by the test,
+  rather than passing only because the loop fallback retains the same alias independently of the
+  opaque callback (Todoist 6hfPfJxg8X2mrGpp) [tests/primitives/test_scoped_walk.py:817]
+
 ## Development notes
 
 - Prefer focused modules: `registry/artifact_contract.py`, `registry/frozen_source.py`,
