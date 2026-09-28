@@ -487,6 +487,22 @@ These identities are non-cyclic. An environment-only change does not change `bun
   the normative contract explicitly accepts same-UID hostile replacement as the no-sandbox
   residual.
 
+#### Review round against `635e1f6` (2026-09-28)
+
+- [ ] [Review][Patch] Validate each locked wheel URL against one explicit canonical HTTPS identity
+  (lowercase scheme and hostname, no credentials or fragment, no whitespace or non-ASCII/control
+  characters, valid non-default port, canonical percent escapes and authority/path/query form) and
+  key duplicate-wheel ownership by that identity, because the `urlunsplit(urlsplit(url))` check
+  accepts uppercase-host, default-port, whitespace, malformed-escape and invalid-port aliases
+  [algua/registry/planner_environment.py:148]
+- [ ] [Review][Patch] Make bounded-walk cleanup exhaustive: retain the first (deepest) failure of
+  any kind, keep closing every remaining listing, preserve an active traversal error, and do not
+  drop an exhausted listing before a failed close has had a cleanup retry
+  [algua/primitives/bounded_walk.py:40]
+- [ ] [Review][Patch] Keep a consumer's typed validation error primary when closing the walk also
+  fails, through one shared scoped-walk seam that every production `bounded_walk` consumer uses,
+  while still closing every listing [algua/primitives/bounded_walk.py:50]
+
 ## Development notes
 
 - Prefer focused modules: `registry/artifact_contract.py`, `registry/frozen_source.py`,
