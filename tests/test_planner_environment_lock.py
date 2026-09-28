@@ -260,15 +260,47 @@ def test_repository_lock_has_canonical_identities() -> None:
     assert all(planner_environment_lock.wheel_url_identity(url) == url for url in locked)
 
 
+OVERSIZED_PORT_LOCK = _lock(wheels=_wheel(f"https://files.pythonhosted.org:{'9' * 5000}/x.whl"))
+
+
+@pytest.mark.parametrize(
+    "raw", ["9" * 5000, "1" + "0" * 4400, "0" * 5000, "65536", "0"],
+    ids=["5000-nines", "4401-digit", "5000-zeros", "just-over", "zero"])
+def test_port_digit_strings_of_any_length_stay_environment_incompatible(raw: str) -> None:
+    from algua.registry import planner_environment_lock
+
+    with pytest.raises(EnvironmentIncompatible):
+        planner_environment_lock._port(raw)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("0" * 5000 + "8443", 8443), ("0" * 5000 + "443", None), ("00065535", 65535), ("1", 1)],
+    ids=["padded-8443", "padded-default", "padded-max", "one"])
+def test_zero_padded_ports_of_any_length_resolve_to_their_number(
+    raw: str, expected: int | None,
+) -> None:
+    from algua.registry import planner_environment_lock
+
+    assert planner_environment_lock._port(raw) == expected
+
+
+def test_an_oversized_locked_port_is_environment_incompatible() -> None:
+    with pytest.raises(EnvironmentIncompatible):
+        planner_environment.locked_wheels(OVERSIZED_PORT_LOCK)
+
+
+@pytest.mark.parametrize(
+    "lock", [_lock(version=None), OVERSIZED_PORT_LOCK], ids=["missing-version", "oversized-port"])
 def test_provision_refuses_a_malformed_lock_before_running_uv(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock: bytes,
 ) -> None:
     """A key recorded for a malformed lock must not reach uv, nor escape as a raw KeyError."""
     inputs = (
         FrozenFile(".python-version", "100644",
                    f"{sys.version_info.major}.{sys.version_info.minor}\n".encode()),
         FrozenFile("pyproject.toml", "100644", b"[project]\nname='algua'\nversion='0'\n"),
-        FrozenFile("uv.lock", "100644", _lock(version=None)),
+        FrozenFile("uv.lock", "100644", lock),
     )
     key = EnvironmentKey(
         build_inputs_digest=BuildInputs(tuple(item.contract_entry for item in inputs)).digest,

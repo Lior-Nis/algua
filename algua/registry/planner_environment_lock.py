@@ -79,10 +79,18 @@ def _hostname(raw: str) -> str:
 
 
 def _port(raw: str | None) -> int | None:
-    """The explicit non-default port, or None; an empty port is the default."""
+    """The explicit non-default port, or None; an empty port is the default.
+
+    ``raw`` is any string of ASCII digits. Leading zeros are insignificant, and more significant
+    digits than the largest port has cannot be valid, so the integer conversion never sees an
+    arbitrarily long digit string (Python refuses one over 4,300 digits with `ValueError`).
+    """
     if not raw:
         return None
-    number = int(raw)
+    significant = raw.lstrip("0")
+    if len(significant) > len(str(_MAX_PORT)):
+        raise EnvironmentIncompatible("locked wheel URL port is invalid")
+    number = int(significant or "0")
     if not 1 <= number <= _MAX_PORT:
         raise EnvironmentIncompatible("locked wheel URL port is invalid")
     return None if number == _HTTPS_DEFAULT_PORT else number
