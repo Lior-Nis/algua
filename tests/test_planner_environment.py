@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import sys
-import venv
 from pathlib import Path
 
 import pytest
@@ -20,6 +19,7 @@ from algua.registry.planner_environment import (
     validate_lock,
     verify_environment,
 )
+from tests._venv_fixture import uv_like_venv
 from tests._walk_faults import fail_scandir_once
 
 WHEEL_HASH = "sha256:" + "a" * 64
@@ -116,15 +116,11 @@ def test_python_pin_must_match_running_minor() -> None:
 
 
 def test_environment_inventory_and_isolated_probe(tmp_path: Path) -> None:
-    env = tmp_path / "env"
-    venv.EnvBuilder(with_pip=False, symlinks=True).create(env)
-    lib64 = env / "lib64"
-    if lib64.is_symlink():
-        lib64.unlink()
+    env = uv_like_venv(tmp_path / "env")
     site = env / "lib/python3.12/site-packages"
     package = site / "numpy"
     dist = site / "numpy-2.3.3.dist-info"
-    package.mkdir(parents=True)
+    package.mkdir()
     dist.mkdir()
     (package / "__init__.py").write_text("__version__ = '2.3.3'\n")
     (dist / "METADATA").write_text("Name: numpy\nVersion: 2.3.3\n")
@@ -165,7 +161,8 @@ def test_provision_uses_exact_uv_commands_and_private_inputs(tmp_path: Path) -> 
     def runner(argv, *, cwd, env, check, capture_output, text, timeout):
         calls.append((argv, cwd, env, timeout))
         if argv[1] == "venv":
-            venv.EnvBuilder(with_pip=False, symlinks=True).create(environment)
+            uv_like_venv(environment)
+            (environment / "lib64").symlink_to("lib")  # created by `uv venv`, then removed
         return type("Completed", (), {"returncode": 0, "stderr": ""})()
 
     key = build_environment_key(_inputs(), "a" * 64, uv_version="uv 0.9.26")
@@ -274,10 +271,7 @@ def test_environment_inventory_propagates_traversal_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     env = tmp_path / "env"
-    venv.EnvBuilder(with_pip=False, symlinks=True).create(env)
-    lib64 = env / "lib64"
-    if lib64.is_symlink():
-        lib64.unlink()
+    uv_like_venv(env)
     hidden = env / "lib/python3.12/site-packages/hidden"
     hidden.mkdir()
     (hidden / "__init__.py").write_text("SMUGGLED = True\n")

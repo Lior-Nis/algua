@@ -4,7 +4,6 @@ import concurrent.futures
 import os
 import shutil
 import sys
-import venv
 from pathlib import Path
 
 import pytest
@@ -16,21 +15,12 @@ from algua.registry.environment_store import (
     verify_published_environment,
 )
 from algua.registry.planner_environment import current_interpreter_identity, inventory_environment
+from tests._venv_fixture import uv_like_venv
 from tests._walk_faults import fail_scandir_once
 
 
 def _stage(root: Path, name: str = "build-environment") -> Path:
-    stage = root / name
-    venv.EnvBuilder(with_pip=False, symlinks=True).create(stage)
-    lib64 = stage / "lib64"
-    if lib64.is_symlink():
-        lib64.unlink()
-    # Mirror a uv-built environment: no empty `include/`, a populated site-packages.
-    include = stage / "include"
-    if include.is_dir() and not any(include.iterdir()):
-        include.rmdir()
-    (stage / "lib/python3.12/site-packages/_fixture.py").write_text("VALUE = 1\n")
-    return stage
+    return uv_like_venv(root / name)
 
 
 def _descriptor(stage: Path) -> EnvironmentDescriptor:
@@ -274,7 +264,7 @@ def test_published_seal_check_propagates_traversal_errors(
     stage = _stage(tmp_path)
     descriptor = _descriptor(stage)
     published = publish_environment(tmp_path / "store", stage, descriptor)
-    writable = published / "lib/python3.12/site-packages/_fixture.py"
+    writable = published / "lib/python3.12/site-packages/_virtualenv.py"
     writable.chmod(0o644)
     with pytest.raises(EnvironmentStoreError):  # detected when the walk is not faulted
         verify_published_environment(tmp_path / "store", descriptor)
