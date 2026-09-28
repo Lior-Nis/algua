@@ -6,9 +6,11 @@ trusts timestamp-validated cached bytecode (a same-size, same-mtime edit keeps a
 valid), and a failure part-way leaves a mixed-version closure. The refresh therefore re-imports
 the root as FRESH module objects after purging the package's bytecode, and restores the previous
 module state if anything fails. A cyclic static import component has no dependency-safe
-execution order, and a symlink anywhere in the package tree (which a dynamic import can reach
-even outside the static closure) escapes the package-wide bytecode purge, so both fail closed
-before anything is purged or executed.
+execution order, and a symlink or importable non-source module anywhere in the package tree (which
+a dynamic import can reach even outside the static closure) escapes the package-wide bytecode
+purge, so all fail closed before anything is purged or executed (``module_source_scan``). During
+the fresh import a first ``sys.meta_path`` guard resolves family modules from the exact scanned
+root only, so a fresh ``__init__`` cannot extend ``__path__`` into an unscanned tree.
 
 Concurrency: the complete transaction runs under a private module lock shared ONLY by the
 supported Algua callers (``refresh_package_closure`` and ``serialized_import``, which the strategy
@@ -23,6 +25,7 @@ family or deadlock.
 from __future__ import annotations
 
 import importlib
+import importlib.machinery
 import importlib.util
 import os
 import sys
@@ -82,7 +85,7 @@ def _refresh_locked(package: str, root: str) -> ModuleType:
     guard = _ImportGuard()
     sys.meta_path.insert(0, guard)
     try:
-        return _refresh_attempt(package, root)
+        return _refresh_attempt(package, root, guard)
     except BaseException:
         _restore_modules(before, namespaces, guard.bindings)
         raise
@@ -95,10 +98,16 @@ class _ImportGuard:
     """A first ``sys.meta_path`` finder held for the whole transaction. Before the import system
     loads (and then binds) any module, it records that module's direct parent binding as first
     seen, read from the parent's own dictionary; rollback restores it even if attempted code later
-    removed the child's own ``sys.modules`` entry."""
+    removed the child's own ``sys.modules`` entry.
+
+    Once the family is prevalidated, the guard also RESOLVES every family module itself, from the
+    exact scanned root only: a child is refused before it executes when its parent's search path
+    (which a fresh ``__init__`` or member could extend) is not exactly that root, and a family
+    module that is missing from the root or is not Python source is never found elsewhere."""
 
     def __init__(self) -> None:
         self.bindings: dict[str, tuple[ModuleType, object]] = {}
+        self.family: tuple[str, str] | None = None  # (package, prevalidated location)
 
     def find_spec(
             self, fullname: str, path: object = None, target: object = None) -> ModuleSpec | None:
@@ -106,23 +115,60 @@ class _ImportGuard:
         holder = sys.modules.get(parent_name) if parent_name else None
         if fullname not in self.bindings and isinstance(holder, ModuleType):
             self.bindings[fullname] = (holder, holder.__dict__.get(child, _ABSENT))
-        return None
+        if self.family is None or not within(fullname, self.family[0]):
+            return None
+        package, location = self.family
+        if fullname == package:
+            search = [os.path.dirname(location)]
+        else:
+            search = _exact_search_path(package, location, parent_name)
+            if path != search:
+                raise ModuleRefreshError(
+                    f"{parent_name!r} search path deviates from its prevalidated family root",
+                    name=fullname)
+        spec = importlib.machinery.PathFinder.find_spec(fullname, search)
+        if spec is None:
+            raise ModuleNotFoundError(f"No module named {fullname!r}", name=fullname)
+        if not isinstance(spec.loader, importlib.machinery.SourceFileLoader):
+            raise ModuleRefreshError(f"{fullname!r} is not a Python source module", name=fullname)
+        return spec
 
 
-def _refresh_attempt(package: str, root: str) -> ModuleType:
+def _exact_search_path(package: str, location: str, name: str) -> list[str]:
+    """The only search path a family package ``name`` may have: its directory under the root."""
+    return [os.path.join(location, *name.split(".")[package.count(".") + 1:])]
+
+
+def _require_confined_search_paths(package: str, location: str) -> None:
+    """Before commit, every fresh family module that is a package must still search exactly its
+    prevalidated directory, so a later lazy import cannot use a path extended during the refresh."""
+    for name, module in list(sys.modules.items()):
+        search = getattr(module, "__dict__", {}).get("__path__", _ABSENT)
+        if within(name, package) and search is not _ABSENT and (
+                search != _exact_search_path(package, location, name)):
+            raise ModuleRefreshError(
+                f"{name!r} search path deviates from its prevalidated family root", name=name)
+
+
+def _refresh_attempt(package: str, root: str, guard: _ImportGuard) -> ModuleType:
     importlib.invalidate_caches()
     package_spec = importlib.util.find_spec(package)
     if package_spec is None or package_spec.submodule_search_locations is None:
         raise ModuleRefreshError(f"{package!r} is not a package", name=package)
     locations = list(package_spec.submodule_search_locations)
-    for location in locations:
-        require_unlinked(location, package)
-        require_source_tree(location, package)
+    if len(locations) != 1:
+        raise ModuleRefreshError(f"{package!r} is not a regular package", name=package)
+    location = locations[0]
+    require_unlinked(location, package)
+    require_source_tree(location, package)
     require_acyclic(static_closure(package, root))
-    _purge_package_bytecode(locations)
+    _purge_package_bytecode(location)
     for name in [name for name in sys.modules if within(name, package)]:
         del sys.modules[name]
-    return importlib.import_module(root)
+    guard.family = (package, location)
+    fresh = importlib.import_module(root)
+    _require_confined_search_paths(package, location)
+    return fresh
 
 
 def _namespaces(modules: dict[str, ModuleType]) -> dict[str, dict[str, object]]:
@@ -165,14 +211,13 @@ def _rebind(holder: ModuleType, child: str, previous: object) -> None:
         holder.__dict__[child] = previous
 
 
-def _purge_package_bytecode(locations: list[str]) -> None:
+def _purge_package_bytecode(location: str) -> None:
     """Unlink the cached bytecode of EVERY source file under the package, so no module the refresh
     imports (including one no process has loaded yet) can execute a stale timestamp-valid cache."""
     if sys.implementation.cache_tag is None:
         return
-    for location in locations:
-        for directory, _subdirs, files in os.walk(location):
-            for file in files:
-                if file.endswith(".py"):
-                    source = os.path.join(directory, file)
-                    Path(importlib.util.cache_from_source(source)).unlink(missing_ok=True)
+    for directory, _subdirs, files in os.walk(location):
+        for file in files:
+            if file.endswith(".py"):
+                source = os.path.join(directory, file)
+                Path(importlib.util.cache_from_source(source)).unlink(missing_ok=True)

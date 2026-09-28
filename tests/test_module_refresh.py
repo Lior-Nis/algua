@@ -720,3 +720,88 @@ def test_generated_bytecode_caches_and_data_files_do_not_block_a_refresh(family)
     _refresh(family)
 
     assert family.mod("strat").VALUE == 2
+
+
+@pytest.mark.parametrize(
+    "case", ["package-appends", "package-prepends-shadow", "subpackage-appends",
+             "module-becomes-package", "lazy-import-after-refresh"])
+def test_fresh_search_paths_cannot_reach_beyond_the_prevalidated_family_roots(
+        family, tmp_path, case) -> None:
+    """A fresh package ``__init__`` (or any member) that extends ``__path__`` would let a child
+    import load unscanned code, so children resolve only from the exact prevalidated roots and a
+    refresh whose fresh search paths deviate from them fails closed, before any outside code runs
+    and before a later lazy import could use the extended path."""
+    outside, marker = tmp_path / "outside", tmp_path / "executed"
+    outside.mkdir()
+    for name in ("helper", "outside_helper"):
+        (outside / f"{name}.py").write_text(f"open({str(marker)!r}, 'w').close()\nVALUE = 'out'\n")
+    family.write("helper", "VALUE = 'in'\n")
+    family.write("strat", "VALUE = 1\n")
+    importlib.import_module(f"{family.package}.strat")
+    before = family.entries()
+    extend = f"__path__.append({str(outside)!r})\n"
+    if case == "package-appends":
+        (family.dir / "__init__.py").write_text(extend)
+        family.write("strat", "from . import outside_helper\n")
+    elif case == "package-prepends-shadow":
+        (family.dir / "__init__.py").write_text(
+            f"import importlib\n__path__.insert(0, {str(outside)!r})\n"
+            "importlib.import_module(__name__ + '.helper')\n")
+    elif case == "subpackage-appends":
+        (family.dir / "sub").mkdir()
+        (family.dir / "sub" / "__init__.py").write_text(extend)
+        family.write("strat", "from .sub import outside_helper\n")
+    elif case == "module-becomes-package":
+        family.write("helper", f"__path__ = [{str(outside)!r}]\n")
+        family.write("strat", "from .helper import outside_helper\n")
+    else:
+        (family.dir / "sub").mkdir()
+        (family.dir / "sub" / "__init__.py").write_text(extend)
+        family.write("strat", (
+            "from . import sub\ndef later():\n    from .sub import outside_helper\n"))
+
+    with pytest.raises(ModuleRefreshError, match="search path"):
+        _refresh(family)
+
+    assert not marker.exists(), "code outside the prevalidated family roots executed"
+    after = family.entries()
+    assert set(after) == set(before) and all(after[k] is v for k, v in before.items())
+
+
+@pytest.mark.parametrize("case", ["later-finder", "namespace-directory"])
+def test_family_modules_resolve_only_as_source_from_the_prevalidated_root(
+        family, tmp_path, monkeypatch, case) -> None:
+    """During the transaction no other finder may supply a family module the scanned root lacks,
+    and a dynamically imported family entry must be Python source (namespace directories stay
+    outside the source-only scope, as for the static closure)."""
+    marker = tmp_path / "executed"
+    ghost = tmp_path / "ghost.py"
+    ghost.write_text(f"open({str(marker)!r}, 'w').close()\n")
+    family.write("strat", "VALUE = 1\n")
+    importlib.import_module(f"{family.package}.strat")
+    before = family.entries()
+    if case == "later-finder":
+        class Elsewhere:
+            @staticmethod
+            def find_spec(fullname: str, path: object = None, target: object = None):
+                if fullname != f"{family.package}.ghost":
+                    return None
+                return importlib.util.spec_from_file_location(fullname, ghost)
+
+        monkeypatch.setattr(sys, "meta_path", [*sys.meta_path, Elsewhere()])
+        family.write("strat", "from . import ghost\n")
+        expected, match = ImportError, "ghost"
+    else:
+        (family.dir / "nsdir").mkdir()
+        (family.dir / "nsdir" / "mod.py").write_text("VALUE = 1\n")
+        family.write("strat", (
+            "import importlib\n"
+            "VALUE = importlib.import_module(__package__ + '.nsdir.mod').VALUE\n"))
+        expected, match = ModuleRefreshError, "not a Python source"
+
+    with pytest.raises(expected, match=match):
+        _refresh(family)
+
+    assert not marker.exists()
+    after = family.entries()
+    assert set(after) == set(before) and all(after[k] is v for k, v in before.items())
