@@ -396,6 +396,48 @@ def test_verify_rejects_a_writable_bundle_directory(tmp_path: Path) -> None:
         verify_bundle(tmp_path, _descriptor())
 
 
+def test_a_file_growing_after_its_size_check_is_refused_while_streaming(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = publish_bundle(tmp_path, _files(), _descriptor())
+    grower = root / "algua/__init__.py"
+    limit = max(item.stat().st_size for item in (root / "algua").iterdir())
+    monkeypatch.setattr(artifact_store, "MAX_FILE_BYTES", limit)
+    real_open = Path.open
+    requested: list[int] = []
+
+    class Recording:
+        def __init__(self, handle) -> None:
+            self._handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc) -> None:
+            self._handle.close()
+
+        def read(self, size: int = -1) -> bytes:
+            requested.append(size)
+            return self._handle.read(size)
+
+    def growing_open(self: Path, *args, **kwargs):
+        if self == grower:  # grows between the lstat size check and the streamed read
+            grower.chmod(0o644)
+            with real_open(grower, "ab") as handle:
+                handle.write(b"x" * (3 * 1024 * 1024))
+            grower.chmod(0o444)
+            return Recording(real_open(self, *args, **kwargs))
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", growing_open)
+
+    with pytest.raises(ArtifactStoreError) as caught:
+        verify_bundle(tmp_path, _descriptor())
+
+    assert "per-file" in str(caught.value.__cause__)
+    assert requested and sum(requested) <= limit + 1
+
+
 def _foreign_stage(parent: Path) -> Path:
     """Another builder's in-progress stage; this attempt must never remove it."""
     parent.mkdir(parents=True, exist_ok=True)

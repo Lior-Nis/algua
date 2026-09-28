@@ -116,8 +116,11 @@ def _inventory(root: Path) -> tuple[ArtifactFile, ...]:
                 digest = hashlib.sha256()
                 size = 0
                 with entry.path.open("rb") as handle:
-                    while chunk := handle.read(1024 * 1024):
+                    # Never request more than one byte past the bound, even if the file grew.
+                    while chunk := handle.read(min(1024 * 1024, MAX_FILE_BYTES - size + 1)):
                         size += len(chunk)
+                        if size > MAX_FILE_BYTES:
+                            raise ArtifactStoreError("bundle file exceeds the per-file bound")
                         digest.update(chunk)
                 total += size
                 if total > MAX_BUNDLE_BYTES:
