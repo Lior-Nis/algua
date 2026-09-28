@@ -155,12 +155,15 @@ class _ImportGuard:
     module that is missing from the root or is not Python source is never found elsewhere. Each
     family name is handed out at most once per transaction: a second resolution (after executed
     code dropped the first module's entry) would let a stale first object survive beside the
-    certified replacement, so it fails closed."""
+    certified replacement, so it fails closed. The attempt is latched BEFORE the refusal is
+    raised and the latch is never cleared, so executed code that catches the refusal and restores
+    the first object's entry and parent binding still cannot commit the transaction."""
 
     def __init__(self) -> None:
         self.bindings: dict[str, tuple[ModuleType, object]] = {}
         self.family: tuple[str, str] | None = None  # (package, prevalidated location)
         self.specs: dict[str, SourceSpecFacts] = {}  # every family spec handed out, with its facts
+        self.duplicate: str | None = None  # the first name resolved twice; latched, never cleared
 
     def find_spec(
             self, fullname: str, path: object = None, target: object = None) -> ModuleSpec | None:
@@ -171,6 +174,7 @@ class _ImportGuard:
         if self.family is None or not within(fullname, self.family[0]):
             return None
         if fullname in self.specs:
+            self.duplicate = self.duplicate or fullname
             raise ModuleRefreshError(
                 f"{fullname!r} is resolved a second time in one refresh transaction", name=fullname)
         package, location = self.family
@@ -204,6 +208,10 @@ def _refresh_attempt(package: str, root: str, guard: _ImportGuard) -> ModuleType
         del sys.modules[name]
     guard.family = (package, location)
     fresh = importlib.import_module(root)
+    if guard.duplicate is not None:
+        raise ModuleRefreshError(
+            f"{guard.duplicate!r} was resolved a second time in this refresh transaction",
+            name=guard.duplicate)
     require_committed_family(package, guard.specs)
     return fresh
 

@@ -1765,6 +1765,18 @@ _SECOND_RESOLUTIONS = {
     "reimported-subpackage-member": (
         "import importlib, sys\nfrom .sub import inner\n"
         "del sys.modules[inner.__name__]\nimportlib.import_module(inner.__name__)\nVALUE = 1\n"),
+    "refusal-swallowed-and-first-object-restored": (
+        "import importlib, sys\nfrom algua.primitives.module_refresh import ModuleRefreshError\n"
+        "from . import helper\nfirst = helper\ndel sys.modules[helper.__name__]\n"
+        "try:\n    importlib.import_module(helper.__name__)\nexcept ModuleRefreshError:\n    pass\n"
+        "sys.modules[first.__name__] = first\n"
+        "setattr(sys.modules[__package__], 'helper', first)\nVALUE = 1\n"),
+    "subpackage-refusal-swallowed-and-first-object-restored": (
+        "import importlib, sys\nfrom algua.primitives.module_refresh import ModuleRefreshError\n"
+        "from .sub import inner\nfirst = inner\ndel sys.modules[inner.__name__]\n"
+        "try:\n    importlib.import_module(inner.__name__)\nexcept ModuleRefreshError:\n    pass\n"
+        "sys.modules[first.__name__] = first\n"
+        "setattr(sys.modules[__package__ + '.sub'], 'inner', first)\nVALUE = 1\n"),
 }
 
 
@@ -1773,8 +1785,9 @@ def test_a_second_resolution_of_the_same_family_name_never_commits(family, case)
     """Refreshed code that imports a family module, drops its ``sys.modules`` entry and imports
     it again would keep the stale first object while the replacement is the one certified in
     ``sys.modules`` and on its parent. The guard refuses to hand out a second spec for a name it
-    already resolved in the transaction, so the complete transaction rolls back; code that
-    swallows the refusal still cannot commit a handed-out module with no bound entry."""
+    already resolved in the transaction, so the complete transaction rolls back. The attempt is
+    latched for the whole transaction: code that swallows the refusal, even one that then restores
+    the first object's ``sys.modules`` entry and direct parent binding, still cannot commit."""
     (family.dir / "sub").mkdir()
     (family.dir / "sub" / "__init__.py").write_text("")
     (family.dir / "sub" / "inner.py").write_text("VALUE = 1\n")
@@ -1799,6 +1812,23 @@ def test_distinct_names_and_repeated_misses_resolve_normally_in_every_transactio
         fresh = refresh_package_closure(family.package, f"{family.package}.strat")
         assert fresh.VALUE == 3 and family.mod("strat") is fresh
         assert fresh.helper is family.mod("helper") and fresh.inner is family.mod("sub.inner")
+
+
+def test_a_latched_duplicate_resolution_does_not_outlive_its_transaction(family) -> None:
+    """The duplicate-resolution latch belongs to one transaction: after a refresh whose code
+    swallowed the refusal and restored the first object is rolled back, a later refresh of the
+    same names from clean source commits normally."""
+    family.write("helper", "VALUE = 1\n")
+    family.write("strat", _SECOND_RESOLUTIONS["refusal-swallowed-and-first-object-restored"])
+    with pytest.raises(ModuleRefreshError, match="second time"):
+        _refresh(family)
+    assert not family.entries()
+
+    family.write("strat", "from . import helper\nVALUE = helper.VALUE + 1\n")
+    fresh = refresh_package_closure(family.package, f"{family.package}.strat")
+    assert fresh.VALUE == 2 and family.mod("strat") is fresh
+    assert fresh.helper is family.mod("helper")
+    assert vars(sys.modules[family.package])["helper"] is family.mod("helper")
 
 
 _SPEC_BOOKKEEPING_FORGERIES = {
