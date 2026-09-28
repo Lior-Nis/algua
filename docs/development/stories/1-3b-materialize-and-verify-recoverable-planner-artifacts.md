@@ -454,35 +454,35 @@ These identities are non-cyclic. An environment-only change does not change `bun
 
 #### Review round against `7877b8a` (2026-09-28)
 
-- [ ] [Review][Patch] Enforce `MAX_FILE_BYTES` while streaming each bundle file's digest, so a
+- [x] [Review][Patch] Enforce `MAX_FILE_BYTES` while streaming each bundle file's digest, so a
   file that grows after its `lstat` size check fails closed instead of being read without bound
   [algua/registry/artifact_store.py:112]
-- [ ] [Review][Patch] Reject locked wheel URLs containing control or other non-printable
+- [x] [Review][Patch] Reject locked wheel URLs containing control or other non-printable
   characters and require an exact canonical URL round-trip before insertion and duplicate
   detection [algua/registry/planner_environment.py:145]
-- [ ] [Review][Patch] Canonicalize every environment entry, directories included, before retaining
+- [x] [Review][Patch] Canonicalize every environment entry, directories included, before retaining
   or using it, so a malformed directory path fails before its subtree is read
   [algua/registry/planner_environment_inventory.py:171]
-- [ ] [Review][Patch] Close every stacked `scandir` iterator even when one close raises, preserving
+- [x] [Review][Patch] Close every stacked `scandir` iterator even when one close raises, preserving
   the correct active or cleanup exception [algua/primitives/bounded_walk.py:66]
-- [ ] [Review][Patch] Translate dangling or unreadable required interpreter-link failures to
+- [x] [Review][Patch] Translate dangling or unreadable required interpreter-link failures to
   `EnvironmentIncompatible` instead of leaking raw `OSError`/`RuntimeError`
   [algua/registry/planner_environment_inventory.py:177]
-- [ ] [Review][Patch] Enforce `MAX_PYVENV_CFG_BYTES` before hashing `pyvenv.cfg` and avoid a
+- [x] [Review][Patch] Enforce `MAX_PYVENV_CFG_BYTES` before hashing `pyvenv.cfg` and avoid a
   needless second bounded read of the same bytes
   [algua/registry/planner_environment_inventory.py:190]
-- [ ] [Review][Patch] Synchronize the protected Story 1.3b companion with `MAX_BUNDLE_DIRECTORIES`
+- [x] [Review][Patch] Synchronize the protected Story 1.3b companion with `MAX_BUNDLE_DIRECTORIES`
   (10,000), `MAX_ENVIRONMENT_DIRECTORIES` (25,000), `MAX_PYVENV_CFG_BYTES` (64 KiB) and the
   uv 0.9.26 startup-file policy, including version and retention behavior for recorded
   environments; documentation alignment only, no authority or scope change
   [docs/development/specs/spec-story-1-3b-artifact-environment-contract/artifact-environment-contract.md]
-- [ ] [Review][Patch] Repair the stale checked `strict_walk.py` pointer to `bounded_walk.py` and its
+- [x] [Review][Patch] Repair the stale checked `strict_walk.py` pointer to `bounded_walk.py` and its
   consumer locations
   [docs/development/stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md:436]
 - [x] [Review][Defer] The normative `uv sync` argv's `--no-env-file` flag is rejected by uv 0.9.26.
   Pre-existing, already tracked by the open finding above and intentionally outside this round:
   `SYNC_FLAGS`, the golden vectors and the normative sync argv are unchanged. Recorded in
-  `deferred-work.md` [algua/registry/planner_environment.py:47]
+  `docs/development/stories/deferred-work.md` [algua/registry/planner_environment.py:47]
 - Dismissed (not implemented): fd/`openat` hardening against hostile same-UID path replacement;
   the normative contract explicitly accepts same-UID hostile replacement as the no-sandbox
   residual.
@@ -845,6 +845,24 @@ uv run lint-imports
   ever sees a lock already revalidated at the key recheck); four initial traversal survivors
   were closed with new cases. The full 4,863-test root gate (`-p no:randomly`), ruff, mypy, all
   28 import contracts and `git diff --check` pass.
+- Review round against `7877b8a` (8 approved patches, 1 defer): every code patch first failed
+  red. Bundle digest: a file grown after its `lstat` check was streamed in full (3 MiB) and
+  failed only on the descriptor comparison. Wheel URLs: 13 cases were accepted, including tab,
+  newline, DEL, zero-width and line-separator characters, scheme-case, empty query/fragment and
+  leading-space aliases, and two aliases that evaded duplicate detection; all 1,785 repository
+  wheel URLs are printable and round-trip exactly. Directories: all five malformed directory
+  shapes had their subtree listed before refusal. Walk cleanup: an abandoned walk left a stacked
+  listing open when another close failed, and a failing close replaced both an active traversal
+  limit and an active listing error. Interpreter links: dangling, looping and unreadable
+  `python`/`python3`/`python3.12` links leaked raw `FileNotFoundError`, `RuntimeError` and
+  `PermissionError` with host paths (9 cases). Small files: oversized `pyvenv.cfg` and `METADATA`
+  were hashed through the 512 MiB path before refusal and accepted ones were opened twice; the
+  single bounded read covers both, and the interpreter probe was carved unchanged into
+  `planner_environment_probe.py` to keep the inventory module under the 300-line ratchet. Every
+  bound and both startup digests written into the companion were checked against the code. 20
+  mutations were run and all are killed; one initial survivor (which close failure is reported
+  when two fail) was closed with a new case. The full 4,900-test root gate (`-p no:randomly`),
+  ruff, mypy, all 28 import contracts and `git diff --check` pass.
 
 ### Completion Notes
 
@@ -1063,6 +1081,17 @@ uv run lint-imports
   residual recorded for the previous round. The offline-evidence finding now points at the real
   end-to-end test. The keyed argv, identity schemas, golden digests and every live, authority,
   deployment and capital wall are unchanged; the `--no-env-file` finding remains open.
+- Review round against `7877b8a` complete: bundle digests are bounded while streaming; locked
+  wheel URLs are printable and canonical before keying; every environment entry is canonical
+  before it is retained or descended into; the walk closes every listing and keeps the correct
+  error; broken interpreter links are `EnvironmentIncompatible`; `pyvenv.cfg` and `METADATA` are
+  bounded before any read and read once; the normative companion now states the directory,
+  `pyvenv.cfg` and other environment bounds and the uv 0.9.26 startup-file policy with its
+  version and additive-retention rules; and the checked traversal finding points at
+  `bounded_walk.py` and its consumers. The `--no-env-file` defect is deferred (recorded in
+  `docs/development/stories/deferred-work.md`); same-UID `openat` hardening was dismissed as the
+  accepted no-sandbox residual. The keyed argv, identity schemas, golden digests and every live,
+  authority, deployment and capital wall are unchanged.
 
 ### File List
 
@@ -1095,10 +1124,13 @@ uv run lint-imports
 - `algua/primitives/bounded_subprocess.py`
 - `algua/registry/planner_environment_outage.py`
 - `algua/registry/planner_environment_startup.py`
+- `algua/registry/planner_environment_probe.py`
 - `CODEOWNERS`
 - `docs/development/sprint-status.yaml`
 - `docs/contracts/cli-error-envelope.md`
 - `docs/development/stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md`
+- `docs/development/stories/deferred-work.md`
+- `docs/development/specs/spec-story-1-3b-artifact-environment-contract/artifact-environment-contract.md`
 - `tests/test_frozen_artifact_contract.py`
 - `tests/test_frozen_artifact_ledger.py`
 - `tests/test_cli_deployment.py`
@@ -1206,3 +1238,9 @@ uv run lint-imports
   streaming bounded traversal replacing `strict_walk`, a protected pinned site-startup policy,
   corrected offline-evidence pointer); the full 4,863-test root gate, ruff, mypy, all 28 import
   contracts and `git diff --check` pass.
+- 2026-09-28: Addressed all 8 patches of the review round against `7877b8a` test-first (bounded
+  bundle digest streaming, canonical printable wheel URLs, canonical directories before descent,
+  fault-tolerant walk cleanup, typed broken interpreter links, single bounded `pyvenv.cfg` and
+  `METADATA` reads with the probe carved out, companion bound and startup-policy alignment,
+  repaired traversal pointer) and recorded the `--no-env-file` defer; the full 4,900-test root
+  gate, ruff, mypy, all 28 import contracts and `git diff --check` pass.
