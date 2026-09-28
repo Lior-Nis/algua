@@ -363,6 +363,18 @@ These identities are non-cyclic. An environment-only change does not change `bun
   and state handed to the import system so executed code cannot commit a forged spec subclass or a
   same-shaped replacement loader with altered behavior
   [algua/primitives/module_commit_check.py:62]
+- [ ] [Review][Patch] Require every committed family entry and direct parent to be exactly
+  `ModuleType`, not a subclass whose attribute access can conceal a divergent `__path__` or other
+  import metadata from dictionary-based validation
+  [algua/primitives/module_commit_check.py:51]
+- [ ] [Review][Patch] Refuse a second resolution of the same family name in one transaction so a
+  strategy cannot retain a stale first module object while a replacement is the object certified
+  in `sys.modules` and on its parent
+  [algua/primitives/module_refresh.py:180]
+- [ ] [Review][Patch] Snapshot and validate the behavior-relevant `ModuleSpec` bookkeeping state,
+  including loader state, location state, uninitialized submodules and the required final
+  initialization flag, so a committed spec cannot retain forged import machinery state
+  [algua/primitives/module_commit_check.py:21]
 
 ## Development notes
 
