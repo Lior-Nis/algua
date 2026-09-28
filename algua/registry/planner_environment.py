@@ -11,7 +11,7 @@ import tomllib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from algua.primitives.bounded_subprocess import (
     BoundedCompletion,
@@ -142,13 +142,18 @@ def locked_wheels(raw: bytes) -> dict[str, tuple[str, str]]:
             digest = wheel.get("hash")
             if not isinstance(url, str) or not isinstance(digest, str):
                 raise EnvironmentIncompatible("locked wheel URL or hash is not canonical")
+            # `urlsplit` silently strips tabs, newlines and leading spaces and normalizes the
+            # scheme or an empty query/fragment, so only a printable URL that round-trips exactly
+            # is one canonical key for duplicate detection and outage evidence.
+            if not url.isprintable():
+                raise EnvironmentIncompatible("locked wheel URL contains non-printable characters")
             try:
                 parsed = urlsplit(url)
                 netloc = parsed.hostname
             except ValueError as exc:
                 raise EnvironmentIncompatible("locked wheel URL is malformed") from exc
             if (
-                parsed.scheme != "https" or not netloc
+                urlunsplit(parsed) != url or parsed.scheme != "https" or not netloc
                 or parsed.username is not None or parsed.password is not None or parsed.fragment
                 or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
             ):

@@ -86,6 +86,44 @@ def test_locked_wheels_maps_each_wheel_to_its_canonical_identity() -> None:
     assert planner_environment.locked_wheels(_lock()) == {URL: ("six", "1.17.0")}
 
 
+def _wheel(toml_url: str) -> str:
+    """A wheels array whose URL is a TOML basic string, so escapes reach the parsed value."""
+    return f'wheels = [{{ url = "{toml_url}", hash = "{HASH}" }}]'
+
+
+NON_CANONICAL_URLS = {
+    "scheme-uppercase": "HTTPS://files.pythonhosted.org/x.whl",
+    "empty-query": "https://files.pythonhosted.org/x.whl?",
+    "empty-fragment": "https://files.pythonhosted.org/x.whl#",
+    "leading-space": " https://files.pythonhosted.org/x.whl",
+    "tab": "https://files.pythonhosted.org/x\\t.whl",
+    "newline": "https://files.pythonhosted.org/x\\n.whl",
+    "carriage-return": "https://files.pythonhosted.org/x\\r.whl",
+    "bell": "https://files.pythonhosted.org/x\\u0007.whl",
+    "delete": "https://files.pythonhosted.org/x\\u007f.whl",
+    "zero-width-space": "https://files.pythonhosted.org/x\\u200b.whl",
+    "line-separator": "https://files.pythonhosted.org/x\\u2028.whl",
+}
+
+
+@pytest.mark.parametrize("toml_url", NON_CANONICAL_URLS.values(), ids=NON_CANONICAL_URLS.keys())
+def test_locked_wheel_urls_must_be_printable_and_round_trip_exactly(toml_url: str) -> None:
+    with pytest.raises(EnvironmentIncompatible):
+        planner_environment.locked_wheels(_lock(wheels=_wheel(toml_url)))
+
+
+@pytest.mark.parametrize("alias", ["https://files.pythonhosted.org/x.whl?",
+                                   "https://files.pythonhosted.org/x\\t.whl"])
+def test_url_aliases_cannot_evade_duplicate_detection(alias: str) -> None:
+    canonical = "https://files.pythonhosted.org/x.whl"
+    lock = _lock(wheels=_wheel(canonical), extra=(
+        "[[package]]\nname = 'other'\nversion = '1.0'\n"
+        "source = { registry = 'https://pypi.org/simple' }\n" + _wheel(alias) + "\n"))
+
+    with pytest.raises(EnvironmentIncompatible):
+        planner_environment.locked_wheels(lock)
+
+
 def test_repository_lock_has_canonical_identities() -> None:
     wheels = planner_environment.locked_wheels((REPO / "uv.lock").read_bytes())
 
