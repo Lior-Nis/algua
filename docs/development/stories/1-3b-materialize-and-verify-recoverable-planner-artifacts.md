@@ -386,15 +386,15 @@ These identities are non-cyclic. An environment-only change does not change `bun
 - [x] [Review][Patch] Check absent-only module metadata by key membership rather than comparing
   with the importable `_ABSENT` sentinel so executed family code cannot install that sentinel as
   a present `__cached__` or `__path__` value and satisfy an absence requirement
-  [algua/primitives/module_commit_check.py:110]
-- [ ] [Review][Patch] Correct the checked thirteenth-round finding's implementation pointer to the
+  [algua/primitives/module_commit_check.py:105]
+- [x] [Review][Patch] Correct the checked thirteenth-round finding's implementation pointer to the
   membership guard that now lives at `module_commit_check.py:104`
   [docs/development/stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md:386]
-- [ ] [Review][Patch] Make rollback presence-aware instead of using the importable `_ABSENT`
+- [x] [Review][Patch] Make rollback presence-aware instead of using the importable `_ABSENT`
   sentinel as dictionary state: detect `sys.modules` changes by key membership and snapshot direct
   parent bindings as an explicit present bit plus value, so a sentinel-valued entry cannot survive
   rollback or erase a pre-existing binding
-  [algua/primitives/module_refresh.py:172]
+  [algua/primitives/module_refresh.py:176]
 
 ## Development notes
 
@@ -687,6 +687,26 @@ uv run lint-imports
   or outside the family) survives a failed refresh, while a plain `object()` is dropped. It is
   left unchanged and reported for review triage. `module_commit_check.py` is 126 lines. The full
   4,550-test root gate (`-p no:randomly`), ruff, mypy and all 28 import contracts pass.
+- Fourteenth review round: 24 new cases, 6 failing on the baseline (`5125a02`). Each rollback
+  regression runs for a family and an external name with `None`, an ordinary object and every
+  bare `object()` sentinel the refresh seam exposes (discovered at collection). On the baseline a
+  failed refresh that installed `module_refresh._ABSENT` as a new family or external
+  `sys.modules` entry left it behind, one that removed a pre-existing family or external entry
+  valued `_ABSENT` never reinstated it, and a pre-existing `_ABSENT`-valued parent binding of the
+  family package or of a new external module was deleted; the 18 other cases passed, pinning
+  ordinary rollback. Changed entries are now found by key membership, then identity when present
+  on both sides, and each parent binding is snapshotted as `_Binding` (parent, presence bit,
+  exact value), the one type of the guard's `bindings` and of `_restore_modules`, which fork
+  recovery shares. With an unused `_ABSENT` re-added all 24 cases pass; the sentinel is then
+  deleted, leaving 18. Ten mutations are killed: a `None`-default lookup, a shared commit-check
+  sentinel default, membership without identity, presence inferred from a `None` value at the
+  snapshot or at restore, an inverted presence bit, always setting, always popping, fork recovery
+  skipping the bindings (the existing fork probe fails, so no distinct fork regression is
+  needed) and a literal revert to the baseline file (discovery re-adds its sentinel; 6 red). The
+  thirteenth-round pointer now names the membership test (`:104` binds the absent-only keys,
+  `:105` tests them); the rollback finding names the snapshot line. `module_refresh.py` is 264
+  lines. The full 4,568-test root gate (`-p no:randomly`), ruff, mypy and all 28 import
+  contracts pass.
 
 ### Completion Notes
 
@@ -872,6 +892,14 @@ uv run lint-imports
   value refuses commit and rolls back. Every other commit-check lookup compares with a value that
   can never be the sentinel. The import-quiescent precondition, the accepted in-process/no-sandbox
   residual and every live, authority, deployment and capital wall are unchanged.
+- Fourteenth review round complete: rollback decides presence by key membership alone. A changed
+  `sys.modules` entry is present on one side only or bound to a different object, and each direct
+  parent binding is recorded as an explicit presence bit plus its exact prior value. The
+  importable `module_refresh._ABSENT` sentinel is gone, so no value executed code installs,
+  `None` included, is mistaken for absence; fork recovery uses the same restore. The checked
+  thirteenth-round finding points at the membership test. The import-quiescent precondition, the
+  accepted in-process/no-sandbox residual and every live, authority, deployment and capital wall
+  are unchanged.
 
 ### File List
 
@@ -979,3 +1007,7 @@ uv run lint-imports
 - 2026-09-28: Addressed the thirteenth-round review patch test-first (absent-only `__cached__`
   and `__path__` checked by key membership at commit); the full 4,550-test root gate, ruff, mypy
   and all 28 import contracts pass.
+- 2026-09-28: Addressed both fourteenth-round review patches test-first (presence-aware rollback
+  of `sys.modules` entries and direct parent bindings without the importable sentinel, corrected
+  thirteenth-round pointer); the full 4,568-test root gate, ruff, mypy and all 28 import contracts
+  pass.
