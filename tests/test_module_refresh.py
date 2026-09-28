@@ -1925,3 +1925,28 @@ def test_a_family_without_a_bytecode_cache_refreshes_normally(family, monkeypatc
     helper = family.mod("helper")
     assert fresh.VALUE == 2 and fresh.helper is helper and family.mod("strat") is fresh
     assert vars(helper.__spec__)["_cached"] is None and "__cached__" not in vars(helper)
+
+
+_SENTINEL = "from algua.primitives import module_commit_check\n"
+_ABSENT_SENTINEL_FORGERIES = {
+    "member-cached": (
+        _SENTINEL + "from . import helper\nhelper.__cached__ = module_commit_check._ABSENT\n"),
+    "own-cached": _SENTINEL + "__cached__ = module_commit_check._ABSENT\n",
+    "package-cached": (
+        _SENTINEL + "import sys\n"
+        "sys.modules[__package__].__cached__ = module_commit_check._ABSENT\n"),
+    "member-path": (
+        _SENTINEL + "from . import helper\nhelper.__path__ = module_commit_check._ABSENT\n"),
+    "own-path": _SENTINEL + "__path__ = module_commit_check._ABSENT\n",
+}
+
+
+@pytest.mark.parametrize("case", sorted(_ABSENT_SENTINEL_FORGERIES))
+def test_an_installed_absence_sentinel_never_satisfies_absent_module_metadata(
+        family, monkeypatch, case) -> None:
+    """Without a cache tag a module has no ``__cached__``, and an ordinary module never has a
+    ``__path__``: those requirements are checked by key membership, so executed code that
+    imports the commit check's own ``_ABSENT`` sentinel and installs it as a PRESENT value does
+    not look absent, and the complete transaction rolls back."""
+    monkeypatch.setattr(sys.implementation, "cache_tag", None)
+    _assert_never_commits(family, _ABSENT_SENTINEL_FORGERIES[case])

@@ -85,7 +85,8 @@ def _intact(module: ModuleType, facts: SourceSpecFacts) -> bool:
     dictionary; only identity and exact-type comparisons are used, never a permissive ``__eq__``.
     A missing entry is ``_ABSENT``, never ``None``: an ordinary module's ``None`` search locations
     and a cache-less spec's ``None`` cache must be PRESENT, while ``__path__`` (ordinary module)
-    and ``__cached__`` (no cache), which the import system never sets, must be absent."""
+    and ``__cached__`` (no cache), which the import system never sets, must be absent by key
+    membership, since executed code can import ``_ABSENT`` itself and install it as a value."""
     spec, attrs, loader = facts.spec, vars(module), facts.loader
     if not (type(spec) is ModuleSpec and type(loader) is SourceFileLoader):
         return False
@@ -98,6 +99,11 @@ def _intact(module: ModuleType, facts: SourceSpecFacts) -> bool:
             and book.get("_initializing", _ABSENT) is False):
         return False
     search = None if facts.search is None else list(facts.search)
+    # ``None``: the import system never sets it, so it must be absent BY KEY; comparing with the
+    # importable ``_ABSENT`` would accept that sentinel installed as a present value.
+    optional = (("__cached__", facts.cached), ("__path__", search))
+    if any(key in attrs for key, expected in optional if expected is None):
+        return False
     return all(_exact(value, expected) for value, expected in (
         ([list(item) for item in vars(loader).items()], [list(item) for item in facts.state]),
         (book.get("name", _ABSENT), facts.name), (book.get("origin", _ABSENT), facts.origin),
@@ -107,8 +113,8 @@ def _intact(module: ModuleType, facts: SourceSpecFacts) -> bool:
         (attrs.get("__package__", _ABSENT),
          facts.name if search else facts.name.rpartition(".")[0]),
         (attrs.get("__file__", _ABSENT), facts.origin),
-        (attrs.get("__cached__", _ABSENT), _ABSENT if facts.cached is None else facts.cached),
-        (attrs.get("__path__", _ABSENT), _ABSENT if search is None else search)))
+        *((attrs.get(key, _ABSENT), expected) for key, expected in optional
+          if expected is not None)))
 
 
 def _exact(value: object, expected: object) -> bool:
