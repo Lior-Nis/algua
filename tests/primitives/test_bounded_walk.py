@@ -204,12 +204,19 @@ def test_an_abandoned_walk_closes_every_directory_handle(tmp_path: Path) -> None
 
 
 class _Tracked:
-    """A scandir proxy that records its close; the faulty one closes, then raises."""
+    """A scandir proxy that records whether its real listing was released.
 
-    def __init__(self, inner, path: Path, fault: int | None, closed: dict[Path, bool]) -> None:
+    A faulty proxy raises its fault from `close()`; by default it releases the listing first, and
+    with `release=False` it raises before releasing. `times` bounds how many closes fail.
+    """
+
+    def __init__(self, inner, path: Path, fault, closed: dict[Path, bool], *,
+                 release: bool = True, times: int | None = None) -> None:
         self._inner = inner
         self._path = path
         self._fault = fault
+        self._release = release
+        self._times = times
         self._closed = closed
         closed[path] = False
 
@@ -220,22 +227,30 @@ class _Tracked:
         return next(self._inner)
 
     def close(self) -> None:
-        self._inner.close()
-        self._closed[self._path] = True
-        if self._fault is not None:
-            raise OSError(self._fault, "injected close fault")
+        failing = self._fault is not None and (self._times is None or self._times > 0)
+        if failing and self._times is not None:
+            self._times -= 1
+        if self._release or not failing:
+            self._inner.close()
+            self._closed[self._path] = True
+        if failing:
+            if isinstance(self._fault, int):
+                raise OSError(self._fault, "injected close fault")
+            raise self._fault("injected close fault")
 
 
 def _track_closes(
-    monkeypatch: pytest.MonkeyPatch, faulty: Path, *, also: dict[Path, int] | None = None,
+    monkeypatch: pytest.MonkeyPatch, faulty: Path, *, also: dict[Path, object] | None = None,
+    fault: object = errno.EIO, release: bool = True, times: int | None = None,
 ) -> dict[Path, bool]:
     original = os.scandir
     closed: dict[Path, bool] = {}
-    faults = {faulty: errno.EIO, **(also or {})}
+    faults = {faulty: fault, **(also or {})}
 
     def scandir(path):
         target = Path(os.fsdecode(path))
-        return _Tracked(original(path), target, faults.get(target), closed)
+        return _Tracked(original(path), target, faults.get(target), closed,
+                        release=release, times=times)
 
     monkeypatch.setattr(os, "scandir", scandir)
     return closed
@@ -280,6 +295,83 @@ def test_the_deepest_cleanup_failure_is_reported_when_several_closes_fail(
 
     assert caught.value.errno == errno.ENOSPC  # d1/d2 is closed before d1
     assert all(closed.values()), closed
+
+
+def _abandon_at_d3(tmp_path: Path):
+    walk = bounded_walk(tmp_path, max_files=100, max_directories=100, max_path_bytes=1024)
+    for entry in walk:
+        if entry.relative == "d1/d2/d3":
+            break
+    return walk
+
+
+@pytest.mark.parametrize("fault", [RuntimeError, ValueError, KeyboardInterrupt, SystemExit])
+def test_an_abandoned_walk_closes_every_handle_whatever_a_close_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: type[BaseException],
+) -> None:
+    _chain(tmp_path)
+    closed = _track_closes(monkeypatch, faulty=tmp_path / "d1", fault=fault)
+    walk = _abandon_at_d3(tmp_path)
+
+    with pytest.raises(fault):
+        walk.close()
+
+    assert len(closed) == 3 and all(closed.values()), closed
+
+
+@pytest.mark.parametrize("fault", [RuntimeError, ValueError, errno.EIO])
+def test_an_active_traversal_error_survives_any_ordinary_close_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: object,
+) -> None:
+    _chain(tmp_path)
+    closed = _track_closes(monkeypatch, faulty=tmp_path / "d1", fault=fault)
+
+    with pytest.raises(TraversalLimitExceeded):
+        _walk(tmp_path, files=1)
+
+    assert all(closed.values()), closed
+
+
+def test_an_interrupt_during_cleanup_is_never_swallowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _chain(tmp_path)
+    closed = _track_closes(monkeypatch, faulty=tmp_path / "d1", fault=SystemExit)
+
+    with pytest.raises(SystemExit) as caught:
+        _walk(tmp_path, files=1)
+
+    assert isinstance(caught.value.__context__, TraversalLimitExceeded)
+    assert all(closed.values()), closed
+
+
+def test_an_interrupt_outranks_an_earlier_ordinary_cleanup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _chain(tmp_path)
+    closed = _track_closes(
+        monkeypatch, faulty=tmp_path / "d1", fault=SystemExit,
+        also={tmp_path / "d1/d2": RuntimeError})
+    walk = _abandon_at_d3(tmp_path)
+
+    with pytest.raises(SystemExit):  # d1/d2 (RuntimeError) closes first, d1 interrupts later
+        walk.close()
+
+    assert all(closed.values()), closed
+
+
+def test_an_exhausted_listing_whose_close_fails_once_is_released_by_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _chain(tmp_path)
+    closed = _track_closes(
+        monkeypatch, faulty=tmp_path / "d1/d2/d3", release=False, times=1)
+
+    with pytest.raises(OSError) as caught:
+        _walk(tmp_path)
+
+    assert caught.value.errno == errno.EIO
+    assert all(closed.values()), closed  # the failed close was retried, not dropped
 
 
 def test_an_active_traversal_error_survives_a_failing_close(

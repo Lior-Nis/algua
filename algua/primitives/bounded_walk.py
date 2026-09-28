@@ -34,17 +34,26 @@ class TreeEntry:
     is_symlink: bool
 
 
-def _close_all(stack: list[tuple[Any, str]]) -> OSError | None:
-    """Close every open listing, deepest first, even if one fails; return the first failure."""
-    failure: OSError | None = None
+def _close_all(stack: list[tuple[Any, str]]) -> BaseException | None:
+    """Close every open listing, deepest first, whatever a close raises; return what to report.
+
+    A failure of any kind is caught only so that every remaining listing is still closed. The
+    report is the first (deepest) failure, except that an interrupt (a `BaseException` that is
+    not an `Exception`, such as `KeyboardInterrupt` or `SystemExit`) is never dropped in favour
+    of an ordinary failure.
+    """
+    first: BaseException | None = None
+    interrupt: BaseException | None = None
     while stack:
         listing, _prefix = stack.pop()
         try:
             listing.close()
-        except OSError as exc:
-            if failure is None:
-                failure = exc
-    return failure
+        except BaseException as exc:  # caught only to finish closing; reported below
+            if first is None:
+                first = exc
+            if interrupt is None and not isinstance(exc, Exception):
+                interrupt = exc
+    return interrupt or first
 
 
 def bounded_walk(
@@ -59,7 +68,9 @@ def bounded_walk(
             listing, prefix = stack[-1]
             entry = next(listing, None)
             if entry is None:
-                stack.pop()[0].close()
+                # Unstack only after a successful close, so a failed close is retried in cleanup.
+                listing.close()
+                stack.pop()
                 continue
             relative = prefix + entry.name
             if len(os.fsencode(relative)) > max_path_bytes:
@@ -83,7 +94,12 @@ def bounded_walk(
         if failure is not None:
             raise failure from None
         raise
-    except BaseException:
-        # The active error stays primary; every remaining handle is still closed.
-        _close_all(stack)
+    except BaseException as active:
+        # The active error stays primary over ordinary cleanup failures; every remaining handle
+        # is still closed, and a cleanup interrupt is never swallowed by an ordinary error.
+        failure = _close_all(stack)
+        if isinstance(active, Exception) and failure is not None and not isinstance(
+            failure, Exception,
+        ):
+            raise failure from active
         raise
