@@ -1584,3 +1584,78 @@ def test_in_place_mutation_of_an_executed_source_spec_never_commits(family, case
     ``__package__``, ``__loader__``, ``__file__`` and ``__cached__``, so code that mutated the
     spec in place, which an identity check alone accepts, rolls the transaction back."""
     _assert_never_commits(family, _SPEC_MUTATIONS[case])
+
+
+_OWNER_FORK_CONTENDER_PROBE = """
+import os, sys
+sys.path.insert(0, sys.argv[1])
+from algua.primitives import module_refresh
+import fork_contender, top_fork.fam.strat
+old = sys.modules["top_fork.fam.strat"]
+body = "import fork_contender\\nfork_contender.fork_and_contend()\\nVALUE = 2\\n"
+with open(os.path.join(sys.argv[1], "top_fork", "fam", "strat.py"), "w") as handle:
+    handle.write(body + ("raise RuntimeError('roll back')\\n" if sys.argv[2] == "rollback" else ""))
+try:
+    fresh = module_refresh.refresh_package_closure("top_fork.fam", "top_fork.fam.strat")
+    finished = sys.argv[2] == "commit" and sys.modules["top_fork.fam.strat"] is fresh
+except RuntimeError:
+    finished = sys.argv[2] == "rollback" and sys.modules["top_fork.fam.strat"] is old
+if fork_contender.pid == 0:
+    contender = fork_contender.contenders[0]
+    contender.join(30)
+    code = (41 if fork_contender.seen["entered_mid_transaction"] is not False
+            else 42 if contender.is_alive()
+            else 43 if sys.modules["turn_probe"].ACTIVE_WHEN_ENTERED
+            else 0 if finished else 44)
+    os._exit(code)
+_, status = os.waitpid(fork_contender.pid, 0)
+print(os.waitstatus_to_exitcode(status), flush=True)
+os._exit(0 if finished else 45)
+"""
+
+_FORK_CONTENDER = """
+import os, threading
+from algua.primitives import module_refresh
+pid, seen, contenders = None, {}, []
+def probe():
+    acquired = module_refresh._REFRESH_LOCK.acquire(blocking=False)
+    if acquired:
+        module_refresh._REFRESH_LOCK.release()
+    seen["entered_mid_transaction"] = acquired
+def fork_and_contend():
+    global pid
+    pid = os.fork()
+    if pid == 0:
+        prober = threading.Thread(target=probe)
+        prober.start()
+        prober.join(30)
+        contender = threading.Thread(
+            target=module_refresh.serialized_import, args=("turn_probe",), daemon=True)
+        contender.start()
+        contenders.append(contender)
+"""
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork-only platform behavior")
+@pytest.mark.parametrize("outcome", ["commit", "rollback"])
+def test_a_second_child_thread_waits_for_a_transaction_its_forking_owner_continues(
+        tmp_path, outcome) -> None:
+    """When the refreshing thread itself forks, it still owns the transaction and the lock in the
+    child, so the lock is kept rather than replaced: a second child thread cannot acquire it and
+    a supported caller there stays blocked until the owner commits or rolls back. Deterministic:
+    a non-blocking acquire proves the lock is held mid-transaction, and the blocked caller records
+    whether a transaction was still active when it finally entered."""
+    _fork_probe_tree(tmp_path)
+    (tmp_path / "fork_contender.py").write_text(_FORK_CONTENDER)
+    (tmp_path / "turn_probe.py").write_text(
+        "from algua.primitives import module_refresh\n"
+        "ACTIVE_WHEN_ENTERED = module_refresh._ACTIVE is not None\n")
+
+    result = subprocess.run(
+        [sys.executable, "-W", "ignore::DeprecationWarning", "-c", _OWNER_FORK_CONTENDER_PROBE,
+         str(tmp_path), outcome],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert result.stdout.strip() == "0", (result.stdout, result.stderr)

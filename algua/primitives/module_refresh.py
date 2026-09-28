@@ -23,10 +23,10 @@ progress. This is not a claim of arbitrary ``importlib`` concurrency safety: the
 import-quiescent for everything else. A direct import of a family module (or of anything the
 refresh imports) from another thread, or a supported call made from inside a module body another
 thread is initializing, while a refresh runs is unsupported and may observe a partially rebuilt
-family or deadlock. A child forked while another thread runs a refresh restores the pre-refresh
-module state, drops the inherited guard and transaction and gets a fresh lock; CPython's own
-per-module import locks that the vanished thread held for the modules it was initializing are
-not reset, so re-importing exactly those modules in that child is likewise unsupported.
+family or deadlock. In a forked child, a transaction the forking thread owns keeps its lock
+until that thread commits or rolls back; one a vanished thread owned is undone and the lock
+replaced, but CPython's per-module import locks that thread held are not reset, so re-importing
+exactly the modules it was initializing there is unsupported.
 """
 from __future__ import annotations
 
@@ -57,21 +57,21 @@ _ABSENT = object()
 _REFRESH_LOCK = threading.RLock()
 # Per-thread: set while THIS thread runs a refresh transaction, so a nested refresh is refused.
 _TRANSACTION = threading.local()
-# Process-wide: (owner thread ident, pre-refresh ``sys.modules``, guard) of the running transaction,
-# so a forked child can undo a transaction whose owner thread does not exist there.
+# Process-wide (owner ident, pre-refresh ``sys.modules``, guard) of the running transaction (fork).
 _ACTIVE: tuple[int, dict[str, ModuleType], _ImportGuard] | None = None
 
 
 def _recover_after_fork() -> None:
-    """Only the forking thread survives in a child. A lock held by any other thread would never be
-    released there, so the child always starts with a fresh, unowned lock. A transaction another
-    thread was running will never finish there either, so the child restores its pre-refresh
-    modules and recorded direct parent bindings, removes the inherited guard and resets the
-    transaction state. A transaction owned by the forking thread itself is left alone: that thread
-    goes on in the child and commits or rolls back as usual."""
+    """Only the forking thread survives in a child. A transaction it owns keeps its lock, so that
+    thread commits or rolls back as usual while any other child thread waits. Otherwise a lock
+    held by another thread would never be released, so the child gets a fresh lock; and a
+    transaction another thread was running will never finish, so the child restores its
+    pre-refresh modules and direct parent bindings, drops the guard and resets the transaction."""
     global _ACTIVE, _REFRESH_LOCK, _TRANSACTION
+    if _ACTIVE is not None and _ACTIVE[0] == threading.get_ident():
+        return
     _REFRESH_LOCK = threading.RLock()
-    if _ACTIVE is None or _ACTIVE[0] == threading.get_ident():
+    if _ACTIVE is None:
         return
     _, before, guard = _ACTIVE
     _ACTIVE, _TRANSACTION = None, threading.local()
