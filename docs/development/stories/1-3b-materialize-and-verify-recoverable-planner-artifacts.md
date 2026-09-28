@@ -621,6 +621,27 @@ These identities are non-cyclic. An environment-only change does not change `bun
   rather than passing only because the loop fallback retains the same alias independently of the
   opaque callback (Todoist 6hfPfJxg8X2mrGpp) [tests/primitives/test_scoped_walk.py:817]
 
+#### Review findings against `bdaf792` (2026-09-28)
+
+- [ ] [Review][Patch] Complete the side-effect-free literal evaluator for unary booleans and
+  nested safe literals, so every admitted statically true/false loop condition removes its
+  impossible body or exit instead of retaining a false-positive alias path (Todoist
+  6hfPWRXC8MMwMrcG) [tests/primitives/test_scoped_walk.py:276]
+- [ ] [Review][Patch] Keep lazy-object existence and accumulated bindings correlated across
+  mutually exclusive branches, so a generator or coroutine created only on a safe path cannot
+  inherit a raw alias reached only on a sibling path (Todoist 6hfPmMP337jqHpGG)
+  [tests/primitives/test_scoped_walk.py:446]
+- [ ] [Review][Patch] Propagate later caller-scope states into a lazy object returned by a followed
+  same-scope factory, so a generator, generator expression or coroutine advanced after the caller
+  alias becomes raw cannot evade the guard (Todoist 6hfPmMMPmhrfqvjG)
+  [tests/primitives/test_scoped_walk.py:426]
+- [ ] [Review][Patch] Seed a nested class body from its lexical/module bindings rather than the
+  outer class namespace, which Python does not close over, while preserving ordinary class-local
+  isolation (Todoist 6hfPmMQ6h2xXcJ8G) [tests/primitives/test_scoped_walk.py:720]
+- [ ] [Review][Patch] Thread only a comprehension filter's truthy state into later filters and the
+  element, so a rebind required for evaluation cannot be merged with an impossible false path
+  (Todoist 6hfPmMMpfmMvppxG) [tests/primitives/test_scoped_walk.py:495]
+
 ## Development notes
 
 - Prefer focused modules: `registry/artifact_contract.py`, `registry/frozen_source.py`,
