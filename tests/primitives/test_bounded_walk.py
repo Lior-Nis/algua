@@ -329,6 +329,71 @@ def test_a_falsey_interrupt_is_still_reported_over_an_ordinary_failure(
     assert all(closed.values()), closed
 
 
+def test_an_abandoned_stacked_listing_that_fails_once_before_release_is_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _chain(tmp_path)
+    closed = track_closes(monkeypatch, faulty=tmp_path / "d1", release=False, times=1)
+    walk = _abandon_at_d3(tmp_path)
+
+    with pytest.raises(OSError) as caught:
+        walk.close()
+
+    assert caught.value.errno == errno.EIO
+    assert len(closed) == 3 and all(closed.values()), closed
+
+
+def test_an_active_error_retries_a_stacked_listing_that_failed_before_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _chain(tmp_path)
+    closed = track_closes(monkeypatch, faulty=tmp_path / "d1", release=False, times=1)
+
+    with pytest.raises(TraversalLimitExceeded):
+        _walk(tmp_path, files=1)
+
+    assert all(closed.values()), closed
+
+
+def test_the_cleanup_retry_is_bounded_to_one_extra_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _chain(tmp_path)
+    attempts: dict[Path, int] = {}
+    closed = track_closes(
+        monkeypatch, faulty=tmp_path / "d1", release=False, attempts=attempts)
+    walk = _abandon_at_d3(tmp_path)
+
+    with pytest.raises(OSError):
+        walk.close()
+
+    assert attempts[tmp_path / "d1"] == 2  # one pass plus exactly one retry, never unbounded
+    assert closed[tmp_path / "d1"] is False
+    assert closed[tmp_path] and closed[tmp_path / "d1/d2"]
+
+
+def test_a_retry_interrupt_is_never_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _chain(tmp_path)
+
+    class _FailsThenInterrupts:
+        calls = 0
+
+        def __new__(cls, message: str) -> BaseException:
+            cls.calls += 1
+            return RuntimeError(message) if cls.calls == 1 else SystemExit(message)
+
+    closed = track_closes(
+        monkeypatch, faulty=tmp_path / "d1", fault=_FailsThenInterrupts, release=False)
+    walk = _abandon_at_d3(tmp_path)
+
+    with pytest.raises(SystemExit):
+        walk.close()
+
+    assert closed[tmp_path] and closed[tmp_path / "d1/d2"], closed
+
+
 def test_an_exhausted_listing_whose_close_fails_once_is_released_by_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

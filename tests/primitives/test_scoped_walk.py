@@ -96,6 +96,34 @@ def test_a_completed_scope_closes_cleanly(tmp_path: Path) -> None:
     assert "d1/d2/f4" in relatives
 
 
+def test_an_early_scope_exit_retries_a_listing_that_failed_before_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _chain(tmp_path)
+    closed = track_closes(monkeypatch, faulty=tmp_path / "d1", release=False, times=1)
+
+    with pytest.raises(OSError), _scoped(tmp_path) as tree:
+        for entry in tree:
+            if entry.relative == "d1/d2/d3":
+                break
+
+    assert len(closed) == 3 and all(closed.values()), closed
+
+
+def test_a_consumer_error_retries_a_listing_that_failed_before_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _chain(tmp_path)
+    closed = track_closes(monkeypatch, faulty=tmp_path / "d1", release=False, times=1)
+
+    with pytest.raises(TypedRefusal), _scoped(tmp_path) as tree:
+        for entry in tree:
+            if entry.relative == "d1/d2/d3":
+                raise TypedRefusal("consumer refused this entry")
+
+    assert len(closed) == 3 and all(closed.values()), closed
+
+
 def test_every_production_consumer_walks_through_the_scoped_seam() -> None:
     direct = []
     for path in sorted((REPO / "algua").rglob("*.py")):

@@ -82,13 +82,15 @@ class TrackedListing:
     """
 
     def __init__(self, inner, path: Path, fault, closed: dict[Path, bool], *,
-                 release: bool = True, times: int | None = None) -> None:
+                 release: bool = True, times: int | None = None,
+                 attempts: dict[Path, int] | None = None) -> None:
         self._inner = inner
         self._path = path
         self._fault = fault
         self._release = release
         self._times = times
         self._closed = closed
+        self._attempts = attempts
         closed[path] = False
 
     def __iter__(self):
@@ -98,6 +100,8 @@ class TrackedListing:
         return next(self._inner)
 
     def close(self) -> None:
+        if self._attempts is not None:
+            self._attempts[self._path] = self._attempts.get(self._path, 0) + 1
         failing = self._fault is not None and (self._times is None or self._times > 0)
         if failing and self._times is not None:
             self._times -= 1
@@ -113,6 +117,7 @@ class TrackedListing:
 def track_closes(
     monkeypatch: pytest.MonkeyPatch, faulty: Path, *, also: dict[Path, object] | None = None,
     fault: object = errno.EIO, release: bool = True, times: int | None = None,
+    attempts: dict[Path, int] | None = None,
 ) -> dict[Path, bool]:
     original = os.scandir
     closed: dict[Path, bool] = {}
@@ -121,7 +126,7 @@ def track_closes(
     def scandir(path):
         target = Path(os.fsdecode(path))
         return TrackedListing(original(path), target, faults.get(target), closed,
-                        release=release, times=times)
+                              release=release, times=times, attempts=attempts)
 
     monkeypatch.setattr(os, "scandir", scandir)
     return closed

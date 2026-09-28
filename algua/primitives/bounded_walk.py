@@ -44,17 +44,27 @@ def _close_all(stack: list[tuple[Any, str]]) -> BaseException | None:
     A failure of any kind is caught only so that every remaining listing is still closed. The
     report is the first (deepest) failure, except that an interrupt (a `BaseException` that is
     not an `Exception`, such as `KeyboardInterrupt` or `SystemExit`) is never dropped in favour
-    of an ordinary failure.
+    of an ordinary failure. After every listing has been tried once, each listing whose close
+    failed (possibly before releasing its handle) is retried exactly once, deepest first; a retry
+    never displaces the first failure, but an interrupt it raises is still reported.
     """
     first: BaseException | None = None
     interrupt: BaseException | None = None
+    failed: list[Any] = []
     while stack:
         listing, _prefix = stack.pop()
         try:
             listing.close()
         except BaseException as exc:  # caught only to finish closing; reported below
+            failed.append(listing)
             if first is None:
                 first = exc
+            if interrupt is None and not isinstance(exc, Exception):
+                interrupt = exc
+    for listing in failed:
+        try:
+            listing.close()
+        except BaseException as exc:  # a bounded retry; only an interrupt can change the report
             if interrupt is None and not isinstance(exc, Exception):
                 interrupt = exc
     return interrupt if interrupt is not None else first
