@@ -359,6 +359,10 @@ These identities are non-cyclic. An environment-only change does not change `bun
   second thread in the child cannot acquire a replacement lock and enter the still-active partial
   transaction before its owner commits or rolls back
   [algua/primitives/module_refresh.py:72]
+- [ ] [Review][Patch] Pin the exact concrete `ModuleSpec` and original `SourceFileLoader` identity
+  and state handed to the import system so executed code cannot commit a forged spec subclass or a
+  same-shaped replacement loader with altered behavior
+  [algua/primitives/module_refresh.py:220]
 
 ## Development notes
 
