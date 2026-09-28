@@ -173,10 +173,13 @@ def _require_committed_family(package: str, location: str, specs: dict[str, Modu
         module, spec = sys.modules.get(name), specs.get(name)
         parent_name, _, child = name.rpartition(".")
         holder = sys.modules.get(parent_name) if parent_name else None
-        if (spec is None or not isinstance(module, ModuleType)
-                or vars(module).get("__spec__") is not spec
-                or (parent_name and not isinstance(holder, ModuleType))
-                or (isinstance(holder, ModuleType) and vars(holder).get(child) is not module)):
+        bound = (
+            spec is not None and isinstance(module, ModuleType)
+            and vars(module).get("__spec__") is spec
+            and (isinstance(holder, ModuleType) or not parent_name)
+            and (holder is None or vars(holder).get(child) is module)
+        )
+        if not bound or spec is None:
             raise ModuleRefreshError(
                 f"{name!r} is not bound as its fresh source module at commit", name=name)
         search = vars(module).get("__path__", _ABSENT)

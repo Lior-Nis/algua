@@ -1264,6 +1264,9 @@ _UNCOMMITTABLE = {
     "package-unbound-from-parent": (
         "import sys\ntop, _, leaf = __package__.rpartition('.')\n"
         "vars(sys.modules[top]).pop(leaf)\n"),
+    "parent-not-a-module": (
+        "import sys, types\ntop, _, leaf = __package__.rpartition('.')\n"
+        "sys.modules[top] = types.SimpleNamespace(**{leaf: sys.modules[__package__]})\n"),
     "foreign-spec": (
         "import importlib.util\nfrom . import helper\n"
         "helper.__spec__ = importlib.util.find_spec('json')\n"),
