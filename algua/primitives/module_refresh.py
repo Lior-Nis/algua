@@ -134,6 +134,7 @@ class _ImportGuard:
     def __init__(self) -> None:
         self.bindings: dict[str, tuple[ModuleType, object]] = {}
         self.family: tuple[str, str] | None = None  # (package, prevalidated location)
+        self.specs: dict[str, ModuleSpec] = {}  # every family spec handed to the import system
 
     def find_spec(
             self, fullname: str, path: object = None, target: object = None) -> ModuleSpec | None:
@@ -153,6 +154,7 @@ class _ImportGuard:
         spec = source_spec(package, location, fullname)
         if spec is None:
             raise ModuleNotFoundError(f"No module named {fullname!r}", name=fullname)
+        self.specs[fullname] = spec
         return spec
 
 
@@ -161,12 +163,26 @@ def _exact_search_path(package: str, location: str, name: str) -> list[str]:
     return [os.path.join(location, *name.split(".")[package.count(".") + 1:])]
 
 
-def _require_confined_search_paths(package: str, location: str) -> None:
-    """Before commit, every fresh family module that is a package must still search exactly its
-    prevalidated directory, so a later lazy import cannot use a path extended during the refresh."""
-    for name in [name for name in sys.modules if within(name, package)]:
-        search = getattr(sys.modules[name], "__dict__", {}).get("__path__", _ABSENT)
-        if search is not _ABSENT and search != _exact_search_path(package, location, name):
+def _require_committed_family(package: str, location: str, specs: dict[str, ModuleSpec]) -> None:
+    """Before commit, the fresh family graph must be exactly what the guard resolved: every family
+    entry in ``sys.modules`` and every module the guard handed out is a ``ModuleType`` carrying
+    that exact source spec, bound identically in ``sys.modules`` and on its direct parent; a
+    package still searches exactly its prevalidated directory (so a later lazy import cannot use a
+    path extended during the refresh) and a module has no search path at all."""
+    for name in sorted({*specs, *(name for name in sys.modules if within(name, package))}):
+        module, spec = sys.modules.get(name), specs.get(name)
+        parent_name, _, child = name.rpartition(".")
+        holder = sys.modules.get(parent_name) if parent_name else None
+        if (spec is None or not isinstance(module, ModuleType)
+                or vars(module).get("__spec__") is not spec
+                or (parent_name and not isinstance(holder, ModuleType))
+                or (isinstance(holder, ModuleType) and vars(holder).get(child) is not module)):
+            raise ModuleRefreshError(
+                f"{name!r} is not bound as its fresh source module at commit", name=name)
+        search = vars(module).get("__path__", _ABSENT)
+        expected = (_ABSENT if spec.submodule_search_locations is None
+                    else _exact_search_path(package, location, name))
+        if search != expected:
             raise ModuleRefreshError(
                 f"{name!r} search path deviates from its prevalidated family root", name=name)
 
@@ -183,7 +199,7 @@ def _refresh_attempt(package: str, root: str, guard: _ImportGuard) -> ModuleType
         del sys.modules[name]
     guard.family = (package, location)
     fresh = importlib.import_module(root)
-    _require_confined_search_paths(package, location)
+    _require_committed_family(package, location, guard.specs)
     return fresh
 
 

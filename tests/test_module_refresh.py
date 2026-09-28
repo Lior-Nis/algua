@@ -1246,3 +1246,52 @@ def test_a_purge_walk_that_cannot_enter_a_directory_is_refused_not_skipped(
     finally:
         (family.dir / "sub").chmod(0o755)
     assert family.entries() == {}
+
+
+_UNCOMMITTABLE = {
+    "non-module-entry": (
+        "import sys, types\nfrom . import helper\n"
+        "sys.modules[__package__ + '.helper'] = types.SimpleNamespace(VALUE=1)\n"),
+    "root-replaces-itself": (
+        "import sys, types\nsys.modules[__name__] = types.SimpleNamespace(VALUE=1)\n"),
+    "foreign-entry": (
+        "import sys, types\n"
+        "sys.modules[__package__ + '.fake'] = types.ModuleType(__package__ + '.fake')\n"),
+    "self-removed-entry": (
+        "import sys\nfrom . import helper\ndel sys.modules[__package__ + '.helper']\n"),
+    "rebound-on-parent": (
+        "import sys\nfrom . import helper\nsys.modules[__package__].helper = 'shadow'\n"),
+    "package-unbound-from-parent": (
+        "import sys\ntop, _, leaf = __package__.rpartition('.')\n"
+        "vars(sys.modules[top]).pop(leaf)\n"),
+    "foreign-spec": (
+        "import importlib.util\nfrom . import helper\n"
+        "helper.__spec__ = importlib.util.find_spec('json')\n"),
+    "module-gains-a-path": (
+        "import os\nfrom . import helper\n"
+        "helper.__path__ = [os.path.join(os.path.dirname(__file__), 'helper')]\n"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_UNCOMMITTABLE))
+def test_a_fresh_family_graph_that_is_not_exactly_bound_never_commits(family, case) -> None:
+    """At commit every fresh family entry must be a source-backed ``ModuleType`` the guard
+    resolved from the exact root, bound identically in ``sys.modules`` and on its direct parent,
+    with a package keeping exactly its confined ``__path__`` and a module having none; anything
+    else rolls the complete transaction back."""
+    (family.dir / "helper").mkdir()
+    (family.dir / "helper" / "inner.py").write_text("VALUE = 1\n")
+    family.write("helper", "VALUE = 1\n")
+    family.write("strat", "from . import helper\nVALUE = 1\n")
+    importlib.import_module(f"{family.package}.strat")
+    before = family.entries()
+    parent_binding = vars(sys.modules[family.top])["fam"]
+    family.write("strat", _UNCOMMITTABLE[case])
+
+    with pytest.raises(ModuleRefreshError):
+        _refresh(family)
+
+    after = family.entries()
+    assert set(after) == set(before) and all(after[k] is v for k, v in before.items())
+    assert vars(sys.modules[family.top])["fam"] is parent_binding
+    assert vars(parent_binding)["helper"] is before[f"{family.package}.helper"]
