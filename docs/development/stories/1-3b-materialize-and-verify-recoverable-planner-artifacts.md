@@ -347,15 +347,15 @@ These identities are non-cyclic. An environment-only change does not change `bun
 - [x] [Review][Patch] Translate bytecode-purge failures into the stable bounded refresh error
   contract and explicitly prove partial cache deletion cannot commit or mutate the module graph
   [algua/primitives/module_refresh.py:217]
-- [ ] [Review][Patch] Canonicalize the selected package root before preflight and import so a
+- [x] [Review][Patch] Canonicalize the selected package root before preflight and import so a
   relative parent search entry cannot change meaning if refreshed code changes the process working
   directory
   [algua/primitives/module_source_scan.py:111]
-- [ ] [Review][Patch] Validate immutable expected source-spec facts and corresponding module
+- [x] [Review][Patch] Validate immutable expected source-spec facts and corresponding module
   metadata at commit so in-place mutation of the `ModuleSpec` handed to executed code cannot retain
   a forged loader, origin or package search location
   [algua/primitives/module_refresh.py:190]
-- [ ] [Review][Patch] Preserve refresh serialization when the refreshing thread itself forks so a
+- [x] [Review][Patch] Preserve refresh serialization when the refreshing thread itself forks so a
   second thread in the child cannot acquire a replacement lock and enter the still-active partial
   transaction before its owner commits or rolls back
   [algua/primitives/module_refresh.py:72]
@@ -538,6 +538,31 @@ uv run lint-imports
   with the stale-record fork probe, the non-module parent case and an explicit regular-package
   location check with a pinned refusal message. All 25 bundled strategies still refresh twice
   through `_reload_strategy_closure`.
+- Ninth review round: 24 new cases. Patch 1 failed red for a relative `sys.path` entry and a
+  relative parent `__path__` entry: refreshed code that changed directory mid-import made the
+  guard resolve, and execute, a same-shaped tree under the new directory (its marker was
+  written). A `./src` entry (pins canonical normalization) and a vanished working directory (pins
+  the bounded `FileNotFoundError` refusal now that every relative entry reads the working
+  directory) were added after green to kill surviving mutations. Patch 2 failed red for 16 of 17
+  in-place mutation cases (loader subclass type, loader name and path, spec name, origin, cache,
+  the root's own origin, a package spec's rebound search locations, module `__name__`,
+  `__package__` for a module and a package, `__loader__`, `__file__` changed, removed or an equal
+  `str` subclass, `__cached__`); a module spec gaining search locations was already refused only
+  because the old check derived its expected `__path__` from the live spec, and is now caught by
+  the recorded facts. An in-place `str`-subclass element of a package `__path__` was added after
+  green to pin element-wise exact typing. Every case proves complete rollback of family entries
+  and parent bindings. Patch 3 failed red in both outcomes (commit and rollback): a second thread
+  in the owner-forked child took the replacement lock mid-transaction (child exit 41). The probe
+  is deterministic: a non-blocking acquire from the second thread proves the lock is held
+  mid-transaction, and a blocked `serialized_import` records that no transaction was active when
+  it finally entered; five repeated runs pass. Twenty-two mutations were run and all are killed:
+  freezing and normalization of the root and the bounded working-directory read; each of the
+  thirteen recorded spec/module fact checks, exact typing, element-wise list typing and the whole
+  facts check; and each of the three fork branches (the owner keeps its lock, a vanished owner and
+  no transaction still reset). Loader name and path are read with `getattr`, so a deleted
+  attribute also fails closed. `module_refresh.py` stays at 299 lines, under the size-ratchet
+  floor, by tightening prose rather than raising a pin. All 25 bundled strategies still refresh
+  twice through `_reload_strategy_closure`.
 
 ### Completion Notes
 
@@ -665,6 +690,20 @@ uv run lint-imports
   vanished thread are not reset, so re-importing exactly the modules it was initializing in that
   child is unsupported under the import-quiescent precondition. The in-process/no-sandbox threat
   model and every live, authority, deployment and capital wall are unchanged.
+- Ninth review round complete: a relative `sys.path` or parent `__path__` entry is frozen against
+  the working directory once, before preflight, and the family location is absolute and
+  canonical, so refreshed code that changes directory cannot redirect the guard's later exact
+  source resolution; a vanished working directory is the bounded refusal. The guard records each
+  handed-out spec's immutable facts (name, origin, cache, search locations) at resolution, and
+  commit requires the same spec object to still carry them with an exact `SourceFileLoader` whose
+  name and path match, and its module to carry the matching `__name__`, `__package__`,
+  `__loader__` (the spec's loader), `__file__`, `__cached__` and `__path__`, compared with exact
+  types; any in-place mutation rolls the complete transaction back. A child forked by the thread
+  that owns the active transaction keeps the inherited lock, so a second child thread waits until
+  that owner commits or rolls back; no-transaction and vanished-owner forks keep the existing
+  reset and recovery. The import-quiescent precondition, the accepted in-process/no-sandbox
+  residual and every live, authority, deployment and capital wall are unchanged; malicious
+  strategy sandboxing remains out of scope.
 
 ### File List
 
@@ -753,3 +792,6 @@ uv run lint-imports
   construction, fork-child transaction recovery, commit-time fresh-graph validation, bounded
   source stat/read/parse and bytecode-purge errors, non-regular node refusal); the full
   4,468-test root gate, ruff, mypy and all 28 import contracts pass.
+- 2026-09-28: Addressed all 3 ninth-round review patches test-first (canonical frozen package
+  root, recorded source-spec facts and module metadata validated at commit, owner-fork lock
+  preservation); the full 4,492-test root gate, ruff, mypy and all 28 import contracts pass.
