@@ -56,7 +56,9 @@ from algua.primitives.module_source_scan import (
 
 __all__ = ["ModuleRefreshError", "refresh_package_closure", "serialized_import"]
 
-_ABSENT = object()
+# A direct parent binding as first seen: (parent, whether it bound the child name, that exact
+# value). Presence is an explicit bit, never a sentinel value that executed code could import.
+type _Binding = tuple[ModuleType, bool, object]
 # Re-entrant: a supported caller that runs inside a refresh on the same thread must not self-block.
 _REFRESH_LOCK = threading.RLock()
 # Per-thread: set while THIS thread runs a refresh transaction, so a nested refresh is refused.
@@ -160,7 +162,7 @@ class _ImportGuard:
     the first object's entry and parent binding still cannot commit the transaction."""
 
     def __init__(self) -> None:
-        self.bindings: dict[str, tuple[ModuleType, object]] = {}
+        self.bindings: dict[str, _Binding] = {}
         self.family: tuple[str, str] | None = None  # (package, prevalidated location)
         self.specs: dict[str, SourceSpecFacts] = {}  # every family spec handed out, with its facts
         self.duplicate: str | None = None  # the first name resolved twice; latched, never cleared
@@ -170,7 +172,8 @@ class _ImportGuard:
         parent_name, _, child = fullname.rpartition(".")
         holder = sys.modules.get(parent_name) if parent_name else None
         if fullname not in self.bindings and isinstance(holder, ModuleType):
-            self.bindings[fullname] = (holder, holder.__dict__.get(child, _ABSENT))
+            namespace = holder.__dict__
+            self.bindings[fullname] = (holder, child in namespace, namespace.get(child))
         if self.family is None or not within(fullname, self.family[0]):
             return None
         if fullname in self.specs:
@@ -216,25 +219,26 @@ def _refresh_attempt(package: str, root: str, guard: _ImportGuard) -> ModuleType
     return fresh
 
 
-def _restore_modules(
-        before: dict[str, ModuleType], bindings: dict[str, tuple[ModuleType, object]]) -> None:
+def _restore_modules(before: dict[str, ModuleType], bindings: dict[str, _Binding]) -> None:
     """Reinstate exactly ``before``'s ``sys.modules`` entries (dropping every entry the attempt
     introduced or replaced), then restore every direct parent binding an import changed to its
-    recorded state: the previous value, or absence."""
+    recorded state: the previous value, or absence. Presence is key membership (an entry present
+    on both sides is compared by identity), never a comparison with a sentinel, since executed
+    code can install any importable object as an entry's or a binding's value."""
     affected = {
         name for name in {*sys.modules, *before}
-        if sys.modules.get(name, _ABSENT) is not before.get(name, _ABSENT)
+        if name not in sys.modules or name not in before or sys.modules[name] is not before[name]
     }
     for name in affected:
         sys.modules.pop(name, None)
         if name in before:
             sys.modules[name] = before[name]
-    for name, (holder, previous) in bindings.items():
+    for name, (holder, present, previous) in bindings.items():
         child = name.rpartition(".")[2]
-        if previous is _ABSENT:
-            holder.__dict__.pop(child, None)
-        else:
+        if present:
             holder.__dict__[child] = previous
+        else:
+            holder.__dict__.pop(child, None)
 
 
 def _purge_package_bytecode(location: str, package: str) -> None:

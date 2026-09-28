@@ -11,11 +11,11 @@ import textwrap
 import threading
 import uuid
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from algua.primitives import module_refresh, module_source_scan
+from algua.primitives import module_commit_check, module_refresh, module_source_scan
 from algua.primitives.module_refresh import ModuleRefreshError, refresh_package_closure
 from algua.primitives.module_source_scan import require_acyclic, static_closure
 
@@ -1950,3 +1950,78 @@ def test_an_installed_absence_sentinel_never_satisfies_absent_module_metadata(
     not look absent, and the complete transaction rolls back."""
     monkeypatch.setattr(sys.implementation, "cache_tag", None)
     _assert_never_commits(family, _ABSENT_SENTINEL_FORGERIES[case])
+
+
+# Values rollback must restore or drop by presence alone, never mistake for absence: ``None`` (a
+# dictionary lookup's default), an ordinary object, and every bare ``object()`` sentinel the refresh
+# seam exposes, which executed code can import and install as an entry's or binding's value.
+_PRESENCE_VALUES = [
+    pytest.param(None, id="none"),
+    pytest.param(object(), id="object"),
+    *(pytest.param(value, id=f"{module.__name__.rpartition('.')[2]}.{name}")
+      for module in (module_refresh, module_commit_check)
+      for name, value in vars(module).items() if type(value) is object),
+]
+
+
+def _ghost(family, scope: str) -> str:
+    return f"{family.package if scope == 'family' else family.top}.ghost"
+
+
+@pytest.mark.parametrize("value", _PRESENCE_VALUES)
+@pytest.mark.parametrize("scope", ["family", "external"])
+def test_rollback_drops_an_introduced_sys_modules_entry_whatever_its_value(
+        family, monkeypatch, scope, value) -> None:
+    """Rollback finds changed ``sys.modules`` entries by key membership, then identity: an entry
+    the failed attempt introduced is dropped even when its value is ``None`` or a seam sentinel."""
+    importlib.import_module(family.top)
+    carrier = ModuleType(f"mrcarrier_{uuid.uuid4().hex[:10]}")
+    vars(carrier)["value"] = value
+    monkeypatch.setitem(sys.modules, carrier.__name__, carrier)
+    name = _ghost(family, scope)
+    family.write("strat", (
+        f"import sys\nsys.modules[{name!r}] = sys.modules[{carrier.__name__!r}].value\n"
+        "raise RuntimeError('boom')\n"))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _refresh(family)
+
+    assert name not in sys.modules
+
+
+@pytest.mark.parametrize("value", _PRESENCE_VALUES)
+@pytest.mark.parametrize("scope", ["family", "external"])
+def test_rollback_reinstates_a_removed_sys_modules_entry_whatever_its_value(
+        family, scope, value) -> None:
+    """A pre-existing entry the failed attempt removed (a family entry the refresh drops, or an
+    external one executed code pops) is reinstated with its exact value, whatever that value."""
+    importlib.import_module(family.top)
+    name = _ghost(family, scope)
+    sys.modules[name] = value
+    family.write("strat", (
+        f"import sys\nsys.modules.pop({name!r}, None)\nraise RuntimeError('boom')\n"))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _refresh(family)
+
+    assert name in sys.modules and sys.modules[name] is value
+
+
+@pytest.mark.parametrize("value", _PRESENCE_VALUES)
+@pytest.mark.parametrize("child", ["fam", "ext"])
+def test_rollback_reinstates_a_pre_existing_parent_binding_whatever_its_value(
+        family, child, value) -> None:
+    """The guard snapshots each direct parent binding as an explicit presence bit plus its exact
+    value, so a pre-existing binding the failed attempt overwrote (by importing the family package
+    or a new external module of that name) is reinstated, never deleted, whatever its value."""
+    (family.dir.parent / "ext").mkdir()
+    (family.dir.parent / "ext" / "__init__.py").write_text("")
+    top = importlib.import_module(family.top)
+    vars(top)[child] = value
+    family.write("strat", f"import {family.top}.ext\nraise RuntimeError('boom')\n")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _refresh(family)
+
+    assert child in vars(top) and vars(top)[child] is value
+    assert f"{family.top}.ext" not in sys.modules and family.entries() == {}
