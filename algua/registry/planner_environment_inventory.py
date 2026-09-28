@@ -14,7 +14,7 @@ from typing import Any
 
 from algua.primitives.bounded_subprocess import OutputLimitExceeded, run_bounded
 from algua.primitives.strict_walk import strict_walk
-from algua.registry.artifact_contract import ArtifactFile, canonical_json
+from algua.registry.artifact_contract import ArtifactFile, canonical_json, canonical_relative_path
 from algua.registry.environment_contract import (
     BASE_INTERPRETER,
     MAX_DISTRIBUTION_METADATA_BYTES,
@@ -124,6 +124,14 @@ def _interpreter_link(root: Path, path: Path) -> InterpreterLink:
     return InterpreterLink(path.relative_to(root).as_posix(), target)
 
 
+def _canonical(root: Path, path: Path) -> str:
+    """The entry's canonical bounded relative path, refused before anything is read from it."""
+    try:
+        return canonical_relative_path(path.relative_to(root).as_posix(), "environment path")
+    except ValueError as exc:
+        raise EnvironmentIncompatible("environment path is not canonical and bounded") from exc
+
+
 def inventory_environment(root: Path) -> InstalledInventory:
     """Inventory every entry; uv creates no empty directory, so any directory must be implied."""
     if root.is_symlink() or not root.is_dir():
@@ -146,6 +154,7 @@ def inventory_environment(root: Path) -> InstalledInventory:
                 raise EnvironmentIncompatible("environment exceeds the file-count bound")
             entries += 1
             path = directory / name
+            relative = _canonical(root, path)
             if path.is_symlink():
                 links.append(_interpreter_link(root, path))
                 continue
@@ -164,7 +173,6 @@ def inventory_environment(root: Path) -> InstalledInventory:
             total += size
             if total > MAX_ENVIRONMENT_BYTES:
                 raise EnvironmentIncompatible("environment exceeds the aggregate size bound")
-            relative = path.relative_to(root).as_posix()
             mode = "100755" if info.st_mode & stat.S_IXUSR else "100644"
             files.append(ArtifactFile(relative, mode, size, digest))
             if path.name == "METADATA" and path.parent.name.endswith(".dist-info"):

@@ -197,6 +197,43 @@ def test_a_directory_holding_only_interpreter_links_is_inventoried(tmp_path: Pat
         "bin/python", "bin/python3", "bin/python3.12"}
 
 
+def _malformed_path(env: Path, shape: str) -> Path:
+    site = env / SITE_PACKAGES
+    if shape == "overlong":
+        directory = site
+        for index in range(5):
+            directory = directory / (f"{index}" * 250)
+        directory.mkdir(parents=True)
+        return directory / "payload.py"
+    if shape == "undecodable":
+        return Path(os.fsdecode(bytes(site) + b"/\xffpayload.py"))
+    names = {
+        "non-nfc": "café.py",
+        "trailing-space": "payload.py ",
+        "trailing-dot": "payload.",
+        "backslash": "pay\\load.py",
+    }
+    return site / names[shape]
+
+
+@pytest.mark.parametrize(
+    "shape",
+    ["overlong", "undecodable", "non-nfc", "trailing-space", "trailing-dot", "backslash"],
+)
+def test_malformed_paths_are_refused_before_their_content_is_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str,
+) -> None:
+    env = _environment(tmp_path)
+    target = _malformed_path(env, shape)
+    target.write_bytes(b"x" * 4096)
+    hashed = _count_hashes(monkeypatch)
+
+    with pytest.raises(EnvironmentIncompatible, match="path"):
+        inventory_environment(env)
+
+    assert target not in hashed
+
+
 def test_distribution_metadata_is_read_through_an_explicit_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
