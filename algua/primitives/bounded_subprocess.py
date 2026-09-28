@@ -71,7 +71,7 @@ def _collect(
 def run_bounded(
     argv: Sequence[str],
     *,
-    cwd: Path,
+    cwd: Path | None = None,
     env: Mapping[str, str],
     timeout: float,
     max_stdout: int,

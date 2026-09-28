@@ -8,10 +8,16 @@ import subprocess
 import sys
 import sysconfig
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from algua.primitives.bounded_subprocess import (
+    BoundedCompletion,
+    OutputLimitExceeded,
+    run_bounded,
+)
 from algua.registry.artifact_contract import BuildInputs
 from algua.registry.environment_contract import (
     EnvironmentKey,
@@ -39,6 +45,14 @@ SYNC_FLAGS = (
     "--no-install-workspace", "--no-install-local", "--no-build", "--no-python-downloads",
     "--link-mode", "copy", "--no-env-file", "--no-config", "--no-progress",
 )
+_UV_VERSION_TIMEOUT_SECONDS = 30
+_UV_VERSION_OUTPUT_BYTES = 4096
+_UV_TIMEOUT_SECONDS = 900
+_UV_OUTPUT_BYTES = 1024 * 1024
+# Launching, output overflow and an unclassified timeout are never evidence of a temporary
+# locked-wheel outage, so they stay inside the non-retryable incompatibility boundary.
+_UV_FAILURES = (OSError, subprocess.SubprocessError, OutputLimitExceeded)
+UvRunner = Callable[..., BoundedCompletion]
 
 
 def installer_version() -> str:
@@ -47,13 +61,19 @@ def installer_version() -> str:
     if uv is None:
         raise EnvironmentIncompatible("uv is unavailable for frozen environment construction")
     try:
-        result = subprocess.run(
-            [uv, "--version"], env=scrubbed_environment(Path(uv).parent), check=True,
-            capture_output=True, text=True, timeout=30,
+        result = run_bounded(
+            [uv, "--version"], env=scrubbed_environment(Path(uv).parent),
+            timeout=_UV_VERSION_TIMEOUT_SECONDS, max_stdout=_UV_VERSION_OUTPUT_BYTES,
+            max_stderr=_UV_VERSION_OUTPUT_BYTES,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except _UV_FAILURES as exc:
         raise EnvironmentIncompatible("uv version could not be determined") from exc
-    version = result.stdout.strip()
+    if result.returncode != 0:
+        raise EnvironmentIncompatible("uv version could not be determined")
+    try:
+        version = result.stdout.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise EnvironmentIncompatible("uv returned an invalid version identity") from exc
     if not version or len(version) > 128 or "\n" in version:
         raise EnvironmentIncompatible("uv returned an invalid version identity")
     return version
@@ -150,13 +170,22 @@ def _expanded(template: tuple[str, ...], replacements: dict[str, str]) -> list[s
     return [replacements.get(item, item) for item in template]
 
 
+def _run_uv(
+    runner: UvRunner, argv: list[str], *, cwd: Path, env: dict[str, str],
+) -> BoundedCompletion:
+    return runner(
+        argv, cwd=cwd, env=env, timeout=_UV_TIMEOUT_SECONDS, max_stdout=_UV_OUTPUT_BYTES,
+        max_stderr=_UV_OUTPUT_BYTES,
+    )
+
+
 def provision_environment(
     build_root: Path,
     environment: Path,
     inputs: tuple[FrozenFile, ...],
     key: EnvironmentKey,
     *,
-    runner: Any = subprocess.run,
+    runner: UvRunner = run_bounded,
 ) -> InstalledInventory:
     """Create one private environment; publication remains a separate atomic step."""
     if build_root.exists() or environment.exists():
@@ -183,26 +212,27 @@ def provision_environment(
     })
     sync = _expanded(SYNC_FLAGS, {"<private-build-input-root>": str(build_root)})
     try:
-        runner(create, cwd=build_root, env=base_env, check=True, capture_output=True, text=True,
-               timeout=900)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        created = _run_uv(runner, create, cwd=build_root, env=base_env)
+    except _UV_FAILURES as exc:
         raise EnvironmentIncompatible("locked environment creation failed") from exc
+    if created.returncode != 0:
+        raise EnvironmentIncompatible("locked environment creation failed")
     lib64 = environment / "lib64"
     if lib64.is_symlink() and lib64.resolve() == (environment / "lib").resolve():
         lib64.unlink()
+    sync_env = {**base_env, "VIRTUAL_ENV": str(environment)}
     try:
-        sync_env = {**base_env, "VIRTUAL_ENV": str(environment)}
-        runner(sync, cwd=build_root, env=sync_env, check=True, capture_output=True, text=True,
-               timeout=900)
+        synced = _run_uv(runner, sync, cwd=build_root, env=sync_env)
     except subprocess.TimeoutExpired as exc:
         raise EnvironmentUnavailable(
             "a compatible locked wheel is temporarily unavailable") from exc
-    except subprocess.CalledProcessError as exc:
-        diagnostic = (exc.stderr or "").lower()
-        if any(token in diagnostic for token in ("download", "network", "timeout", "connection")):
-            raise EnvironmentUnavailable(
-                "a compatible locked wheel is temporarily unavailable") from exc
+    except _UV_FAILURES as exc:
         raise EnvironmentIncompatible("locked environment provisioning failed") from exc
+    if synced.returncode != 0:
+        diagnostic = synced.stderr.decode("utf-8", "replace").lower()
+        if any(token in diagnostic for token in ("download", "network", "timeout", "connection")):
+            raise EnvironmentUnavailable("a compatible locked wheel is temporarily unavailable")
+        raise EnvironmentIncompatible("locked environment provisioning failed")
     inventory = inventory_environment(environment)
     verify_environment(environment, key.interpreter, inventory.digest)
     return inventory

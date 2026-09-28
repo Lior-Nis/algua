@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from algua.primitives.bounded_subprocess import BoundedCompletion
 from algua.registry.frozen_source import FrozenFile
 from algua.registry.planner_environment import (
     CREATE_FLAGS,
@@ -158,12 +159,12 @@ def test_provision_uses_exact_uv_commands_and_private_inputs(tmp_path: Path) -> 
     environment = tmp_path / "environment"
     build_root = tmp_path / "inputs"
 
-    def runner(argv, *, cwd, env, check, capture_output, text, timeout):
+    def runner(argv, *, cwd, env, timeout, max_stdout, max_stderr):
         calls.append((argv, cwd, env, timeout))
         if argv[1] == "venv":
             uv_like_venv(environment)
             (environment / "lib64").symlink_to("lib")  # created by `uv venv`, then removed
-        return type("Completed", (), {"returncode": 0, "stderr": ""})()
+        return BoundedCompletion(0, b"", b"")
 
     key = build_environment_key(_inputs(), "a" * 64, uv_version="uv 0.9.26")
     inventory = provision_environment(
