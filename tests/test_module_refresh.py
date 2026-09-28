@@ -15,13 +15,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from algua.primitives import module_refresh
-from algua.primitives.module_refresh import (
-    ModuleRefreshError,
-    _require_acyclic,
-    _static_closure,
-    refresh_package_closure,
-)
+from algua.primitives import module_refresh, module_source_scan
+from algua.primitives.module_refresh import ModuleRefreshError, refresh_package_closure
+from algua.primitives.module_source_scan import require_acyclic, static_closure
 
 
 @pytest.fixture
@@ -203,7 +199,7 @@ def test_static_closure_resolves_absolute_relative_nested_and_parent_edges(famil
         "from . import not_a_module\n"
     ))
 
-    graph = _static_closure(pkg, f"{pkg}.strat")
+    graph = static_closure(pkg, f"{pkg}.strat")
 
     assert graph[f"{pkg}.strat"] == {
         pkg, f"{pkg}._a", f"{pkg}._b", f"{pkg}._c", f"{pkg}._d", f"{pkg}._e",
@@ -216,12 +212,12 @@ def test_static_closure_resolves_absolute_relative_nested_and_parent_edges(famil
 
 
 def test_require_acyclic_names_the_cycle_deterministically() -> None:
-    _require_acyclic({"f": {"f._a"}, "f._a": {"f._b"}, "f._b": set()})
+    require_acyclic({"f": {"f._a"}, "f._a": {"f._b"}, "f._b": set()})
     graph = {"f": set(), "f._c": {"f._d"}, "f._d": {"f._e"}, "f._e": {"f._c"}}
     with pytest.raises(ModuleRefreshError) as first:
-        _require_acyclic(graph)
+        require_acyclic(graph)
     with pytest.raises(ModuleRefreshError) as second:
-        _require_acyclic(dict(reversed(list(graph.items()))))
+        require_acyclic(dict(reversed(list(graph.items()))))
     assert str(first.value) == str(second.value)
     assert "f._c -> f._d -> f._e -> f._c" in str(first.value)
 
@@ -230,11 +226,11 @@ def test_require_acyclic_is_iterative_beyond_the_recursion_limit() -> None:
     depth = sys.getrecursionlimit() + 500
     graph: dict[str, set[str]] = {f"f._{i}": {f"f._{i + 1}"} for i in range(depth)}
     graph[f"f._{depth}"] = set()
-    _require_acyclic(graph)
+    require_acyclic(graph)
 
     graph[f"f._{depth}"] = {"f._0"}
     with pytest.raises(ModuleRefreshError, match="cycl"):
-        _require_acyclic(graph)
+        require_acyclic(graph)
 
 
 def test_require_acyclic_expands_each_module_once_across_shared_dependencies() -> None:
@@ -257,7 +253,7 @@ def test_require_acyclic_expands_each_module_once_across_shared_dependencies() -
         graph.update({name: set(lower) for name in upper})
     graph.update({name: set() for name in layers[-1]})
 
-    _require_acyclic(graph)
+    require_acyclic(graph)
 
     assert sorted(expanded) == sorted(graph)
 
@@ -274,7 +270,7 @@ def test_refresh_follows_a_fixed_lazy_acyclic_helper_chain(family) -> None:
     family.write(f"h{_LAZY_CHAIN_DEPTH}", "VALUE = 1\n")
     family.write("strat", "from . import h0\nVALUE = 1\n")
 
-    graph = _static_closure(family.package, f"{family.package}.strat")
+    graph = static_closure(family.package, f"{family.package}.strat")
     _refresh(family)
 
     chain = [f"{family.package}.h{i}" for i in range(_LAZY_CHAIN_DEPTH + 1)]
@@ -383,7 +379,7 @@ def test_any_symlink_in_the_family_tree_fails_closed_before_any_purge(
     def discovery(*_args: object) -> None:
         raise AssertionError("source discovery ran before the family-tree symlink scan")
 
-    monkeypatch.setattr(module_refresh, "_static_closure", discovery)
+    monkeypatch.setattr(module_refresh, "static_closure", discovery)
     with pytest.raises(ModuleRefreshError, match="symlink"):
         _refresh(family)
 
@@ -424,7 +420,7 @@ def test_lexical_parent_traversal_is_refused_before_normalization_erases_a_symli
 def test_any_raw_parent_component_is_refused(tmp_path, suffix) -> None:
     (tmp_path / "sub" / "x").mkdir(parents=True)
     with pytest.raises(ModuleRefreshError, match="traversal"):
-        module_refresh._require_unlinked(str(tmp_path / "sub") + os.sep + suffix, "fam")
+        module_source_scan.require_unlinked(str(tmp_path / "sub") + os.sep + suffix, "fam")
 
 
 def test_a_symlinked_search_location_is_refused_before_source_discovery(
@@ -438,7 +434,7 @@ def test_a_symlinked_search_location_is_refused_before_source_discovery(
     def discovery(*_args: object) -> None:
         raise AssertionError("source discovery ran before the search-location check")
 
-    monkeypatch.setattr(module_refresh, "_static_closure", discovery)
+    monkeypatch.setattr(module_refresh, "static_closure", discovery)
     with pytest.raises(ModuleRefreshError, match="symlink"):
         _refresh(family)
 
@@ -525,7 +521,7 @@ def test_failed_preflight_rolls_back_cold_parent_imports(
         def interrupted(*_args: object) -> None:
             raise KeyboardInterrupt
 
-        monkeypatch.setattr(module_refresh, "_static_closure", interrupted)
+        monkeypatch.setattr(module_refresh, "static_closure", interrupted)
     package = f"{top}.mid.fam"
     try:
         if warm_top:
@@ -701,7 +697,7 @@ def test_importable_non_source_family_entries_fail_closed_before_any_purge(
     def discovery(*_args: object) -> None:
         raise AssertionError("source discovery ran before the family-tree entry scan")
 
-    monkeypatch.setattr(module_refresh, "_static_closure", discovery)
+    monkeypatch.setattr(module_refresh, "static_closure", discovery)
     with pytest.raises(ModuleRefreshError, match="non-source"):
         _refresh(family)
 
