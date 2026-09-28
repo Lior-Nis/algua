@@ -672,6 +672,40 @@ These identities are non-cyclic. An environment-only change does not change `bun
   so a valid module cannot crash repository hygiene with `RecursionError` (Todoist
   6hfPWRXC8MMwMrcG) [tests/primitives/test_scoped_walk.py:305]
 
+#### Review findings against `962fb2e` (2026-09-28)
+
+- [ ] [Review][Patch] Preserve a post-scope creation state for externally or cross-scope invoked
+  lazy functions without reintroducing impossible sibling-path states into objects already
+  created in the defining scope (Todoist 6hfQ8rC7977WmvXp)
+  [tests/primitives/test_scoped_walk.py:558]
+- [ ] [Review][Patch] Restrict Boolean return propagation to operands that can actually be the
+  expression result, including the always-truthy identity of generator and coroutine objects
+  (Todoist 6hfQ933hvw6PVvVG) [tests/primitives/test_scoped_walk.py:1053]
+- [ ] [Review][Patch] Include assignment-expression targets owned by a lambda when deriving its
+  closure locals, without collecting targets owned by nested scopes (Todoist 6hfQ932C86Xm2fGp)
+  [tests/primitives/test_scoped_walk.py:380]
+- [ ] [Review][Patch] Treat lazy objects passed to unknown named calls as escaping unless the
+  callee is explicitly proven non-retaining, so a callee cannot stash an object until after a raw
+  rebind (Todoist 6hfQ94C4qGggxjWp) [tests/primitives/test_scoped_walk.py:436]
+- [ ] [Review][Patch] Make the lazy-flow complexity regression measure actual object-state copy
+  work rather than the number of binding keys, and remove the remaining quadratic live-object
+  update behavior (Todoist 6hfQ949RRWWvrqvp) [tests/primitives/test_scoped_walk.py:635]
+- [ ] [Review][Patch] Honor `global` and `nonlocal` declarations when deriving the actual free
+  variables of a returned lazy object, so a declaration cannot be mistaken for a safe factory
+  local (Todoist 6hfQ9Rm5JgMc3Mrp) [tests/primitives/test_scoped_walk.py:651]
+- [ ] [Review][Patch] Propagate relevant declared writes from a followed same-scope helper call,
+  with recursion and complexity bounds, before checking subsequent direct or lazy walk use
+  (Todoist 6hfQ9Rqc6X7wf35G) [tests/primitives/test_scoped_walk.py:664]
+- [ ] [Review][Patch] Distinguish constructing or truth-testing a temporary lazy object from
+  advancing it, so `bool(gen())` does not execute the generator body (Todoist
+  6hfQ9VrR8mjGPv4p) [tests/primitives/test_scoped_walk.py:626]
+- [ ] [Review][Patch] Traverse deeply nested conditional lazy-value expressions iteratively under
+  an explicit node bound rather than crashing repository hygiene with `RecursionError` (Todoist
+  6hfQ9Rq8R3RWMr3G) [tests/primitives/test_scoped_walk.py:389]
+- [ ] [Review][Patch] Project return-summary cache keys onto names relevant to the summarized
+  function so unrelated accumulated definitions cannot cause quadratic cache growth (Todoist
+  6hfQ9RmmQ7HwXJ3p) [tests/primitives/test_scoped_walk.py:643]
+
 ## Development notes
 
 - Prefer focused modules: `registry/artifact_contract.py`, `registry/frozen_source.py`,
