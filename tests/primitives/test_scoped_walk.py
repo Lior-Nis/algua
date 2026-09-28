@@ -274,6 +274,19 @@ def _irrefutable(case: ast.match_case) -> bool:
     )
 
 
+def _continue_from(bindings: Bindings, ends: list[tuple[Bindings, bool]]) -> bool:
+    """Continue from the join of the ends a normal path leaves; report whether there is one.
+
+    With none, nothing after the construct runs, but a function it calls still reads the names
+    it reached, so the join of every end is kept for late-bound function bodies.
+    """
+    leaving = [state for state, falls in ends if falls]
+    joined = _join(*(leaving or [state for state, _ in ends]))
+    bindings.clear()
+    bindings.update(joined)
+    return bool(leaving)
+
+
 class _WalkReferences:
     """Statement-ordered, scope-aware resolution of every target a name may hold on some path.
 
@@ -287,22 +300,29 @@ class _WalkReferences:
     `importlib.import_module`, `vars`, `globals`, `exec`, computed attribute names) is out of
     scope: this is a guard against accidental or casual bypass, not arbitrary dynamic execution.
 
-    Paths are joined conservatively. `if` branches start from the state before them; a `match`
-    case also starts after earlier cases failed to match, and control falls through them unless
-    the last is irrefutable. A loop body runs zero or more times, each iteration starting from
-    the entry state or any state that reaches the next one (the body's end or a `continue`), and
-    the loop leaves through its `else` or a `break`. A `try` handler may start from any point of
-    the body (an `except*` handler also after an earlier one), `else` follows the body alone, and
-    `finally` may start from any point of the whole statement. `return` and `raise` are not
-    modeled, so a join may include a path that cannot run, which only ever adds a flag. Only
-    targets on the way to the raw walk or `getattr` are kept, which keeps loop fixpoints finite.
+    Paths are joined conservatively, and only where a normal path continues. `break` and
+    `continue` end their path (later statements of the block are unreachable and not visited)
+    and carry its state to the loop's exit or next iteration, first through every enclosing
+    `finally`; a `finally` that does not complete replaces the transfer. `if` branches start from
+    the state before them; a `match` case also starts after earlier cases failed to match, and
+    control falls through them unless the last is irrefutable. A loop body runs zero or more
+    times, each iteration starting from the entry state or any state that reaches the next one
+    (the body's end or a `continue`); the loop leaves through its `else` once its test fails or
+    its iterable is exhausted, or through a `break`. A literal `while True` never fails its
+    test, so only a `break` leaves it and its `else` is unreachable. A `try` handler may start
+    from any point of the body (an `except*` handler also after an earlier one), `else` follows
+    the body alone, and `finally` may start from any point of the whole statement. `return` and
+    `raise` are not modeled, so a join may include a path that cannot run, which only ever adds
+    a flag. Only targets on the way to the raw walk or `getattr` are kept, which keeps loop
+    fixpoints finite.
     """
 
     def __init__(self, package: str) -> None:
         self._package = package
         self.uses: list[str] = []
         self._watchers: list[Bindings] = []  # every state reached inside an enclosing `try`
-        self._loops: list[tuple[Bindings, Bindings]] = []  # each open loop's break/continue states
+        # the break/continue states carried to each open loop, or first to an enclosing `finally`
+        self._loops: list[tuple[list[Bindings], list[Bindings]]] = []
 
     def module(self, tree: ast.Module) -> list[str]:
         self._scope(tree.body, {"getattr": frozenset({BUILTIN_GETATTR})})
@@ -320,11 +340,15 @@ class _WalkReferences:
 
     def _block(
         self, body: list[ast.stmt], bindings: Bindings, deferred: list[Function],
-    ) -> None:
+    ) -> bool:
+        """Visit ``body`` in order; report whether a normal path reaches its end."""
         for statement in body:
-            self._statement(statement, bindings, deferred)
+            falls = self._statement(statement, bindings, deferred)
             for reached in self._watchers:
                 _merge(reached, bindings)
+            if not falls:
+                return False  # the rest of the block is unreachable
+        return True
 
     def _resolved(self, node: ast.expr | None, bindings: Bindings) -> frozenset[str]:
         dotted = None if node is None else _dotted(node)
@@ -389,11 +413,15 @@ class _WalkReferences:
     def _loop(
         self, node: ast.For | ast.AsyncFor | ast.While, bindings: Bindings,
         deferred: list[Function],
-    ) -> None:
+    ) -> bool:
         if not isinstance(node, ast.While):
             self._expression(node.iter, bindings, deferred)
-        breaks: Bindings = {}
-        continues: Bindings = {}
+        endless = (
+            isinstance(node, ast.While) and isinstance(node.test, ast.Constant)
+            and node.test.value is True
+        )
+        breaks: list[Bindings] = []
+        continues: list[Bindings] = []
         head = dict(bindings)  # every state an iteration may start from
         while True:
             tested = dict(head)
@@ -403,61 +431,76 @@ class _WalkReferences:
             if not isinstance(node, ast.While):
                 self._unbind(node.target, body)
             self._loops.append((breaks, continues))
-            self._block(node.body, body, deferred)
+            falls = self._block(node.body, body, deferred)
             self._loops.pop()
-            following = _join(head, body, continues)
+            following = _join(head, *([body] if falls else []), *continues)
             if following == head:
                 break
             head = following
-        self._block(node.orelse, tested, deferred)
-        bindings.clear()
-        bindings.update(_join(tested, breaks))
+        ends = [(state, True) for state in breaks]
+        if endless:
+            ends.append((head, False))
+        else:
+            ends.append((tested, self._block(node.orelse, tested, deferred)))
+        return _continue_from(bindings, ends)
 
     def _try(
         self, node: ast.Try | ast.TryStar, bindings: Bindings, deferred: list[Function],
-    ) -> None:
+    ) -> bool:
         anywhere, raised = dict(bindings), dict(bindings)
+        transfers: tuple[list[Bindings], list[Bindings]] = ([], [])
+        if node.finalbody:
+            self._loops.append(transfers)  # a break or continue leaves through `finally` first
         self._watchers += [anywhere, raised]
-        self._block(node.body, bindings, deferred)
+        body_falls = self._block(node.body, bindings, deferred)
         self._watchers.pop()
-        ends: list[Bindings] = []
+        ends: list[tuple[Bindings, bool]] = []
         for handler in node.handlers:
             # the `except*` handlers of one exception group can each run, in order
-            state = _join(raised, *ends) if isinstance(node, ast.TryStar) else dict(raised)
+            state = (
+                _join(raised, *(end for end, _ in ends)) if isinstance(node, ast.TryStar)
+                else dict(raised)
+            )
             self._expression(handler.type, state, deferred)
             if handler.name:
                 state.pop(handler.name, None)
-            self._block(handler.body, state, deferred)
+            falls = self._block(handler.body, state, deferred)
             if handler.name:
                 state.pop(handler.name, None)  # Python deletes it as the handler ends
-            ends.append(state)
-        self._block(node.orelse, bindings, deferred)
+            ends.append((state, falls))
+        ends.append((bindings, body_falls and self._block(node.orelse, bindings, deferred)))
         self._watchers.pop()
-        for state in ends:
-            _merge(bindings, state)
-        if node.finalbody:
-            self._block(node.finalbody, anywhere, deferred)  # leaving by an exception or return
-            self._block(node.finalbody, bindings, deferred)
+        falls = _continue_from(bindings, ends)
+        if not node.finalbody:
+            return falls
+        self._loops.pop()
+        self._block(node.finalbody, anywhere, deferred)  # leaving by an exception or return
+        outer = self._loops[-1] if self._loops else ([], [])
+        for captured, target in zip(transfers, outer, strict=True):
+            if captured:
+                state = _join(*captured)
+                if self._block(node.finalbody, state, deferred):
+                    target.append(state)  # otherwise the transfer in `finally` replaces it
+        return falls and self._block(node.finalbody, bindings, deferred)
 
-    def _match(self, node: ast.Match, bindings: Bindings, deferred: list[Function]) -> None:
+    def _match(self, node: ast.Match, bindings: Bindings, deferred: list[Function]) -> bool:
         self._expression(node.subject, bindings, deferred)
         unmatched = dict(bindings)
-        ends: list[Bindings] = []
+        ends: list[tuple[Bindings, bool]] = []
         for case in node.cases:
             state = dict(unmatched)
             self._unbind(case.pattern, state)
             self._expression(case.guard, state, deferred)
             _merge(unmatched, state)  # a pattern or guard may fail after binding captures
-            self._block(case.body, state, deferred)
-            ends.append(state)
+            ends.append((state, self._block(case.body, state, deferred)))
         if not _irrefutable(node.cases[-1]):
-            ends.append(unmatched)
-        bindings.clear()
-        bindings.update(_join(*ends))
+            ends.append((unmatched, True))
+        return _continue_from(bindings, ends)
 
     def _statement(
         self, node: ast.stmt, bindings: Bindings, deferred: list[Function],
-    ) -> None:
+    ) -> bool:
+        """Analyze ``node``; report whether a normal path leaves it."""
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.asname:
@@ -510,31 +553,34 @@ class _WalkReferences:
             self._expression(node.target, bindings, deferred)
             self._unbind(node.target, bindings)
         elif isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
-            self._loop(node, bindings, deferred)
-        elif isinstance(node, (ast.Break, ast.Continue)) and self._loops:
-            breaks, continues = self._loops[-1]
-            _merge(breaks if isinstance(node, ast.Break) else continues, bindings)
+            return self._loop(node, bindings, deferred)
+        elif isinstance(node, (ast.Break, ast.Continue)):
+            if self._loops:
+                breaks, continues = self._loops[-1]
+                (breaks if isinstance(node, ast.Break) else continues).append(dict(bindings))
+            return False
         elif isinstance(node, (ast.With, ast.AsyncWith)):
             for item in node.items:
                 self._expression(item.context_expr, bindings, deferred)
                 if item.optional_vars is not None:
                     self._unbind(item.optional_vars, bindings)
-            self._block(node.body, bindings, deferred)
+            return self._block(node.body, bindings, deferred)
         elif isinstance(node, ast.If):
             self._expression(node.test, bindings, deferred)
             orelse = dict(bindings)
-            self._block(node.body, bindings, deferred)
-            self._block(node.orelse, orelse, deferred)
-            _merge(bindings, orelse)
+            falls = self._block(node.body, bindings, deferred)
+            return _continue_from(
+                bindings, [(bindings, falls), (orelse, self._block(node.orelse, orelse, deferred))])
         elif isinstance(node, (ast.Try, ast.TryStar)):
-            self._try(node, bindings, deferred)
+            return self._try(node, bindings, deferred)
         elif isinstance(node, ast.Match):
-            self._match(node, bindings, deferred)
+            return self._match(node, bindings, deferred)
         elif isinstance(node, ast.Delete):
             for target in node.targets:
                 self._unbind(target, bindings)
         else:
             self._expression(node, bindings, deferred)
+        return True
 
 
 def _direct_walk_uses(source: str, module: str) -> list[str]:
@@ -717,6 +763,18 @@ REACHED_ON_SOME_PATH = {
     "for-break-skips-else": (
         "for item in items:\n    break\nelse:\n    w = make()\nw.bounded_walk(root)\n"),
     "while-break-skips-else": "while c:\n    break\nelse:\n    w = make()\nw.bounded_walk(root)\n",
+    "break-through-finally-carries-its-alias": (
+        "m = make()\nfor item in items:\n    try:\n        break\n    finally:\n        m = w\n"
+        "    m = make()\nm.bounded_walk(root)\n"),
+    "continue-through-finally-carries-its-alias": (
+        "m = make()\nfor item in items:\n    m.bounded_walk(root)\n    try:\n        continue\n"
+        "    finally:\n        m = w\n    m = make()\n"),
+    "function-called-inside-an-endless-loop": (
+        "m = make()\ndef walk(root):\n    return m.bounded_walk(root)\n"
+        "while True:\n    m = w\n    serve()\n"),
+    "break-in-a-branch-carries-its-alias-out": (
+        "m = make()\nfor item in items:\n    if c:\n        m = w\n        break\n"
+        "m.bounded_walk(root)\n"),
     "async-for-runs-zero-times": (
         "async def walk(items, root):\n    import algua.primitives.bounded_walk as v\n"
         "    async for item in items:\n        v = make()\n    v.bounded_walk(root)\n"),
@@ -759,6 +817,52 @@ NOT_REACHED_ON_ANY_PATH = {
     "rebound-before-use-in-for": "for item in items:\n    w = make()\n    w.bounded_walk(root)\n",
     "loop-else-without-break-rebinds": (
         "for item in items:\n    pass\nelse:\n    w = make()\nw.bounded_walk(root)\n"),
+    "use-after-break-is-unreachable": "for item in items:\n    break\n    w.bounded_walk(root)\n",
+    "alias-after-break-is-unreachable": (
+        "m = make()\nfor item in items:\n    break\n    m = w\nm.bounded_walk(root)\n"),
+    "use-after-continue-is-unreachable": (
+        "for item in items:\n    continue\n    w.bounded_walk(root)\n"),
+    "alias-after-continue-is-unreachable": (
+        "m = make()\nfor item in items:\n    continue\n    m = w\nm.bounded_walk(root)\n"),
+    "break-through-finally-rebinds": (
+        "m = make()\nfor item in items:\n    try:\n        m = w\n        break\n"
+        "    finally:\n        m = make()\nm.bounded_walk(root)\n"),
+    "continue-through-finally-rebinds": (
+        "m = make()\nfor item in items:\n    try:\n        m = w\n        continue\n"
+        "    finally:\n        m = make()\nm.bounded_walk(root)\n"),
+    "while-true-rebinds-before-break": (
+        "while True:\n    w = make()\n    break\nw.bounded_walk(root)\n"),
+    "while-true-else-is-unreachable": (
+        "m = make()\nwhile True:\n    break\nelse:\n    m = w\nm.bounded_walk(root)\n"),
+    "use-after-an-endless-loop-is-unreachable": "while True:\n    serve()\nw.bounded_walk(root)\n",
+    "use-after-branches-that-both-transfer-is-unreachable": (
+        "for item in items:\n    if c:\n        break\n    else:\n        continue\n"
+        "    w.bounded_walk(root)\n"),
+    "branch-that-breaks-is-not-merged": (
+        "m = make()\nfor item in items:\n    if c:\n        m = w\n        break\n"
+        "    m.bounded_walk(root)\n"),
+    "handler-that-breaks-is-not-merged": (
+        "m = make()\nfor item in items:\n    try:\n        pass\n    except Exception:\n"
+        "        m = w\n        break\n    m.bounded_walk(root)\n"),
+    "case-that-breaks-is-not-merged": (
+        "m = make()\nfor item in items:\n    match value:\n        case 1:\n            m = w\n"
+        "            break\n    m.bounded_walk(root)\n"),
+    "transfer-in-finally-overrides-a-break": (
+        "m = make()\nwhile True:\n    try:\n        m = w\n        break\n    finally:\n"
+        "        continue\nm.bounded_walk(root)\n"),
+    "break-does-not-reach-the-next-iteration": (
+        "m = make()\nfor item in items:\n    m.bounded_walk(root)\n    m = w\n    break\n"),
+    "use-after-a-loop-whose-else-breaks-is-unreachable": (
+        "for group in groups:\n    for item in group:\n        pass\n    else:\n        break\n"
+        "    w.bounded_walk(root)\n"),
+    "use-after-a-finally-that-breaks-is-unreachable": (
+        "for item in items:\n    try:\n        pass\n    finally:\n        break\n"
+        "    w.bounded_walk(root)\n"),
+    "else-after-a-body-that-breaks-is-unreachable": (
+        "for item in items:\n    try:\n        break\n    except Exception:\n        pass\n"
+        "    else:\n        w.bounded_walk(root)\n"),
+    "use-after-a-with-that-breaks-is-unreachable": (
+        "for item in items:\n    with lock:\n        break\n    w.bounded_walk(root)\n"),
     "body-and-handler-both-rebind": (
         "try:\n    w = make()\nexcept Exception:\n    w = other()\nw.bounded_walk(root)\n"),
     "handler-does-not-see-else-alias": (
