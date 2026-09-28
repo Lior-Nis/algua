@@ -34,6 +34,7 @@ from algua.registry.planner_environment_inventory import (
     scrubbed_environment,
     verify_environment,
 )
+from algua.registry.planner_environment_outage import is_locked_wheel_outage, locked_wheels
 
 CREATE_FLAGS = (
     "uv", "venv", "--relocatable", "--python", "<exact-current-interpreter>",
@@ -125,9 +126,13 @@ def validate_lock(raw: bytes) -> None:
                 raise EnvironmentIncompatible("locked wheel metadata is invalid")
             url = wheel.get("url")
             digest = wheel.get("hash")
-            parsed = urlsplit(url) if isinstance(url, str) else None
+            try:
+                parsed = urlsplit(url) if isinstance(url, str) else None
+                netloc = parsed.hostname if parsed is not None else None
+            except ValueError as exc:
+                raise EnvironmentIncompatible("locked wheel URL is malformed") from exc
             if (
-                parsed is None or parsed.scheme != "https" or not parsed.netloc
+                parsed is None or parsed.scheme != "https" or not netloc
                 or parsed.username is not None or parsed.password is not None or parsed.fragment
                 or not isinstance(digest, str)
                 or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
@@ -223,14 +228,11 @@ def provision_environment(
     sync_env = {**base_env, "VIRTUAL_ENV": str(environment)}
     try:
         synced = _run_uv(runner, sync, cwd=build_root, env=sync_env)
-    except subprocess.TimeoutExpired as exc:
-        raise EnvironmentUnavailable(
-            "a compatible locked wheel is temporarily unavailable") from exc
     except _UV_FAILURES as exc:
         raise EnvironmentIncompatible("locked environment provisioning failed") from exc
     if synced.returncode != 0:
-        diagnostic = synced.stderr.decode("utf-8", "replace").lower()
-        if any(token in diagnostic for token in ("download", "network", "timeout", "connection")):
+        wheels = locked_wheels(_by_path(inputs)["uv.lock"].data)
+        if is_locked_wheel_outage(synced.stdout, synced.stderr, wheels):
             raise EnvironmentUnavailable("a compatible locked wheel is temporarily unavailable")
         raise EnvironmentIncompatible("locked environment provisioning failed")
     inventory = inventory_environment(environment)

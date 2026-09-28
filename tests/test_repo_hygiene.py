@@ -271,6 +271,7 @@ INTEGRITY_CRITICAL_MODULES = frozenset(
         "algua/registry/planner_environment.py",
         "algua/registry/planner_environment_inventory.py",
         "algua/registry/planner_environment_errors.py",
+        "algua/registry/planner_environment_outage.py",
         "algua/registry/artifact_preparation.py",
         "algua/registry/artifact_recording.py",
         "algua/registry/artifact_verification.py",
