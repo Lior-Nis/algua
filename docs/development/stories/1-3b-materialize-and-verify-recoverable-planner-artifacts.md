@@ -302,28 +302,28 @@ These identities are non-cyclic. An environment-only change does not change `bun
   fixed filesystem closure for integration so the normal root gate does not create thousands of
   source files or scale with a mutable interpreter recursion limit
   [tests/test_module_refresh.py:264]
-- [ ] [Review][Patch] Restore parent bindings changed by transient imports even when attempted code
+- [x] [Review][Patch] Restore parent bindings changed by transient imports even when attempted code
   removes its own child entry from `sys.modules` before failing
   [algua/primitives/module_refresh.py:116]
-- [ ] [Review][Patch] Fail preflight on importable sourceless bytecode or other non-source family
+- [x] [Review][Patch] Fail preflight on importable sourceless bytecode or other non-source family
   entries that a dynamic import could execute outside the statically validated source closure
   [algua/primitives/module_refresh.py:146]
-- [ ] [Review][Patch] Constrain fresh package search locations to the exact prevalidated family
+- [x] [Review][Patch] Constrain fresh package search locations to the exact prevalidated family
   roots before any child import so package `__init__` cannot extend `__path__` into an unscanned tree
   [algua/primitives/module_refresh.py:91]
-- [ ] [Review][Patch] Reject a nested refresh transaction on the same thread while retaining safe
+- [x] [Review][Patch] Reject a nested refresh transaction on the same thread while retaining safe
   same-thread re-entrancy for ordinary serialized imports
   [algua/primitives/module_refresh.py:43]
-- [ ] [Review][Patch] Reinitialize the private refresh lock in a forked child so a vanished owner
+- [x] [Review][Patch] Reinitialize the private refresh lock in a forked child so a vanished owner
   cannot leave every later strategy load permanently blocked
   [algua/primitives/module_refresh.py:44]
-- [ ] [Review][Patch] Translate family-tree inspection `OSError` failures into the stable
+- [x] [Review][Patch] Translate family-tree inspection `OSError` failures into the stable
   `ModuleRefreshError` contract with bounded non-host-specific diagnostics
   [algua/primitives/module_refresh.py:150]
-- [ ] [Review][Patch] Limit rollback namespace snapshots to package/direct-parent binding state so
+- [x] [Review][Patch] Limit rollback namespace snapshots to package/direct-parent binding state so
   refresh cost does not scale with every global in every loaded scientific module
   [algua/primitives/module_refresh.py:102]
-- [ ] [Review][Patch] Replace the deadlock regression's scheduling sleep with an event handshake
+- [x] [Review][Patch] Replace the deadlock regression's scheduling sleep with an event handshake
   proving the refresher reached the contested import before the blocked importer is released
   [tests/test_module_refresh.py:613]
 
@@ -459,6 +459,27 @@ uv run lint-imports
   discovery (the tree case now forbids discovery before refusal) and a trailing `..` ignored (a
   direct raw-component case). All 25 bundled strategies still refresh through
   `load_strategy_config`.
+- Seventh review round: patches 1–7 first failed red (20 new cases). With the transient child
+  imported twice and its own `sys.modules` entry popped each time, both parent shapes kept the
+  discarded module bound (absent-before and a pre-existing `'pre-existing'` value); discovery ran
+  before any refusal for a sourceless `dyn.pyc`, an extension-suffixed file, a bytecode-only
+  subpackage and `__pycache__/evil.pyc`; a fresh `__init__` (append, prepend-and-shadow), a
+  subpackage, a member rebinding its own `__path__` and a deferred subpackage import all executed
+  code outside the scanned root; a same-thread nested refresh dropped the module the outer refresh
+  was executing (`KeyError`); a forked child could not acquire a lock held by a vanished thread
+  (child exit 7); `scandir`, `DirEntry` and ancestor `lstat` failures leaked a raw
+  `PermissionError` naming the host path, including through `load_strategy_config`; and both a
+  successful and a failed refresh read an unrelated warm module's `__dict__`. The same-thread
+  `serialized_import` case is a preservation proof and passed before and after. Patch 8 is
+  test-only: reinstating the global import lock still deadlocks the handshake probe (`returncode
+  3`), and five clean runs pass without any sleep. Patch 2 pushed `module_refresh.py` to 310 lines,
+  over the size-ratchet floor, so the static non-executing preflight moved unchanged into the
+  protected `module_source_scan.py` before patch 3's green. Twenty-eight mutations were run:
+  twenty-five are killed and three are equivalent and were removed from the code (a parent-identity
+  condition on recording, a list-type check on search paths, resolution through an already-equal
+  given path). Two guard branches (no fallback to later finders, source-loader only) initially
+  survived and were closed with a later-finder and a namespace-directory case. All 25 bundled
+  strategies still refresh through `load_strategy_config`.
 
 ### Completion Notes
 
@@ -544,6 +565,28 @@ uv run lint-imports
   and small. Static cycles still fail closed, the scope stays source modules only, and the
   same-UID hostile filesystem swap remains an accepted residual. Golden digest vectors, schema,
   working-tree descriptors and every live, authority, deployment and capital wall are unchanged.
+- Seventh review round complete: one first `sys.meta_path` guard spans the whole transaction.
+  Before the import system loads any module it records that module's direct parent binding as
+  first seen (read from the parent's own dictionary), and rollback restores every recorded binding
+  to its prior value or absence even when attempted code removed the child's own `sys.modules`
+  entry; the whole-namespace snapshot of every loaded module is gone, so rollback state is
+  `sys.modules` plus those bindings. Once preflight passes, the guard resolves every family module
+  itself from the exact scanned root: a child whose parent's search path deviates is refused
+  before it executes, a family name missing from the root is never supplied by another finder,
+  and a non-source (including namespace) entry is refused; a fresh family package whose
+  `__path__` still deviates at commit fails closed, so a later lazy import cannot use it. The
+  family must be a regular single-location package. The tree scan also refuses any importable
+  sourceless or extension entry (a loader suffix on an undotted stem), while tagged
+  `__pycache__` bytecode and data files stay admissible. A same-thread nested refresh fails with
+  `ModuleRefreshError` while a same-thread `serialized_import` stays re-entrant; the private lock
+  is reinitialized in a forked child. Tree-inspection `OSError`s become a bounded
+  `ModuleRefreshError` naming only the error class and errno, without a chained host path, which
+  the loader maps to `StrategyNotFound`. The static preflight now lives in the protected
+  `algua/primitives/module_source_scan.py`. The import-quiescent precondition, source-only and
+  static-cycle fail-closed policy and the same-UID hostile swap residual are unchanged; arbitrary
+  import concurrency, sandboxing, mount cycles, memory exhaustion and external import side
+  effects stay out of scope. Golden digest vectors, schema, working-tree descriptors and every
+  live, authority, deployment and capital wall are unchanged.
 
 ### File List
 
@@ -569,6 +612,7 @@ uv run lint-imports
 - `algua/registry/store/deployment.py`
 - `algua/strategies/loader.py`
 - `algua/primitives/module_refresh.py`
+- `algua/primitives/module_source_scan.py`
 - `CODEOWNERS`
 - `docs/development/sprint-status.yaml`
 - `docs/contracts/cli-error-envelope.md`
@@ -621,3 +665,9 @@ uv run lint-imports
   rollback, complete no-follow family-tree symlink refusal, raw `..` refusal, pre-discovery
   snapshot with preflight rollback, fixed-size lazy-chain integration case); the full 4,413-test
   root gate, ruff, mypy and all 28 import contracts pass.
+- 2026-09-28: Addressed all 8 seventh-round review patches test-first (import-guard-recorded
+  direct-parent rollback without whole-namespace copies, importable non-source entry refusal,
+  exact-root confinement of fresh family imports, same-thread nested-refresh refusal, fork-safe
+  refresh lock, bounded tree-inspection `OSError` mapping, deterministic deadlock handshake) and
+  carved the protected `module_source_scan.py`; the full 4,436-test root gate, ruff, mypy and all
+  28 import contracts pass.
