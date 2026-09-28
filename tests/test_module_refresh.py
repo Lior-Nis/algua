@@ -592,7 +592,7 @@ def test_a_supported_serialized_import_waits_for_an_in_progress_refresh(family) 
 
 
 _DEADLOCK_PROBE = """
-import importlib, os, sys, threading, time
+import importlib, os, sys, threading
 sys.path.insert(0, sys.argv[1])
 from algua.primitives.module_refresh import refresh_package_closure
 import gate_probe
@@ -610,7 +610,10 @@ refresher = threading.Thread(
     target=run, args=(lambda: refresh_package_closure("top_probe.fam", "top_probe.fam.strat"),),
     daemon=True)
 refresher.start()
-time.sleep(0.5)  # the refresh now waits for slow_probe, which another thread is initializing
+# Handshake: the refresher sets at_import inside the refresh transaction, immediately before its
+# contested import of slow_probe (still being initialized by the importer), and only then is the
+# importer released to need its own new import.
+assert gate_probe.at_import.wait(10)
 gate_probe.go.set()
 importer.join(10)
 refresher.join(10)
@@ -628,9 +631,11 @@ def test_refresh_does_not_deadlock_against_an_import_already_in_progress(tmp_pat
     (tmp_path / "top_probe" / "fam").mkdir(parents=True)
     (tmp_path / "top_probe" / "__init__.py").write_text("")
     (tmp_path / "top_probe" / "fam" / "__init__.py").write_text("")
-    (tmp_path / "top_probe" / "fam" / "strat.py").write_text("import slow_probe\nVALUE = 1\n")
+    (tmp_path / "top_probe" / "fam" / "strat.py").write_text(
+        "import gate_probe\ngate_probe.at_import.set()\nimport slow_probe\nVALUE = 1\n")
     (tmp_path / "gate_probe.py").write_text(
-        "import threading\nentered = threading.Event()\ngo = threading.Event()\n")
+        "import threading\nentered = threading.Event()\nat_import = threading.Event()\n"
+        "go = threading.Event()\n")
     (tmp_path / "slow_probe.py").write_text(
         "import gate_probe\ngate_probe.entered.set()\nassert gate_probe.go.wait(10)\n"
         "import late_probe\n")
