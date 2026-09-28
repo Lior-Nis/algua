@@ -375,6 +375,14 @@ These identities are non-cyclic. An environment-only change does not change `bun
   including loader state, location state, uninitialized submodules and the required final
   initialization flag, so a committed spec cannot retain forged import machinery state
   [algua/primitives/module_commit_check.py:21]
+- [ ] [Review][Patch] Latch any duplicate family-resolution attempt as a transaction-wide
+  violation so executed code cannot catch the refusal, restore apparently valid bindings and still
+  commit a transaction that violated the one-resolution invariant
+  [algua/primitives/module_refresh.py:173]
+- [ ] [Review][Patch] Distinguish an absent `submodule_search_locations` attribute from its valid
+  `None` value for ordinary modules so deletion of required nullable spec metadata always refuses
+  commit and rolls back
+  [algua/primitives/module_commit_check.py:99]
 
 ## Development notes
 
