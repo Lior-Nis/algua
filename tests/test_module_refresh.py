@@ -1799,3 +1799,45 @@ def test_distinct_names_and_repeated_misses_resolve_normally_in_every_transactio
         fresh = refresh_package_closure(family.package, f"{family.package}.strat")
         assert fresh.VALUE == 3 and family.mod("strat") is fresh
         assert fresh.helper is family.mod("helper") and fresh.inner is family.mod("sub.inner")
+
+
+_SPEC_BOOKKEEPING_FORGERIES = {
+    "loader-state-set": (
+        "from . import helper\nhelper.__spec__.loader_state = {'origin': '/elsewhere'}\n"),
+    "loader-state-removed": "from . import helper\ndel helper.__spec__.loader_state\n",
+    "own-loader-state-set": "__spec__.loader_state = 'forged'\n",
+    "cached-removed": "from . import helper\ndel helper.__spec__._cached\n",
+    "origin-removed": "from . import helper\ndel helper.__spec__.origin\n",
+    "has-location-cleared": "from . import helper\nhelper.__spec__.has_location = False\n",
+    "set-fileattr-truthy-int": "from . import helper\nhelper.__spec__._set_fileattr = 1\n",
+    "set-fileattr-removed": "from . import helper\ndel helper.__spec__._set_fileattr\n",
+    "uninitialized-submodule-forged": (
+        "from . import helper\nhelper.__spec__._uninitialized_submodules.append('ghost')\n"),
+    "package-uninitialized-submodule-forged": (
+        "import sys\n"
+        "sys.modules[__package__].__spec__._uninitialized_submodules.append('ghost')\n"),
+    "package-uninitialized-submodules-replaced": (
+        "import sys\nspec = sys.modules[__package__].__spec__\n"
+        "spec._uninitialized_submodules = list(spec._uninitialized_submodules)\n"),
+    "uninitialized-submodules-equal-subclass": (
+        "from . import helper\nhelper.__spec__._uninitialized_submodules = "
+        "type('L', (list,), {'__contains__': lambda self, item: True})()\n"),
+    "uninitialized-submodules-removed": (
+        "from . import helper\ndel helper.__spec__._uninitialized_submodules\n"),
+    "initializing-stuck": "from . import helper\nhelper.__spec__._initializing = True\n",
+    "initializing-falsy-zero": "from . import helper\nhelper.__spec__._initializing = 0\n",
+    "initializing-removed": "from . import helper\ndel helper.__spec__._initializing\n",
+    "package-initializing-stuck": (
+        "import sys\nsys.modules[__package__].__spec__._initializing = True\n"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_SPEC_BOOKKEEPING_FORGERIES))
+def test_forged_module_spec_bookkeeping_never_commits(family, case) -> None:
+    """The guard records a handed-out spec's import-machinery bookkeeping before importlib sees
+    it: no loader state, its location flag and its own empty uninitialized-submodules list. At
+    commit the spec must still carry exactly those, and the load's final ``_initializing`` must be
+    exactly ``False``: importlib legitimately sets it ``True`` while executing and ``False`` once
+    the load completes, so that completed state, not the pre-load absence, is the one required. A
+    rebound, removed, forged or merely equal replacement value rolls the transaction back."""
+    _assert_never_commits(family, _SPEC_BOOKKEEPING_FORGERIES[case])

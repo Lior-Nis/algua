@@ -27,16 +27,23 @@ class SourceSpecFacts(NamedTuple):
     origin: str | None
     cached: str | None
     search: tuple[str, ...] | None
+    located: bool  # the spec's ``_set_fileattr`` (its ``has_location``)
+    pending: list[str]  # the spec's OWN ``_uninitialized_submodules`` list object, empty
 
 
 def record_source_spec(spec: ModuleSpec, name: str) -> SourceSpecFacts:
     """The facts of the exact source spec for ``name`` about to be handed to the import system:
-    the spec and loader objects themselves plus immutable snapshots of their allowed state."""
-    loader, found = spec.loader, spec.submodule_search_locations
-    assert type(loader) is SourceFileLoader  # ``source_spec`` builds exactly this loader
+    the spec and loader objects themselves plus immutable snapshots of their allowed state,
+    including the import-machinery bookkeeping ``source_spec`` builds (no loader state, the
+    location flag and an empty uninitialized-submodules list)."""
+    loader, found, cached = spec.loader, spec.submodule_search_locations, spec.cached
+    book = vars(spec)
+    pending = book["_uninitialized_submodules"]
+    assert type(loader) is SourceFileLoader and book["loader_state"] is None
+    assert type(pending) is list and not pending and type(book["_set_fileattr"]) is bool
     return SourceSpecFacts(
-        spec, loader, tuple(vars(loader).items()), name, spec.origin, spec.cached,
-        None if found is None else tuple(found))
+        spec, loader, tuple(vars(loader).items()), name, spec.origin, cached,
+        None if found is None else tuple(found), book["_set_fileattr"], pending)
 
 
 def require_committed_family(package: str, specs: dict[str, SourceSpecFacts]) -> None:
@@ -68,17 +75,28 @@ def _intact(module: ModuleType, facts: SourceSpecFacts) -> bool:
     exactly a ``SourceFileLoader`` with its recorded instance state (so no same-shaped replacement
     or injected attribute overriding a loader operation passes); the spec still has the recorded
     name, origin, cache and search locations, and ``module`` the matching ``__name__``,
-    ``__package__``, ``__file__``, ``__cached__`` and ``__path__``. Only identity and exact-type
-    comparisons are used, never a permissive ``__eq__``."""
+    ``__package__``, ``__file__``, ``__cached__`` and ``__path__``. The spec's bookkeeping is the
+    normal COMPLETED state: no loader state, the recorded location flag, its own uninitialized-
+    submodules list (importlib appends a child while loading it and pops it after) still the
+    original object and empty, and ``_initializing`` exactly ``False`` (absent when handed out,
+    ``True`` while executing, ``False`` once the load completed). The spec is read from its own
+    dictionary; only identity and exact-type comparisons are used, never a permissive ``__eq__``."""
     spec, attrs, loader = facts.spec, vars(module), facts.loader
-    if not (type(spec) is ModuleSpec and type(loader) is SourceFileLoader
-            and spec.loader is loader and attrs.get("__loader__") is loader):
+    if not (type(spec) is ModuleSpec and type(loader) is SourceFileLoader):
+        return False
+    book = vars(spec)
+    if not (book.get("loader") is loader and attrs.get("__loader__") is loader
+            and book.get("loader_state", _ABSENT) is None
+            and book.get("_set_fileattr", _ABSENT) is facts.located
+            and book.get("_uninitialized_submodules") is facts.pending and not facts.pending
+            and book.get("_initializing", _ABSENT) is False):
         return False
     search = None if facts.search is None else list(facts.search)
     return all(_exact(value, expected) for value, expected in (
         ([list(item) for item in vars(loader).items()], [list(item) for item in facts.state]),
-        (spec.name, facts.name), (spec.origin, facts.origin), (spec.cached, facts.cached),
-        (spec.submodule_search_locations, search), (attrs.get("__name__"), facts.name),
+        (book.get("name"), facts.name), (book.get("origin"), facts.origin),
+        (book.get("_cached"), facts.cached),
+        (book.get("submodule_search_locations"), search), (attrs.get("__name__"), facts.name),
         (attrs.get("__package__"), facts.name if search else facts.name.rpartition(".")[0]),
         (attrs.get("__file__"), facts.origin), (attrs.get("__cached__"), facts.cached),
         (attrs.get("__path__", _ABSENT), _ABSENT if search is None else search)))
