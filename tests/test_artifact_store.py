@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -101,7 +102,7 @@ def test_faults_never_leave_partial_published_object(
             lambda *_args: (_ for _ in ()).throw(OSError("injected tree fsync")),
         )
     elif boundary == "rename":
-        monkeypatch.setattr(artifact_store.os, "rename", lambda *_: (_ for _ in ()).throw(
+        monkeypatch.setattr(artifact_store, "rename_noreplace", lambda *_: (_ for _ in ()).throw(
             OSError("injected rename")))
     else:
         monkeypatch.setattr(artifact_store, "fsync_parents", lambda *_args, **_kwargs: (
@@ -168,3 +169,97 @@ def test_verify_rejects_empty_directory_and_oversized_file(tmp_path: Path, monke
     monkeypatch.setattr(artifact_store, "MAX_FILE_BYTES", 1)
     with pytest.raises(ArtifactStoreError):
         verify_bundle(tmp_path, _descriptor())
+
+
+def _insert_destination_before_final_rename(
+    monkeypatch: pytest.MonkeyPatch, target: Path, occupy,
+) -> list[str]:
+    """Occupy ``target`` after the existence check, immediately before the final rename.
+
+    The racer is injected at whichever rename the store uses for final publication, then the
+    real operation runs against the now-existing destination.
+    """
+    from algua.primitives import no_replace
+
+    original_rename = os.rename
+    real_noreplace = no_replace.rename_noreplace
+    raced: list[str] = []
+
+    def racing(real):
+        def rename(source, destination, *args, **kwargs):
+            if Path(destination) == target and not raced:
+                raced.append(str(source))
+                occupy(original_rename)
+            return real(source, destination, *args, **kwargs)
+        return rename
+
+    monkeypatch.setattr(os, "rename", racing(original_rename))
+    monkeypatch.setattr(
+        artifact_store, "rename_noreplace", racing(real_noreplace), raising=False)
+    return raced
+
+
+def test_winner_inserted_after_existence_check_is_verified_not_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / _descriptor().locator
+    winner_inodes: list[int] = []
+
+    def publish_winner(original_rename) -> None:
+        winner = Path(tempfile.mkdtemp(prefix="winner-", dir=target.parent))
+        artifact_store._write_stage(winner, _files())
+        original_rename(winner, target)
+        winner_inodes.append(target.stat().st_ino)
+
+    raced = _insert_destination_before_final_rename(monkeypatch, target, publish_winner)
+
+    published = publish_bundle(tmp_path, _files(), _descriptor())
+
+    assert raced, "the destination race was never injected"
+    assert published == target
+    verify_bundle(tmp_path, _descriptor())
+    assert [target.stat().st_ino] == winner_inodes
+    assert not Path(raced[0]).exists()
+    assert not list(target.parent.glob(".stage-*"))
+
+
+def test_empty_destination_inserted_after_existence_check_is_never_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / _descriptor().locator
+
+    def occupy_empty(_original_rename) -> None:
+        target.mkdir()
+
+    raced = _insert_destination_before_final_rename(monkeypatch, target, occupy_empty)
+
+    with pytest.raises(ArtifactStoreError):
+        publish_bundle(tmp_path, _files(), _descriptor())
+
+    assert raced, "the destination race was never injected"
+    assert target.is_dir() and not any(target.iterdir())
+    assert not Path(raced[0]).exists()
+    assert not list(target.parent.glob(".stage-*"))
+
+
+def test_publication_fails_closed_without_a_no_replace_primitive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from algua.primitives import no_replace
+
+    monkeypatch.setattr(no_replace, "_load_renameat2", lambda: None)
+    original_rename = os.rename
+
+    def no_final_replacement(source, destination, *args, **kwargs):
+        if Path(destination) == tmp_path / _descriptor().locator:
+            pytest.fail("final publication used a replacement-capable rename")
+        return original_rename(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "rename", no_final_replacement)
+
+    with pytest.raises(OSError):
+        publish_bundle(tmp_path, _files(), _descriptor())
+
+    target = tmp_path / _descriptor().locator
+    assert not target.exists()
+    assert not list(target.parent.glob(".stage-*"))

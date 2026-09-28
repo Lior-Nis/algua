@@ -9,6 +9,7 @@ from pathlib import Path
 
 from algua.primitives.atomic_io import fsync_dir, fsync_file, fsync_parents
 from algua.primitives.flock import file_lock
+from algua.primitives.no_replace import rename_noreplace
 from algua.registry.artifact_store import resolve_locator
 from algua.registry.environment_contract import EnvironmentDescriptor
 from algua.registry.planner_environment import (
@@ -98,6 +99,8 @@ def publish_environment(
     lock_parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     hidden = Path(tempfile.mkdtemp(prefix=".reserve-", dir=target.parent))
     hidden.rmdir()
+    # The unique reservation cannot name an existing object, so this owned-stage relocation may
+    # use an ordinary rename; only the final publication below must refuse replacement.
     os.rename(built_environment, hidden)
     published = False
     try:
@@ -107,9 +110,13 @@ def publish_environment(
             if target.exists() or target.is_symlink():
                 verify_published_environment(root, descriptor)
             else:
-                os.rename(hidden, target)
-                published = True
-                fsync_parents(target, stop_at=root)
+                try:
+                    rename_noreplace(hidden, target)
+                except FileExistsError:
+                    verify_published_environment(root, descriptor)
+                else:
+                    published = True
+                    fsync_parents(target, stop_at=root)
         return verify_published_environment(root, descriptor)
     finally:
         if not published:

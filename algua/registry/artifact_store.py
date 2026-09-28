@@ -10,6 +10,7 @@ from pathlib import Path
 
 from algua.primitives.atomic_io import fsync_parents, fsync_tree
 from algua.primitives.flock import file_lock
+from algua.primitives.no_replace import rename_noreplace
 from algua.registry.artifact_contract import ArtifactFile, BundleDescriptor
 from algua.registry.frozen_source import MAX_BUNDLE_BYTES, MAX_FILE_BYTES, FrozenFile
 
@@ -162,7 +163,7 @@ def publish_bundle(
                 verify_bundle(root, descriptor)
             else:
                 try:
-                    os.rename(stage, target)
+                    rename_noreplace(stage, target)
                 except FileExistsError:
                     verify_bundle(root, descriptor)
                 else:
