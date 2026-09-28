@@ -281,6 +281,7 @@ INTEGRITY_CRITICAL_MODULES = frozenset(
         "algua/primitives/module_commit_check.py",
         "algua/primitives/no_replace.py",
         "algua/primitives/strict_walk.py",
+        "algua/primitives/bounded_subprocess.py",
         "algua/cli/deployment_cmd.py",
         "algua/cli/errors.py",
         "algua/portfolio/construction.py",

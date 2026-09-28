@@ -10,9 +10,11 @@ import subprocess
 import sys
 from email.parser import HeaderParser
 from pathlib import Path
+from typing import Any
 
+from algua.primitives.bounded_subprocess import OutputLimitExceeded, run_bounded
 from algua.primitives.strict_walk import strict_walk
-from algua.registry.artifact_contract import ArtifactFile
+from algua.registry.artifact_contract import ArtifactFile, canonical_json
 from algua.registry.environment_contract import (
     BASE_INTERPRETER,
     MAX_DISTRIBUTION_METADATA_BYTES,
@@ -28,6 +30,24 @@ from algua.registry.planner_environment_errors import EnvironmentIncompatible
 
 _CHUNK_SIZE = 1024 * 1024
 _SEPARATOR_RUN = re.compile(r"[-_.]+")
+_PROBE_TIMEOUT_SECONDS = 30
+_PROBE_OUTPUT_BYTES = 4096
+_PROBE_IDENTITY_FIELDS = frozenset(
+    {"implementation", "version", "cache_tag", "soabi", "platform_tag", "os_name", "machine"})
+# `-I -S`: no site module, so no `.pth` line, sitecustomize or usercustomize executes and no
+# bytecode is imported from the environment. Only the environment's direct import root (argv) is
+# added, so `find_spec('algua')` sees installed top-level packages without processing any `.pth`.
+_PROBE = (
+    "import importlib.util,json,platform,sys,sysconfig\n"
+    "sys.path.extend(sys.argv[1:])\n"
+    "print(json.dumps({'implementation':platform.python_implementation(),"
+    "'version':platform.python_version(),'cache_tag':sys.implementation.cache_tag or 'unknown',"
+    "'soabi':sysconfig.get_config_var('SOABI') or 'unknown',"
+    "'platform_tag':sysconfig.get_platform(),'os_name':platform.system().lower(),"
+    "'machine':platform.machine().lower(),"
+    "'algua':importlib.util.find_spec('algua') is not None},"
+    "sort_keys=True,separators=(',',':'),ensure_ascii=False))\n"
+)
 
 
 def scrubbed_environment(binary_path: Path, *, home: Path | None = None) -> dict[str, str]:
@@ -171,6 +191,30 @@ def inventory_environment(root: Path) -> InstalledInventory:
     return InstalledInventory(tuple(distributions), tuple(files), tuple(links))
 
 
+def _parse_probe(raw: bytes) -> tuple[dict[str, str], bool]:
+    """Accept exactly one canonical identity object followed by one newline, nothing else.
+
+    Canonical equality also refuses duplicate keys, whitespace and trailing output: none of them
+    can round-trip to the canonical text of the decoded object.
+    """
+    try:
+        text = raw.decode("utf-8")
+        value: Any = json.loads(text)
+        canonical = canonical_json(value) + "\n" if isinstance(value, dict) else None
+    except ValueError as exc:
+        raise EnvironmentIncompatible("environment interpreter probe output is malformed") from exc
+    if (
+        not isinstance(value, dict) or set(value) != {*_PROBE_IDENTITY_FIELDS, "algua"}
+        or type(value["algua"]) is not bool
+        or any(type(value[field]) is not str for field in _PROBE_IDENTITY_FIELDS)
+        or text != canonical
+    ):
+        raise EnvironmentIncompatible(
+            "environment interpreter probe output is not one canonical identity object")
+    has_algua = value.pop("algua")
+    return value, has_algua
+
+
 def verify_environment(
     root: Path, expected_interpreter: InterpreterIdentity, expected_inventory_digest: str,
 ) -> None:
@@ -178,26 +222,19 @@ def verify_environment(
     if inventory.digest != expected_inventory_digest:
         raise EnvironmentIncompatible("installed environment inventory drifted")
     python = root / "bin/python"
-    probe = (
-        "import importlib.util,json,platform,sys,sysconfig;"
-        "print(json.dumps({'implementation':platform.python_implementation(),"
-        "'version':platform.python_version(),'cache_tag':sys.implementation.cache_tag or 'unknown',"
-        "'soabi':sysconfig.get_config_var('SOABI') or 'unknown',"
-        "'platform_tag':sysconfig.get_platform(),'os_name':platform.system().lower(),"
-        "'machine':platform.machine().lower(),"
-        "'algua':importlib.util.find_spec('algua') is not None}))"
-    )
+    version = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    import_root = root / "lib" / version / "site-packages"
     try:
-        result = subprocess.run(
-            [str(python), "-I", "-c", probe], cwd=root,
-            env=scrubbed_environment(python.parent), check=True, capture_output=True,
-            text=True, timeout=30,
+        result = run_bounded(
+            [str(python), "-I", "-S", "-c", _PROBE, str(import_root)], cwd=root,
+            env=scrubbed_environment(python.parent), timeout=_PROBE_TIMEOUT_SECONDS,
+            max_stdout=_PROBE_OUTPUT_BYTES, max_stderr=_PROBE_OUTPUT_BYTES,
         )
-        observed = json.loads(result.stdout)
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+    except (OSError, subprocess.SubprocessError, OutputLimitExceeded) as exc:
         raise EnvironmentIncompatible(
-            "published environment interpreter verification failed"
-        ) from exc
-    has_algua = observed.pop("algua", None)
-    if has_algua is not False or observed != expected_interpreter.to_dict():
+            "published environment interpreter verification failed") from exc
+    if result.returncode != 0:
+        raise EnvironmentIncompatible("published environment interpreter verification failed")
+    observed, has_algua = _parse_probe(result.stdout)
+    if has_algua or observed != expected_interpreter.to_dict():
         raise EnvironmentIncompatible("published environment interpreter identity drifted")
