@@ -24,7 +24,6 @@ resembles a network error -- is not evidence, and the caller classifies it as no
 from __future__ import annotations
 
 import re
-import tomllib
 
 _HEAD = "× "
 _CAUSES = ("├─▶ ", "╰─▶ ")
@@ -46,16 +45,6 @@ _TEMPORARY_STATUSES = (
     "HTTP status server error (503 Service Unavailable)",
     "HTTP status server error (504 Gateway Timeout)",
 )
-
-
-def locked_wheels(raw_lock: bytes) -> dict[str, tuple[str, str]]:
-    """Map every locked wheel URL to its locked (name, version); the lock is pre-validated."""
-    payload = tomllib.loads(raw_lock.decode("utf-8"))
-    return {
-        wheel["url"]: (package["name"], package["version"])
-        for package in payload.get("package", [])
-        for wheel in package.get("wheels", [])
-    }
 
 
 def _reports(text: str) -> list[list[str]] | None:

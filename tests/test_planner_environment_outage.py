@@ -16,9 +16,13 @@ import pytest
 
 from algua.primitives.bounded_subprocess import BoundedCompletion
 from algua.registry.frozen_source import FrozenFile
-from algua.registry.planner_environment import EnvironmentIncompatible, validate_lock
+from algua.registry.planner_environment import (
+    EnvironmentIncompatible,
+    locked_wheels,
+    validate_lock,
+)
 from algua.registry.planner_environment_errors import EnvironmentUnavailable
-from algua.registry.planner_environment_outage import is_locked_wheel_outage, locked_wheels
+from algua.registry.planner_environment_outage import is_locked_wheel_outage
 from tests.test_planner_environment import _inputs
 from tests.test_planner_environment_uv import _provision
 

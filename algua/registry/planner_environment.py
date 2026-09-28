@@ -21,6 +21,7 @@ from algua.primitives.bounded_subprocess import (
 from algua.registry.artifact_contract import BuildInputs
 from algua.registry.environment_contract import (
     EnvironmentKey,
+    InstalledDistribution,
     InstalledInventory,
     InterpreterIdentity,
 )
@@ -34,7 +35,7 @@ from algua.registry.planner_environment_inventory import (
     scrubbed_environment,
     verify_environment,
 )
-from algua.registry.planner_environment_outage import is_locked_wheel_outage, locked_wheels
+from algua.registry.planner_environment_outage import is_locked_wheel_outage
 
 CREATE_FLAGS = (
     "uv", "venv", "--relocatable", "--python", "<exact-current-interpreter>",
@@ -100,7 +101,13 @@ def _by_path(inputs: tuple[FrozenFile, ...]) -> dict[str, FrozenFile]:
     return result
 
 
-def validate_lock(raw: bytes) -> None:
+def locked_wheels(raw: bytes) -> dict[str, tuple[str, str]]:
+    """Validate the committed lock and map every locked wheel URL to its canonical identity.
+
+    Total over arbitrary bytes: any malformation is `EnvironmentIncompatible`. Each registry
+    package must carry a PEP 503 canonical name and a bounded version, and no wheel URL may be
+    locked for two packages.
+    """
     try:
         payload = tomllib.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
@@ -108,16 +115,23 @@ def validate_lock(raw: bytes) -> None:
     packages = payload.get("package")
     if not isinstance(packages, list):
         raise EnvironmentIncompatible("committed uv lock has no package inventory")
+    result: dict[str, tuple[str, str]] = {}
     for package in packages:
         if not isinstance(package, dict):
             raise EnvironmentIncompatible("committed uv lock package is invalid")
         source = package.get("source")
-        name = package.get("name")
+        name: Any = package.get("name")
         if name == "algua" and source == {"editable": "."}:
             continue
         if not isinstance(source, dict) or set(source) != {"registry"}:
             raise EnvironmentIncompatible(
                 "local, editable, URL and VCS dependencies are unsupported")
+        version: Any = package.get("version")
+        try:
+            identity = InstalledDistribution(name, version)
+        except ValueError as exc:
+            raise EnvironmentIncompatible(
+                "locked package name or version is not canonical") from exc
         wheels = package.get("wheels")
         if not isinstance(wheels, list) or not wheels:
             raise EnvironmentIncompatible("every locked registry package requires a wheel")
@@ -126,18 +140,27 @@ def validate_lock(raw: bytes) -> None:
                 raise EnvironmentIncompatible("locked wheel metadata is invalid")
             url = wheel.get("url")
             digest = wheel.get("hash")
+            if not isinstance(url, str) or not isinstance(digest, str):
+                raise EnvironmentIncompatible("locked wheel URL or hash is not canonical")
             try:
-                parsed = urlsplit(url) if isinstance(url, str) else None
-                netloc = parsed.hostname if parsed is not None else None
+                parsed = urlsplit(url)
+                netloc = parsed.hostname
             except ValueError as exc:
                 raise EnvironmentIncompatible("locked wheel URL is malformed") from exc
             if (
-                parsed is None or parsed.scheme != "https" or not netloc
+                parsed.scheme != "https" or not netloc
                 or parsed.username is not None or parsed.password is not None or parsed.fragment
-                or not isinstance(digest, str)
                 or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
             ):
                 raise EnvironmentIncompatible("locked wheel URL or hash is not canonical")
+            if url in result:
+                raise EnvironmentIncompatible("a wheel URL is locked for more than one package")
+            result[url] = (identity.name, identity.version)
+    return result
+
+
+def validate_lock(raw: bytes) -> None:
+    locked_wheels(raw)
 
 
 def build_environment_key(
