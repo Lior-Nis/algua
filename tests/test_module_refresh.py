@@ -646,3 +646,27 @@ def test_refresh_does_not_deadlock_against_an_import_already_in_progress(tmp_pat
     )
 
     assert result.returncode == 0, (result.stdout, result.stderr)
+
+
+@pytest.mark.parametrize("case", ["absent-before", "existing-before"])
+def test_failed_refresh_restores_parent_bindings_of_self_removed_transient_imports(
+        family, case) -> None:
+    """Attempted code may import a module (binding it on its parent) and then remove its own
+    ``sys.modules`` entry before failing, so the entry never differs from the snapshot. The
+    parent binding the import changed is still restored to its prior value or absence."""
+    (family.dir.parent / "ext").mkdir()
+    (family.dir.parent / "ext" / "__init__.py").write_text("")
+    if case == "existing-before":
+        (family.dir.parent / "__init__.py").write_text("ext = 'pre-existing'\n")
+    top = importlib.import_module(family.top)
+    transient = f"import {family.top}.ext\nsys.modules.pop('{family.top}.ext')\n"
+    family.write("strat", "import sys\n" + transient * 2 + "raise RuntimeError('boom')\n")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _refresh(family)
+
+    assert f"{family.top}.ext" not in sys.modules
+    if case == "existing-before":
+        assert vars(top)["ext"] == "pre-existing"
+    else:
+        assert "ext" not in vars(top)
