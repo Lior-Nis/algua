@@ -1,8 +1,9 @@
 """A consumer's own error stays primary when closing its walk also fails."""
 from __future__ import annotations
 
+import ast
 import errno
-import re
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -155,11 +156,135 @@ def test_a_consumer_error_retries_a_listing_that_failed_before_release(
     assert len(closed) == 3 and all(closed.values()), closed
 
 
+WALK_MODULE = "algua.primitives.bounded_walk"
+RAW_WALK = f"{WALK_MODULE}.bounded_walk"
+
+
+def _dotted(node: ast.expr) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _dotted(node.value)
+        return None if base is None else f"{base}.{node.attr}"
+    return None
+
+
+def _direct_walk_uses(source: str, module: str) -> list[str]:
+    """Every way ``source`` (the module ``module``) reaches `bounded_walk` directly.
+
+    Import-aware: every local name bound by an import (absolute or relative, aliased or not) is
+    resolved to what it names, so an aliased function import, a star import, a module or package
+    alias followed by attribute access, and `getattr(module, "bounded_walk")` all resolve to the
+    raw walk. Text mentions and unrelated local names do not.
+    """
+    tree = ast.parse(source)
+    package = module.rpartition(".")[0]
+    bindings: dict[str, str] = {}
+    uses: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            base = importlib.util.resolve_name("." * node.level + (node.module or ""), package)
+            for alias in node.names:
+                if alias.name == "*":
+                    if base == WALK_MODULE:
+                        uses.append(f"line {node.lineno}: star import of {WALK_MODULE}")
+                    continue
+                target = f"{base}.{alias.name}"
+                bindings[alias.asname or alias.name] = target
+                if target == RAW_WALK:
+                    uses.append(f"line {node.lineno}: imports {RAW_WALK}")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    bindings[alias.asname] = alias.name
+                else:
+                    head = alias.name.partition(".")[0]
+                    bindings[head] = head
+
+    def resolved(node: ast.expr) -> str | None:
+        dotted = _dotted(node)
+        if dotted is None:
+            return None
+        head, _, rest = dotted.partition(".")
+        if head not in bindings:
+            return None  # a local or builtin name, not something imported
+        return f"{bindings[head]}.{rest}" if rest else bindings[head]
+
+    for node in ast.walk(tree):
+        # A bare name can only resolve to the raw walk through a function import, which is
+        # already flagged above; module-qualified access is the remaining direct spelling.
+        if isinstance(node, ast.Attribute) and resolved(node) == RAW_WALK:
+            uses.append(f"line {node.lineno}: references {RAW_WALK}")
+        if (
+            isinstance(node, ast.Call) and _dotted(node.func) == "getattr"
+            and len(node.args) >= 2 and resolved(node.args[0]) == WALK_MODULE
+            and isinstance(node.args[1], ast.Constant) and node.args[1].value == "bounded_walk"
+        ):
+            uses.append(f"line {node.lineno}: getattr of {RAW_WALK}")
+    return uses
+
+
+def _module_name(path: Path) -> str:
+    parts = list(path.relative_to(REPO).with_suffix("").parts)
+    return ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
+
+
 def test_every_production_consumer_walks_through_the_scoped_seam() -> None:
-    direct = []
+    direct = {}
     for path in sorted((REPO / "algua").rglob("*.py")):
-        if path.name == "bounded_walk.py":
-            continue
-        if re.search(r"\bbounded_walk\(", path.read_text()):
-            direct.append(path.relative_to(REPO).as_posix())
-    assert direct == []
+        module = _module_name(path)
+        if module == WALK_MODULE:
+            continue  # the defining module is the only place the raw walk may be used
+        uses = _direct_walk_uses(path.read_text(), module)
+        if uses:
+            direct[module] = uses
+    assert direct == {}
+
+
+DIRECT_WALK_SPELLINGS = {
+    "direct-import": (
+        "from algua.primitives.bounded_walk import bounded_walk\nbounded_walk(root)\n"),
+    "aliased-import": (
+        "from algua.primitives.bounded_walk import bounded_walk as bw\nbw(root)\n"),
+    "aliased-import-unused-call": (
+        "from algua.primitives.bounded_walk import bounded_walk as bw\n"),
+    "star-import": "from algua.primitives.bounded_walk import *\n",
+    "module-alias-call": (
+        "from algua.primitives import bounded_walk as walks\nwalks.bounded_walk(root)\n"),
+    "module-alias-reference": (
+        "from algua.primitives import bounded_walk as w\nfn = w.bounded_walk\nfn(root)\n"),
+    "import-as": "import algua.primitives.bounded_walk as w\nw.bounded_walk(root)\n",
+    "fully-qualified": (
+        "import algua.primitives.bounded_walk\n"
+        "algua.primitives.bounded_walk.bounded_walk(root)\n"),
+    "package-alias": "import algua.primitives as p\np.bounded_walk.bounded_walk(root)\n",
+    "from-package": "from algua import primitives\nprimitives.bounded_walk.bounded_walk(root)\n",
+    "relative-import": "from ..primitives.bounded_walk import bounded_walk as bw\nbw(root)\n",
+    "relative-module": "from ..primitives import bounded_walk as w\nw.bounded_walk(root)\n",
+    "getattr": (
+        "import algua.primitives.bounded_walk as w\ngetattr(w, 'bounded_walk')(root)\n"),
+}
+
+
+@pytest.mark.parametrize(
+    "source", DIRECT_WALK_SPELLINGS.values(), ids=DIRECT_WALK_SPELLINGS.keys())
+def test_the_guard_catches_every_direct_walk_spelling(source: str) -> None:
+    assert _direct_walk_uses(source, "algua.registry.consumer")
+
+
+SCOPED_OR_UNRELATED = {
+    "scoped-import": (
+        "from algua.primitives.bounded_walk import WalkCleanupError, scoped_walk\n"
+        "with scoped_walk(root, max_files=1, max_directories=1, max_path_bytes=1) as tree:\n"
+        "    pass\n"),
+    "module-scoped-call": (
+        "from algua.primitives import bounded_walk as w\nw.scoped_walk(root)\n"),
+    "mention-in-text": '"""Never call bounded_walk(root) directly."""\n# bounded_walk(root)\n',
+    "unrelated-local-name": "def bounded_walk(root):\n    return root\nbounded_walk(1)\n",
+}
+
+
+@pytest.mark.parametrize(
+    "source", SCOPED_OR_UNRELATED.values(), ids=SCOPED_OR_UNRELATED.keys())
+def test_the_guard_allows_scoped_use_and_unrelated_mentions(source: str) -> None:
+    assert _direct_walk_uses(source, "algua.registry.consumer") == []
