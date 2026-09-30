@@ -216,3 +216,23 @@ def test_scan_agrees_with_real_execution(shape):
     assert reported, f"{shape}: executed kind {raised.value.kind!r} escaped the scan: {scan}"
     if raised.value.kind in scan.literals:
         assert not scan.dynamic and not scan.subclasses
+
+
+def test_risk_breach_messages_are_plain_ascii():
+    # A frozen child's breach detail is sanitized to printable ASCII (Story 1.3c §7); planner and
+    # risk messages that are already ASCII keep frozen and in-process kill-switch text identical.
+    offenders = []
+    for path in sorted((REPO / "algua").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if name != "RiskBreach":
+                continue
+            for part in ast.walk(node):
+                if isinstance(part, ast.Constant) and isinstance(part.value, str) and not (
+                        part.value.isascii()):
+                    offenders.append(f"{path.relative_to(REPO)}:{node.lineno}")
+    assert offenders == []

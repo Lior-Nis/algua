@@ -63,7 +63,7 @@ def _late_state(
         raise RiskBreach(
             "non_positive_equity",
             f"sizing equity {sizing_equity} is not a usable (positive, finite) "
-            "denominator — refusing to trade before it divides by zero, inverts weights, or "
+            "denominator - refusing to trade before it divides by zero, inverts weights, or "
             "NaN-poisons",
         )
     drawdown_equity = _finite_number(captured.drawdown_equity, "drawdown_equity")
@@ -90,7 +90,9 @@ def _late_state(
         drawdown_equity,
         float(peak),
         True,
-        sum(abs(weight) for weight in current_weights.values()),
+        # Sum in symbol order: float addition is order-sensitive and a frozen child sees mappings
+        # sorted, while captured values arrive in broker order (Story 1.3c parity).
+        sum(abs(current_weights[symbol]) for symbol in sorted(current_weights)),
     ), current_weights
 
 
@@ -166,7 +168,7 @@ def phase_b_impl(
                     "reconcile",
                     f"venue belief {dict(sorted(belief.items()))} disagrees with positions_before "
                     f"{dict(sorted(positions.items()))} before "
-                    "tick — refusing to trade on inconsistent state",
+                    "tick - refusing to trade on inconsistent state",
                 )
         elif not isinstance(captured.venue_belief, VenueBeliefDisabled):
             return input_failure("invalid_venue_belief", "unknown venue-belief variant")

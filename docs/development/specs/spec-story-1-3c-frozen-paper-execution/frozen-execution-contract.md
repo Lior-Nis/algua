@@ -140,8 +140,9 @@ late                null for phase "a"; for phase "b": {phase_a_binding, capture
   `CONFIG` to dump to the request's `resolved_config` and the request's digests and strategy name to
   match its bundle, runs the phase and writes one JSON document to stdout. Before writing, it checks
   that every loaded `algua.*` module's file lies under `<bundle_root>`.
-- Exit codes: `0` result on stdout; `3` the child refused its bundle, protocol, identity or module
-  origin (`frozen_content_unsupported`); anything else, or a signal, is `frozen_exit_abnormal`.
+- Exit codes: `0` result on stdout; `2` the child could not decode its request; `3` the child
+  refused its bundle, protocol, identity or module origin (`frozen_content_unsupported`); anything
+  other than `0` and `3`, or a signal, is `frozen_exit_abnormal`.
 
 ## 6. Limits (protected constants, wire version 1)
 
@@ -191,11 +192,20 @@ data, no non-finite number, no boolean where a number is expected. It must echo 
 - For `decision`, the supervisor checks: every timestamp equals Phase A's `decision_ts`; symbols are
   unique and inside the gate universe or current holdings; intents equal `build_intents`
   recomputed from the decision's target weights and the current weights the supervisor derives
-  from its own captured values with the planner's formula (market value / sizing equity); then it
-  reruns `validate_decision_weights` with the view's execution contract. Any mismatch is
+  from its own captured values with the planner's formula (market value / sizing equity). Any
+  mismatch is `frozen_result_invalid`. It then reruns `validate_decision_weights` with the view's
+  execution contract; a violation there is a real risk breach and is returned as
+  `PlannerRiskFailure` with the existing breach semantics, exactly as the in-process planner
+  reports it.
+- The supervisor also re-derives, with the planner's own helpers, the Phase A decision timestamp
+  from its closed bars, the state of an early or late no-decision, and the late state from its
+  captured values (including the persisted peak), and requires the child's to match; a decision
+  requires a non-warming Phase A and a late no-decision a warming one. Any mismatch is
   `frozen_result_invalid`.
-- `check_mark_freshness` lists offenders in sorted order so breach text is identical across fresh
-  processes (a message-order change only, affecting paper and live alike).
+- `check_mark_freshness` lists offenders in sorted order, the reconcile breach lists belief and
+  positions sorted, realized gross is summed in symbol order, and every `RiskBreach` message is
+  plain ASCII, so frozen and in-process breach text and states are identical across fresh
+  processes (message-order and float-summation-order changes only, affecting paper and live alike).
 
 ## 8. Failure taxonomy and classification (CAP-3)
 

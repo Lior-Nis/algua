@@ -189,7 +189,7 @@ def assert_marks_usable(
     if unvaluable:
         raise RiskBreach(
             "unvaluable_marks",
-            f"held/consumed symbols have a non-positive / non-finite mark: {unvaluable} — "
+            f"held/consumed symbols have a non-positive / non-finite mark: {unvaluable} - "
             "refusing to value/size the book off an unvaluable feed",
         )
     stale: dict[str, float] = {}
@@ -203,7 +203,7 @@ def assert_marks_usable(
         except Exception as exc:
             raise RiskBreach(
                 "stale_marks",
-                f"cannot map {symbol} mark {timestamp} to an exchange session ({exc!r}) — "
+                f"cannot map {symbol} mark {timestamp} to an exchange session ({exc!r}) - "
                 "refusing to establish risk state off an unmappable timestamp",
             ) from exc
     check_mark_freshness(stale, MAX_STALE_SESSIONS)

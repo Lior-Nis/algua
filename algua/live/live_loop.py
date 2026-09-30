@@ -89,7 +89,7 @@ def assert_marks_usable(
     if unvaluable:
         raise RiskBreach(
             "unvaluable_marks",
-            f"held/consumed symbols have a non-positive / non-finite mark: {unvaluable} — "
+            f"held/consumed symbols have a non-positive / non-finite mark: {unvaluable} - "
             f"refusing to value/size the book off an unvaluable feed",
         )
     cal = get_calendar()
@@ -104,7 +104,7 @@ def assert_marks_usable(
         except Exception as exc:  # MinuteOutOfBounds / unmappable ts (finding 5)
             raise RiskBreach(
                 "stale_marks",
-                f"cannot map {s} mark {ts} to an exchange session ({exc!r}) — "
+                f"cannot map {s} mark {ts} to an exchange session ({exc!r}) - "
                 f"refusing to establish risk state off an unmappable timestamp",
             ) from exc
     check_mark_freshness(stale_by_symbol, MAX_STALE_SESSIONS)

@@ -853,10 +853,10 @@ def test_run_tick_through_the_frozen_port_has_the_in_process_effect_trace(store,
     if case == "decision":
         assert frozen_outcome == in_process_outcome
         assert frozen_outcome.submitted and frozen_outcome.target_weights
-    else:  # a breach: its kind, then the in-process detail as §7 sanitizes it
-        kind, detail = in_process_outcome
-        assert kind == case
-        assert frozen_outcome == (kind, sanitize_text(detail))
+    else:  # a breach: identical kind AND text (planner breach texts are plain ASCII, so the §7
+        # sanitizer leaves them untouched)
+        assert in_process_outcome[0] == case
+        assert frozen_outcome == in_process_outcome
     if case == "drawdown":
         # Contract §3: the frozen port answers the pending belief without a child, so the
         # supervisor reads the venue belief once before Phase B reports the drawdown breach that

@@ -223,7 +223,7 @@ def check_mark_freshness(stale_by_symbol: dict[str, float], max_stale: int) -> N
     if offenders:
         raise RiskBreach(
             "stale_marks",
-            f"marks unusable beyond {max_stale} completed sessions: {offenders} — "
+            f"marks unusable beyond {max_stale} completed sessions: {offenders} - "
             f"refusing to value/size/decide off an unreliable feed",
         )
 
