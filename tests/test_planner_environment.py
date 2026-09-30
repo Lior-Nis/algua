@@ -332,3 +332,34 @@ def test_environment_inventory_propagates_traversal_errors(
     with pytest.raises(PermissionError):
         inventory_environment(env)
     assert failed == [hidden]
+
+
+def test_provisioning_the_same_key_twice_publishes_the_same_environment_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Real uv (and venv) write the absolute staging path into activation scripts; the frozen
+    # environment is never activated, so those scripts must not enter its identity (Story 1.3c
+    # found every admission publishing a new ~1 GB environment).
+    monkeypatch.setattr(
+        "algua.registry.planner_environment.installer_version", lambda: "uv 0.9.26")
+    key = build_environment_key(_inputs(), "a" * 64, uv_version="uv 0.9.26")
+
+    def provision(staging: Path) -> str:
+        environment = staging / "environment"
+
+        def runner(argv, *, cwd, env, timeout, max_stdout, max_stderr):
+            if argv[1] == "venv":
+                uv_like_venv(environment)
+                cfg = environment / "pyvenv.cfg"  # like uv: no `command = <path>` line
+                cfg.write_text("".join(line for line in cfg.read_text().splitlines(True)
+                                       if not line.startswith("command")))
+                (environment / "bin" / "activate.csh").write_text(
+                    f"setenv VIRTUAL_ENV '{environment}'\n")
+            return BoundedCompletion(0, b"", b"")
+
+        inventory = provision_environment(
+            staging / "inputs", environment, _inputs(), key, runner=runner)
+        assert not list((environment / "bin").glob("activate*"))
+        return inventory.digest
+
+    assert provision(tmp_path / "one") == provision(tmp_path / "two")
