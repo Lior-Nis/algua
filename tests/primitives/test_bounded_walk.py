@@ -6,12 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from algua.primitives.bounded_walk import TraversalLimitExceeded, WalkCleanupError, bounded_walk
+from algua.primitives.bounded_walk import TraversalLimitExceeded, WalkCleanupError, _bounded_walk
 from tests._walk_faults import count_scandir_pulls, fail_scandir_once, track_closes
 
 
 def _walk(root: Path, *, files: int = 100, directories: int = 100, path_bytes: int = 1024):
-    return list(bounded_walk(
+    return list(_bounded_walk(
         root, max_files=files, max_directories=directories, max_path_bytes=path_bytes))
 
 
@@ -123,7 +123,7 @@ def test_one_directory_with_huge_file_fanout_is_refused_while_streaming(
     received: list[str] = []
 
     with pytest.raises(TraversalLimitExceeded) as caught:
-        for entry in bounded_walk(tmp_path, max_files=10, max_directories=10,
+        for entry in _bounded_walk(tmp_path, max_files=10, max_directories=10,
                                   max_path_bytes=1024):
             received.append(entry.relative)
 
@@ -191,7 +191,7 @@ def test_an_abandoned_walk_closes_every_directory_handle(tmp_path: Path) -> None
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", ResourceWarning)
-        walk = bounded_walk(tmp_path, max_files=10, max_directories=100, max_path_bytes=1024)
+        walk = _bounded_walk(tmp_path, max_files=10, max_directories=100, max_path_bytes=1024)
         for entry in walk:
             if entry.relative.count("/") == 15:
                 break
@@ -214,7 +214,7 @@ def test_an_abandoned_walk_closes_every_handle_and_reports_the_cleanup_failure(
 ) -> None:
     _chain(tmp_path)
     closed = track_closes(monkeypatch, faulty=tmp_path / "d1")
-    walk = bounded_walk(tmp_path, max_files=100, max_directories=100, max_path_bytes=1024)
+    walk = _bounded_walk(tmp_path, max_files=100, max_directories=100, max_path_bytes=1024)
     for entry in walk:
         if entry.relative == "d1/d2/d3":
             break
@@ -232,7 +232,7 @@ def test_the_deepest_cleanup_failure_is_reported_when_several_closes_fail(
     _chain(tmp_path)
     closed = track_closes(
         monkeypatch, faulty=tmp_path / "d1", also={tmp_path / "d1/d2": errno.ENOSPC})
-    walk = bounded_walk(tmp_path, max_files=100, max_directories=100, max_path_bytes=1024)
+    walk = _bounded_walk(tmp_path, max_files=100, max_directories=100, max_path_bytes=1024)
     for entry in walk:
         if entry.relative == "d1/d2/d3":
             break
@@ -245,7 +245,7 @@ def test_the_deepest_cleanup_failure_is_reported_when_several_closes_fail(
 
 
 def _abandon_at_d3(tmp_path: Path):
-    walk = bounded_walk(tmp_path, max_files=100, max_directories=100, max_path_bytes=1024)
+    walk = _bounded_walk(tmp_path, max_files=100, max_directories=100, max_path_bytes=1024)
     for entry in walk:
         if entry.relative == "d1/d2/d3":
             break

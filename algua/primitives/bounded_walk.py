@@ -9,8 +9,8 @@ relative path length before yielding or descending (which also bounds depth and 
 open directory handles), never follows links, and propagates every listing, iteration and
 type-check error. Order is depth-first pre-order: a directory is yielded before its contents.
 
-Production consumers walk through `scoped_walk`, which always closes the walk and keeps a
-consumer's own error primary when closing also fails.
+The raw walk is module-private: consumers walk through `scoped_walk`, which always closes the
+walk and keeps a consumer's own error primary when closing also fails.
 """
 from __future__ import annotations
 
@@ -89,7 +89,7 @@ def _close_all(stack: list[tuple[Any, str]]) -> BaseException | None:
     return interrupt if interrupt is not None else first
 
 
-def bounded_walk(
+def _bounded_walk(
     root: Path, *, max_files: int, max_directories: int, max_path_bytes: int,
 ) -> Generator[TreeEntry, None, None]:
     """Yield every entry below ``root``; non-directories (links included) count as files."""
@@ -147,12 +147,15 @@ class _ScopedTree:
 
     def __init__(self, walk: Generator[TreeEntry, None, None]) -> None:
         self._walk = walk
+        self._closed = False
         self.cleanup_failure: WalkCleanupError | None = None
 
     def __iter__(self) -> _ScopedTree:
         return self
 
     def __next__(self) -> TreeEntry:
+        if self._closed:  # an empty walk would read as an empty tree, so misuse fails loudly
+            raise RuntimeError("a scoped walk was used after its scope closed")
         try:
             return next(self._walk)
         except WalkCleanupError as exc:
@@ -160,6 +163,7 @@ class _ScopedTree:
             raise
 
     def close(self) -> None:
+        self._closed = True
         self._walk.close()
 
 
@@ -168,24 +172,30 @@ def scoped_walk(
     root: Path, *, max_files: int, max_directories: int, max_path_bytes: int,
     cleanup_error: Callable[[], Exception] | None = None,
 ) -> Iterator[Iterator[TreeEntry]]:
-    """A `bounded_walk` that is always closed when the consumer's block exits.
+    """A `_bounded_walk` that is always closed when the consumer's block exits.
 
     If the block raised (a consumer's typed refusal, say), that error stays primary: closing the
     walk still closes every listing, and an ordinary failure while closing does not replace it;
     an interrupt while closing still propagates, caused by the block's error. If the block
-    finished or stopped early, a failure while closing is reported, as for any abandoned walk.
+    finished or stopped early, a failure while closing is reported, as for any abandoned walk. A
+    `GeneratorExit` reaching the scope means it was abandoned (a consumer generator yielding
+    inside it was closed), so it is treated the same way.
     Errors raised by the traversal itself reach the block unchanged.
 
     With ``cleanup_error``, a cleanup failure of this walk -- one raised while the block iterated
     or while closing it -- is reported as ``cleanup_error()`` caused by it. A `WalkCleanupError`
     the block raised by any other means is not this walk's cleanup failure and stays primary.
     """
-    tree = _ScopedTree(bounded_walk(
+    tree = _ScopedTree(_bounded_walk(
         root, max_files=max_files, max_directories=max_directories,
         max_path_bytes=max_path_bytes,
     ))
     try:
         yield tree
+    except GeneratorExit:
+        # An abandoned scope has no error of its own, so a cleanup failure is the one to report.
+        _close_scope(tree, cleanup_error)
+        raise
     except BaseException as active:
         try:
             tree.close()
@@ -195,6 +205,10 @@ def scoped_walk(
         if cleanup_error is not None and active is tree.cleanup_failure:
             raise cleanup_error() from active
         raise
+    _close_scope(tree, cleanup_error)
+
+
+def _close_scope(tree: _ScopedTree, cleanup_error: Callable[[], Exception] | None) -> None:
     try:
         tree.close()
     except WalkCleanupError as exc:
