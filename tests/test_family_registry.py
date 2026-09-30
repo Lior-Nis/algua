@@ -55,7 +55,7 @@ def _assign(
 def test_schema_version_is_46() -> None:
     repo = _make_repo()
     version = repo.connection.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 47
+    assert version == 48
 
 
 def test_schema_migration_idempotent() -> None:
@@ -66,7 +66,7 @@ def test_schema_migration_idempotent() -> None:
     db.migrate(conn)
     db.migrate(conn)  # second call must be a no-op
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 47
+    assert version == 48
 
 
 def test_family_tables_exist() -> None:

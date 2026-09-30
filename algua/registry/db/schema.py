@@ -21,6 +21,7 @@ from algua.registry.db.deployment import SCHEMA as DEPLOYMENT_SCHEMA
 from algua.registry.db.execution import SCHEMA as EXECUTION_SCHEMA
 from algua.registry.db.family import SCHEMA as FAMILY_SCHEMA
 from algua.registry.db.forward_gate import SCHEMA as FORWARD_GATE_SCHEMA
+from algua.registry.db.frozen_evidence import SCHEMA as FROZEN_EVIDENCE_SCHEMA
 from algua.registry.db.gate import SCHEMA as GATE_SCHEMA
 from algua.registry.db.holdout import SCHEMA as HOLDOUT_SCHEMA
 from algua.registry.db.ideas import SCHEMA as IDEAS_SCHEMA
@@ -43,4 +44,5 @@ SCHEMA = "\n".join([
     MERGEBACK_SCHEMA,
     KNOWLEDGE_SCHEMA,
     EXECUTION_SCHEMA,
+    FROZEN_EVIDENCE_SCHEMA,
 ])

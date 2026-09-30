@@ -25,6 +25,7 @@ from algua.registry.repository import ArtifactIdentity
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
 from tests._deployment_helpers import force_legacy_strategy, frozen_manifest
+from tests._frozen_evidence_helpers import record_final_invocation
 
 IDENTITY = ArtifactIdentity("code", "config", "dependency")
 CONFIG = {"name": "s", "universe": ["AAPL"], "params": {"lookback": 20}}
@@ -433,7 +434,8 @@ def test_intake_rolls_back_artifact_epoch_and_allocation_on_stage_failure(
     assert repo.get("s").stage is Stage.CANDIDATE
 
 
-def _record_tick(conn, strategy_id: int, *, deployment_id: int | None):
+def _record_tick(conn, strategy_id: int, *, deployment_id: int | None,
+                 snapshot_id: str | None = None, frozen_invocation_id: int | None = None):
     record_tick_snapshot(
         conn, "s", tick_ts="2026-09-24T20:00:00+00:00",
         decision_ts="2026-09-23T20:00:00+00:00", equity=1000.0,
@@ -441,7 +443,8 @@ def _record_tick(conn, strategy_id: int, *, deployment_id: int | None):
         lane="paper", strategy_id=strategy_id, code_hash=FROZEN_IDENTITY.code_hash,
         config_hash=FROZEN_IDENTITY.config_hash,
         dependency_hash=FROZEN_IDENTITY.dependency_hash, account_id="paper-account", cash=1000.0,
-        clock_source="broker", deployment_id=deployment_id,
+        clock_source="broker", snapshot_id=snapshot_id, deployment_id=deployment_id,
+        frozen_invocation_id=frozen_invocation_id,
     )
 
 
@@ -458,12 +461,17 @@ def test_tick_snapshot_is_guarded_by_active_deployment(tmp_path):
     deployment = repo.active_deployment(rec.id)
     assert deployment is not None
 
-    _record_tick(conn, rec.id, deployment_id=deployment.id)
+    # A frozen tick carries its final invocation link (Story 1.3d, the v48 tick trigger).
+    link = record_final_invocation(conn, deployment_id=deployment.id, snapshot_id="snap-1")
+    _record_tick(conn, rec.id, deployment_id=deployment.id, snapshot_id="snap-1",
+                 frozen_invocation_id=link)
     assert latest_tick_snapshot(conn, "s")["deployment_id"] == deployment.id
     with conn:
         repo.retire_active_deployment_locked(rec.id)
+    later = record_final_invocation(conn, deployment_id=deployment.id, snapshot_id="snap-1")
     with pytest.raises(DeploymentError, match="active deployment"):
-        _record_tick(conn, rec.id, deployment_id=deployment.id)
+        _record_tick(conn, rec.id, deployment_id=deployment.id, snapshot_id="snap-1",
+                     frozen_invocation_id=later)
 
 
 def test_null_deployment_tick_requires_fixed_legacy_cohort(tmp_path):
