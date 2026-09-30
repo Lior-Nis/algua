@@ -74,6 +74,7 @@
 /algua/contracts/frozen_evidence.py      @Lior-Nis   # Story 1.3d: FrozenAttempt, the evidence row value
 /algua/registry/db/frozen_evidence.py    @Lior-Nis   # Story 1.3d: v48 frozen_invocations DDL + append-only/phase-b/tick-link triggers
 /algua/registry/store/frozen_evidence.py @Lior-Nis   # Story 1.3d: the append-only invocation recorder
+/algua/live/frozen_attempt.py            @Lior-Nis   # Story 1.3d: attempt judgement (decision cross-check, weight rerun) + the attempt recorder
 /algua/execution/tick_snapshots.py       @Lior-Nis   # the tick provenance guard (deployment epoch + frozen invocation link)
 
 # --- Modules carved OUT of the files above by the simplification program (stages 6a-6c).

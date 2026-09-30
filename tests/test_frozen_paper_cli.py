@@ -8,23 +8,32 @@ its deployment and descriptor identity. The legacy working-tree sibling keeps to
 its checkout load, identity recomputation and in-process planner are pinned here. The frozen tenant
 never imports its checkout module, its results do not change when that module is edited or deleted,
 a new CLI invocation resolves the same stored artifact, and ``paper run`` refuses to replay it.
+
+Story 1.3d (CAP-1, CAP-2): every frozen tick records exactly one successful Phase A and one
+successful Phase B ``frozen_invocations`` row, naming the tick's snapshot and the exact bars window
+``run_tick`` fetched, each committed on a connection with no open transaction, and the tick row
+links the Phase B row. A working-tree tick links nothing.
 """
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import os
 import subprocess
 import sys
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from algua.backtest._sample import SyntheticProvider
 from algua.cli import paper_cmd
 from algua.cli.main import app
 from algua.live.frozen_dispatch import FrozenPlanner
 from algua.live.frozen_wire import BOOTSTRAP
+from algua.primitives.timeparse import utc
 from algua.registry.frozen_view import FrozenStrategyView
 from algua.strategies.base import LoadedStrategy
 from tests._frozen_paper_world import (
@@ -39,6 +48,7 @@ from tests._frozen_paper_world import (
     build_world,
     runner,
     teardown_world,
+    window,
 )
 
 CHECKOUT_DOTTED = f"algua.strategies.momentum.{TENANT}"
@@ -55,12 +65,40 @@ def world(monkeypatch, tmp_path):
         sys.modules.pop(CHECKOUT_DOTTED, None)
 
 
+def _invocations(world) -> list[dict[str, Any]]:
+    return world.rows("SELECT * FROM frozen_invocations ORDER BY id")
+
+
+def _bounds() -> tuple[str, str]:
+    """The ISO-8601 UTC renderings of the bounds a world tick passes to ``get_bars``."""
+    start, end = window()
+    return utc(start).isoformat(), utc(end).isoformat()
+
+
 def _stamped(world, tick: dict) -> None:
+    """The tick carries the deployment and descriptor identity and links its final invocation:
+    a successful Phase B row of the same deployment, snapshot and request as a successful Phase A
+    row, both naming the exact bars window the tick fetched."""
     deployment = world.deployment()
     assert tick["deployment_id"] == deployment.id
     assert (tick["code_hash"], tick["config_hash"], tick["dependency_hash"]) == (
         CODE_HASH, CONFIG_HASH, DEP)
     assert tick["snapshot_id"] == SNAP
+    [final] = world.rows("SELECT * FROM frozen_invocations WHERE id=?",
+                         tick["frozen_invocation_id"])
+    [phase_a] = world.rows("SELECT * FROM frozen_invocations WHERE id=?",
+                           final["phase_a_invocation_id"])
+    assert (phase_a["phase"], phase_a["result_kind"]) == ("a", "snapshot_required")
+    assert (final["phase"], final["result_kind"]) == ("b", "decision")
+    for row in (phase_a, final):
+        assert row["failure_code"] is None and row["diagnostic"] is None
+        assert (row["deployment_id"], row["snapshot_id"]) == (deployment.id, SNAP)
+        assert row["request_id"] == phase_a["request_id"]
+        assert (row["bars_start"], row["bars_end"]) == _bounds()
+        assert row["request_sha256"] == hashlib.sha256(row["request_json"].encode()).hexdigest()
+        assert len(row["bars_sha256"]) == 64 and len(row["result_sha256"]) == 64
+        assert (row["returncode"], row["timed_out"], row["stdout_exceeded"]) == (0, 0, 0)
+    assert final["phase_a_binding"] == phase_a["phase_a_binding"] is not None
 
 
 def test_trade_tick_plans_a_frozen_tenant_in_two_fresh_children(world):
@@ -69,6 +107,10 @@ def test_trade_tick_plans_a_frozen_tenant_in_two_fresh_children(world):
     code, payload = world.trade_tick()
 
     assert code == 0, payload
+    # One successful attempt per phase, and the tick links the final (Phase B) one.
+    phase_a, final = _invocations(world)
+    assert (phase_a["phase"], final["phase"]) == ("a", "b")
+    assert final["phase_a_invocation_id"] == phase_a["id"]
     assert payload["ok"] is True and payload["strategy"] == TENANT
     assert world.launches == [world.bundle_root, world.bundle_root]  # Phase A, then Phase B
     assert payload["target_weights"] and set(payload["target_weights"]) <= set(GATE)
@@ -80,6 +122,7 @@ def test_trade_tick_plans_a_frozen_tenant_in_two_fresh_children(world):
     assert {order["strategy_id"] for order in orders} == {deployment.strategy_id}
     [tick] = world.ticks(TENANT)
     _stamped(world, tick)
+    assert tick["frozen_invocation_id"] == final["id"]
     assert list((world.data_dir / "frozen" / "invocations").iterdir()) == []
     assert world.prepared == [TENANT]  # prepared once, at intake: a tick never rebuilds content
     assert CHECKOUT_DOTTED not in sys.modules
@@ -100,10 +143,86 @@ def test_run_all_ticks_the_frozen_tenant_from_children_and_the_sibling_in_proces
     assert by_name[SIBLING] == alone  # the sibling decides exactly as it does on its own
     [frozen_tick] = world.ticks(TENANT)
     _stamped(world, frozen_tick)
+    assert [row["phase"] for row in _invocations(world)] == ["a", "b"]  # the sibling records none
     sibling_ticks = world.ticks(SIBLING)
     assert len(sibling_ticks) == 2 and {t["deployment_id"] for t in sibling_ticks} == {None}
+    assert {t["frozen_invocation_id"] for t in sibling_ticks} == {None}
     assert world.broker.submitted_for(TENANT)
     assert CHECKOUT_DOTTED not in sys.modules
+
+
+def test_a_frozen_tenant_ticked_after_a_sibling_records_with_no_open_transaction(
+    world, monkeypatch
+):
+    """The recorder commits its own transaction and refuses a connection with one open. In
+    ``run-all`` the frozen tenant (at ``forward_tested``, so it ticks after the ``paper`` sibling)
+    is dispatched after the sibling's orders, peak, tick row and audit were written on the same
+    connection: every recording still finds no transaction open, and the tick links its evidence."""
+    with world.conn() as conn:
+        conn.execute("UPDATE strategies SET stage='forward_tested' WHERE name=?", (TENANT,))
+        conn.commit()
+    open_at_record: list[bool] = []
+    real_record = paper_cmd.record_frozen_invocation
+
+    def record(conn, attempt):
+        open_at_record.append(conn.in_transaction)
+        return real_record(conn, attempt)
+
+    monkeypatch.setattr(paper_cmd, "record_frozen_invocation", record)
+
+    code, payload = world.run_all()
+
+    assert code == 0, payload
+    assert [entry["strategy"] for entry in payload["strategies"]] == [SIBLING, TENANT]
+    assert all(entry["ok"] for entry in payload["strategies"])
+    assert world.broker.submitted_for(SIBLING)  # the sibling wrote its ledger first
+    assert open_at_record == [False, False]
+    [tick] = world.ticks(TENANT)
+    _stamped(world, tick)
+
+
+def test_the_evidence_names_the_exact_bars_window_the_tick_fetched(world, monkeypatch):
+    """``bars_start``/``bars_end`` are ISO-8601 UTC renderings of the very bounds ``run_tick``
+    passed to ``get_bars`` for the tick, observed at the provider."""
+    fetched: list[tuple[Any, Any]] = []
+
+    class Provider:
+        def __init__(self) -> None:
+            self._inner = SyntheticProvider()
+
+        def get_bars(self, symbols, start, end, timeframe="1d"):
+            fetched.append((start, end))
+            return self._inner.get_bars(symbols, start, end, timeframe)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    monkeypatch.setattr(paper_cmd, "_select_provider", lambda demo, snapshot: Provider())
+
+    code, payload = world.trade_tick()
+
+    assert code == 0, payload
+    [(start, end)] = fetched
+    assert start.utcoffset() == end.utcoffset() == timedelta(0)
+    for row in _invocations(world):
+        assert (row["bars_start"], row["bars_end"]) == (start.isoformat(), end.isoformat())
+
+
+def test_a_frozen_tick_without_a_snapshot_id_fails_before_dispatch(world):
+    """A frozen tick's evidence names its snapshot (``snapshot_id`` is NOT NULL): a frozen tenant
+    ticked without one is refused as that tenant's setup error, before any child, record, cancel,
+    submit or tick row."""
+    start, end = window()
+
+    result = runner.invoke(app, ["paper", "trade-tick", TENANT, "--snapshot", "",
+                                 "--start", start, "--end", end])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False and payload["code"] == "invalid_input"
+    assert "snapshot" in payload["error"]
+    assert world.launches == [] and _invocations(world) == []
+    assert world.broker.effects == [] and world.ticks(TENANT) == []
 
 
 def test_run_all_hands_run_tick_the_view_and_port_and_keeps_the_sibling_path(world, monkeypatch):
@@ -185,6 +304,12 @@ def test_frozen_results_are_independent_of_the_mutable_checkout_across_restarts(
     assert len(ticks) == 3
     for tick in ticks:
         _stamped(world, tick)
+    # Each tick links its own final invocation: three requests, one Phase A and B apiece.
+    rows = _invocations(world)
+    assert [row["phase"] for row in rows] == ["a", "b"] * 3
+    assert len({row["request_id"] for row in rows}) == 3
+    assert [tick["frozen_invocation_id"] for tick in ticks] == [
+        row["id"] for row in rows if row["phase"] == "b"]
     assert world.rows("SELECT COUNT(*) AS n FROM deployment_artifacts") == [{"n": 1}]
     assert world.prepared == [TENANT]
     assert len(world.launches) == 6 and set(world.launches) == {world.bundle_root}
@@ -229,7 +354,10 @@ def test_a_frozen_tick_makes_no_git_or_uv_call_and_needs_no_git_checkout(
     assert tick["ok"] is True and tick["target_weights"]
     frozen = next(entry for entry in cycle["strategies"] if entry["strategy"] == TENANT)
     assert frozen["ok"] is True and frozen["target_weights"]
-    assert len(world.ticks(TENANT)) == 2
+    ticks = world.ticks(TENANT)
+    assert len(ticks) == 2
+    for linked in ticks:
+        _stamped(world, linked)
     invocations = (world.data_dir / "frozen" / "invocations").resolve()
     assert len(launched) == 4  # Phase A and Phase B, in each command
     for argv in launched:
@@ -256,8 +384,8 @@ def test_run_all_refresh_plans_the_frozen_tenant_from_its_view(world, monkeypatc
     requested: dict = {}
 
     def refresh(symbols, *, end, min_rows, kind):
-        requested.update(symbols=list(symbols), min_rows=dict(min_rows))
         start = (date.fromisoformat(end) - timedelta(days=200)).isoformat()
+        requested.update(symbols=list(symbols), min_rows=dict(min_rows), start=start, end=end)
         return {"id": SNAP, "refreshed": True, "start": start, "end": end}
 
     monkeypatch.setattr(paper_cmd, "refresh_lane_snapshot", refresh)
@@ -270,6 +398,15 @@ def test_run_all_refresh_plans_the_frozen_tenant_from_its_view(world, monkeypatc
     assert set(GATE) <= set(requested["symbols"]) and "CCC" not in requested["symbols"]
     assert requested["min_rows"]["AAA"] == requested["min_rows"]["BBB"] == 2  # lookback 1 + 1
     assert len(world.launches) == 2
+    # The evidence names the refreshed snapshot and the window the refresh derived for the ticks.
+    [tick] = world.ticks(TENANT)
+    rows = _invocations(world)
+    assert [row["phase"] for row in rows] == ["a", "b"]
+    assert tick["frozen_invocation_id"] == rows[1]["id"]
+    for row in rows:
+        assert row["snapshot_id"] == SNAP
+        assert (row["bars_start"], row["bars_end"]) == (
+            utc(requested["start"]).isoformat(), utc(requested["end"]).isoformat())
     assert CHECKOUT_DOTTED not in sys.modules
 
 

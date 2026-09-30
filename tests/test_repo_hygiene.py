@@ -298,6 +298,7 @@ INTEGRITY_CRITICAL_MODULES = frozenset(
         "algua/live/frozen_child.py",
         "algua/live/frozen_dispatch.py",
         "algua/live/frozen_invocation.py",
+        "algua/live/frozen_attempt.py",
         "algua/contracts/frozen_evidence.py",
         "algua/registry/db/frozen_evidence.py",
         "algua/registry/store/frozen_evidence.py",
