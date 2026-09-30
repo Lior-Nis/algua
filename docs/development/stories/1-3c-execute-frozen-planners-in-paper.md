@@ -1,12 +1,12 @@
 ---
-baseline_commit: dc2a222ef811dc1c3a835d656a411de58423796c
+baseline_commit: 216c8ecc5d6b857f1f173060bdba4ec1eb300962
 ---
 
 # Story 1.3c: Execute frozen planners in paper
 
-Status: backlog
+Status: ready-for-dev
 
-Prepared: 2026-09-25. Baseline: Story 1.3 readiness baseline `dc2a222` (PR #671).
+Prepared: 2026-09-25. Readiness: 2026-09-30. Baseline: Story 1.3b merge `216c8ec` (PR #676).
 Epic: 1. Parent: Story 1.3. Requirements: FR4, FR6, FR9–FR10 and NFR1–NFR8.
 Depends on: Stories 1.3a and 1.3b reviewed and merged.
 
@@ -29,6 +29,14 @@ malicious-code sandbox.
 
 Frozen promotion remains blocked with `frozen_qualification_pending` until Story 1.3d binds and
 verifies its operational evidence. Live signing and authority are unchanged.
+
+## Normative contract
+
+The [Story 1.3c machine contract](../specs/spec-story-1-3c-frozen-paper-execution/SPEC.md) and its
+[field-level companion](../specs/spec-story-1-3c-frozen-paper-execution/frozen-execution-contract.md)
+are normative. They settle admission, routing, the supervisor view, phase dispatch, wire bytes,
+launch, limits, result validation, failure classification, promotion refusal and module placement.
+Implementers and reviewers must read both.
 
 ## Frozen-wire protocol-v1 protected limits
 
@@ -103,14 +111,23 @@ wire protocol version. A future operational setting may only tighten a bound.
 
 ## Tasks / subtasks
 
-- [ ] Add canonical Parquet/request/result codec tests and protocol limits (AC3, AC6).
-- [ ] Build the child entry point and strict response parser (AC2–AC7).
-- [ ] Implement process-group timeout/output handling and environment scrubbing (AC4–AC7).
-- [ ] Extend new candidate intake to activate only preverified frozen content (AC1).
-- [ ] Dispatch frozen tenants while preserving compatibility paths (AC8–AC10).
-- [ ] Add the explicit frozen-promotion block (AC11).
-- [ ] Prove parity, determinism, restart and mutable-worktree independence (AC8–AC10).
-- [ ] Run protected independent review before enabling new frozen intake (AC12).
+- [ ] Add the process-containment primitive with timeout, grace, group kill, reap and bounded
+  stdout/stderr, test-first (AC4, AC7).
+- [ ] Add the frozen-wire codec: request/response schemas, float/timestamp encodings, Arrow IPC bars,
+  limits and every rejection, with round-trip and digest tests (AC3, AC6).
+- [ ] Build the child entry point and bootstrap: bundle-only `algua`, protocol/identity checks,
+  phase execution, stdout-only result (AC2, AC4–AC6, AC9).
+- [ ] Build the supervisor dispatcher: sealed invocation directory, launch, teardown, strict result
+  validation, sanitization, tenant-failure mapping (AC2–AC8).
+- [ ] Route ticks by `source_kind`, build the frozen supervisor view and per-process offline
+  verification cache, and refuse frozen deployments in the live lane (AC8–AC10).
+- [ ] Switch intake to frozen admission with prepare-then-verify before the write transaction
+  (AC1).
+- [ ] Add the `frozen_qualification_pending` promotion refusal and register all new codes (AC11).
+- [ ] Prove parity (normal/early/breach, effect traces), determinism, restart and mutable-checkout
+  independence, and per-code tenant isolation in `trade-tick` and `run-all` (AC8–AC10).
+- [ ] Protect the new modules (CODEOWNERS, hygiene set, import-linter contract), keep size pins, run
+  the full root gate and obtain independent review before merge (AC12).
 
 ## Development notes
 
