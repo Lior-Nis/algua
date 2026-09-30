@@ -13,6 +13,8 @@ from algua.contracts.lifecycle import Actor, Stage, TransitionError
 from algua.execution.order_state import latest_tick_snapshot, record_tick_snapshot
 from algua.operator.schedule import operator_run_lock
 from algua.registry.allocations import active_allocation
+from algua.registry.artifact_errors import FrozenDescriptorConflict
+from algua.registry.artifact_recording import frozen_deployment_manifest
 from algua.registry.db import connect, migrate
 from algua.registry.deployment import (
     DeploymentError,
@@ -22,10 +24,20 @@ from algua.registry.deployment import (
 from algua.registry.repository import ArtifactIdentity
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
-from tests._deployment_helpers import force_legacy_strategy
+from tests._deployment_helpers import force_legacy_strategy, frozen_manifest
 
 IDENTITY = ArtifactIdentity("code", "config", "dependency")
 CONFIG = {"name": "s", "universe": ["AAPL"], "params": {"lookback": 20}}
+# Admission binds only frozen descriptors (Story 1.3c), whose identity fields are real digests.
+FROZEN_IDENTITY = ArtifactIdentity("b" * 32, "c" * 32, "d" * 64)
+
+
+def _frozen_descriptor(*, universe_name: str | None = "liquid-us"):
+    return frozen_deployment_manifest(frozen_manifest(
+        code_hash=FROZEN_IDENTITY.code_hash, config_hash=FROZEN_IDENTITY.config_hash,
+        dependency_hash=str(FROZEN_IDENTITY.dependency_hash), resolved_config=CONFIG,
+        universe_name=universe_name,
+    ))
 
 
 def _git(repo, *args: str) -> str:
@@ -213,8 +225,9 @@ def _candidate_with_gate(repo, *, actor: str = "human", consumed: int = 0):
         rec.id, passed=True, n_funnel=1, own_lifetime_combos=1,
         windowed_total_combos=1, funnel_window_days=90, breadth_provenance="measured",
         pit_ok=True, pit_override=False, holdout_n_bars=63,
-        min_holdout_observations=63, code_hash="code", config_hash="config",
-        dependency_hash="dependency", data_source="test", snapshot_id="snap",
+        min_holdout_observations=63, code_hash=FROZEN_IDENTITY.code_hash,
+        config_hash=FROZEN_IDENTITY.config_hash,
+        dependency_hash=FROZEN_IDENTITY.dependency_hash, data_source="test", snapshot_id="snap",
         period_start="2024-01-01", period_end="2024-12-31", holdout_frac=0.2,
         actor=actor, decision_json="{}", universe_name="liquid-us",
     )
@@ -229,22 +242,19 @@ def _candidate_with_gate(repo, *, actor: str = "human", consumed: int = 0):
     repo._conn.execute(
         "INSERT INTO stage_transitions(strategy_id, from_stage, to_stage, actor, reason,"
         " code_hash, config_hash, dependency_hash, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-        (rec.id, "backtested", "candidate", actor, "fixture", "code", "config",
-         "dependency", gate_created_at),
+        (rec.id, "backtested", "candidate", actor, "fixture", *FROZEN_IDENTITY,
+         gate_created_at),
     )
     repo._conn.commit()
     return repo.get("s"), gate_id
 
 
-def test_candidate_intake_atomically_opens_deployment(clean_repo, tmp_path):
+def test_candidate_intake_atomically_opens_deployment(tmp_path):
     conn = connect(tmp_path / "r.db")
     migrate(conn)
     repo = SqliteStrategyRepository(conn)
     rec, gate_id = _candidate_with_gate(repo)
-    manifest = build_working_tree_manifest(
-        identity=IDENTITY, resolved_config=CONFIG, universe_name="liquid-us",
-        repo_root=clean_repo,
-    )
+    manifest = _frozen_descriptor()
 
     out = repo.intake_candidate_to_paper(
         rec, capital=1000.0, actor=Actor.AGENT, account_equity=1000.0,
@@ -256,7 +266,89 @@ def test_candidate_intake_atomically_opens_deployment(clean_repo, tmp_path):
     deployment = repo.active_deployment(rec.id)
     assert deployment is not None
     assert deployment.research_gate_id == gate_id
-    assert deployment.manifest_digest == manifest.manifest_digest
+    assert deployment.source_kind == "frozen"
+    assert deployment.manifest() == manifest
+
+
+def test_intake_refuses_a_working_tree_descriptor(clean_repo, tmp_path):
+    """Story 1.3c: every new admission is frozen. The primitive fails closed on any non-frozen
+    descriptor before opening its transaction — no artifact row, epoch, allocation or stage."""
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    rec, gate_id = _candidate_with_gate(repo)
+    working_tree = build_working_tree_manifest(
+        identity=FROZEN_IDENTITY, resolved_config=CONFIG, universe_name="liquid-us",
+        repo_root=clean_repo,
+    )
+
+    with pytest.raises(FrozenDescriptorConflict, match="frozen"):
+        repo.intake_candidate_to_paper(
+            rec, capital=1000.0, actor=Actor.AGENT, account_equity=1000.0,
+            max_concurrent=1, deployment_manifest=working_tree, research_gate_id=gate_id,
+        )
+
+    assert not conn.in_transaction
+    assert conn.execute("SELECT COUNT(*) FROM deployment_artifacts").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM strategy_deployments").fetchone()[0] == 0
+    assert active_allocation(conn, rec.id) is None
+    assert repo.get("s").stage is Stage.CANDIDATE
+
+
+def test_intake_refuses_a_frozen_descriptor_that_disagrees_with_its_columns(tmp_path):
+    """A frozen-labelled descriptor whose denormalized columns disagree with its canonical JSON is
+    refused by the same 1.3b parser, before any write."""
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    rec, gate_id = _candidate_with_gate(repo)
+    tampered = replace(_frozen_descriptor(), environment_digest="0" * 64)
+
+    with pytest.raises(FrozenDescriptorConflict):
+        repo.intake_candidate_to_paper(
+            rec, capital=1000.0, actor=Actor.AGENT, account_equity=1000.0,
+            max_concurrent=1, deployment_manifest=tampered, research_gate_id=gate_id,
+        )
+
+    assert conn.execute("SELECT COUNT(*) FROM strategy_deployments").fetchone()[0] == 0
+    assert active_allocation(conn, rec.id) is None
+    assert repo.get("s").stage is Stage.CANDIDATE
+
+
+def test_intake_binds_the_recorded_frozen_row_and_refuses_a_corrupted_one(tmp_path):
+    """Admission reuses the exact artifact row 1.3b recorded (no second row) and byte-verifies it:
+    a stored row that no longer matches the descriptor aborts the whole admission."""
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    rec, gate_id = _candidate_with_gate(repo)
+    manifest = _frozen_descriptor()
+    artifact_id = repo.record_frozen_artifact("s", manifest, research_gate_id=gate_id)
+    conn.execute("DROP TRIGGER trg_deployment_artifacts_no_update")
+    conn.execute(
+        "UPDATE deployment_artifacts SET source_ref=? WHERE id=?", ("f" * 40, artifact_id))
+    conn.commit()
+
+    with pytest.raises(DeploymentError, match="corrupt stored descriptor"):
+        repo.intake_candidate_to_paper(
+            rec, capital=1000.0, actor=Actor.AGENT, account_equity=1000.0,
+            max_concurrent=1, deployment_manifest=manifest, research_gate_id=gate_id,
+        )
+    assert conn.execute("SELECT COUNT(*) FROM strategy_deployments").fetchone()[0] == 0
+    assert active_allocation(conn, rec.id) is None
+    assert repo.get("s").stage is Stage.CANDIDATE
+
+    conn.execute(
+        "UPDATE deployment_artifacts SET source_ref=? WHERE id=?", (manifest.source_ref,
+                                                                    artifact_id))
+    conn.commit()
+    repo.intake_candidate_to_paper(
+        repo.get("s"), capital=1000.0, actor=Actor.AGENT, account_equity=1000.0,
+        max_concurrent=1, deployment_manifest=manifest, research_gate_id=gate_id,
+    )
+    deployment = repo.active_deployment(rec.id)
+    assert deployment is not None and deployment.artifact_id == artifact_id
+    assert conn.execute("SELECT COUNT(*) FROM deployment_artifacts").fetchone()[0] == 1
 
 
 def test_generic_candidate_to_paper_transition_cannot_bypass_intake(tmp_path):
@@ -273,7 +365,7 @@ def test_generic_candidate_to_paper_transition_cannot_bypass_intake(tmp_path):
         repo.apply_transition(repo.get("s"), Stage.PAPER, Actor.HUMAN)
 
 
-def test_intake_rejects_gate_not_bound_to_current_candidate_episode(clean_repo, tmp_path):
+def test_intake_rejects_gate_not_bound_to_current_candidate_episode(tmp_path):
     conn = connect(tmp_path / "r.db")
     migrate(conn)
     repo = SqliteStrategyRepository(conn)
@@ -283,10 +375,7 @@ def test_intake_rejects_gate_not_bound_to_current_candidate_episode(clean_repo, 
         " AND to_stage='candidate'", (rec.id,),
     )
     conn.commit()
-    manifest = build_working_tree_manifest(
-        identity=IDENTITY, resolved_config=CONFIG, universe_name="liquid-us",
-        repo_root=clean_repo,
-    )
+    manifest = _frozen_descriptor()
 
     with pytest.raises(DeploymentError, match="current candidate episode"):
         repo.intake_candidate_to_paper(
@@ -295,15 +384,12 @@ def test_intake_rejects_gate_not_bound_to_current_candidate_episode(clean_repo, 
         )
 
 
-def test_committed_gate_cannot_anchor_a_second_epoch(clean_repo, tmp_path):
+def test_committed_gate_cannot_anchor_a_second_epoch(tmp_path):
     conn = connect(tmp_path / "r.db")
     migrate(conn)
     repo = SqliteStrategyRepository(conn)
     rec, gate_id = _candidate_with_gate(repo, actor="agent", consumed=1)
-    manifest = build_working_tree_manifest(
-        identity=IDENTITY, resolved_config=CONFIG, universe_name="liquid-us",
-        repo_root=clean_repo,
-    )
+    manifest = _frozen_descriptor()
     repo.intake_candidate_to_paper(
         rec, capital=1000.0, actor=Actor.AGENT, account_equity=1000.0,
         max_concurrent=1, deployment_manifest=manifest, research_gate_id=gate_id,
@@ -323,16 +409,13 @@ def test_committed_gate_cannot_anchor_a_second_epoch(clean_repo, tmp_path):
 
 
 def test_intake_rolls_back_artifact_epoch_and_allocation_on_stage_failure(
-    clean_repo, tmp_path, monkeypatch,
+    tmp_path, monkeypatch,
 ):
     conn = connect(tmp_path / "r.db")
     migrate(conn)
     repo = SqliteStrategyRepository(conn)
     rec, gate_id = _candidate_with_gate(repo)
-    manifest = build_working_tree_manifest(
-        identity=IDENTITY, resolved_config=CONFIG, universe_name="liquid-us",
-        repo_root=clean_repo,
-    )
+    manifest = _frozen_descriptor()
 
     def fail_transition(*_args, **_kwargs):
         raise RuntimeError("injected stage failure")
@@ -355,21 +438,19 @@ def _record_tick(conn, strategy_id: int, *, deployment_id: int | None):
         conn, "s", tick_ts="2026-09-24T20:00:00+00:00",
         decision_ts="2026-09-23T20:00:00+00:00", equity=1000.0,
         peak_equity=1000.0, positions={}, n_submitted=0, reconcile_ok=True,
-        lane="paper", strategy_id=strategy_id, code_hash="code", config_hash="config",
-        dependency_hash="dependency", account_id="paper-account", cash=1000.0,
+        lane="paper", strategy_id=strategy_id, code_hash=FROZEN_IDENTITY.code_hash,
+        config_hash=FROZEN_IDENTITY.config_hash,
+        dependency_hash=FROZEN_IDENTITY.dependency_hash, account_id="paper-account", cash=1000.0,
         clock_source="broker", deployment_id=deployment_id,
     )
 
 
-def test_tick_snapshot_is_guarded_by_active_deployment(clean_repo, tmp_path):
+def test_tick_snapshot_is_guarded_by_active_deployment(tmp_path):
     conn = connect(tmp_path / "r.db")
     migrate(conn)
     repo = SqliteStrategyRepository(conn)
     rec, gate_id = _candidate_with_gate(repo)
-    manifest = build_working_tree_manifest(
-        identity=IDENTITY, resolved_config=CONFIG, universe_name="liquid-us",
-        repo_root=clean_repo,
-    )
+    manifest = _frozen_descriptor()
     repo.intake_candidate_to_paper(
         rec, capital=1000.0, actor=Actor.AGENT, account_equity=1000.0,
         max_concurrent=1, deployment_manifest=manifest, research_gate_id=gate_id,
@@ -436,16 +517,13 @@ def test_legacy_tick_must_match_strategy_name_and_lane(tmp_path):
     ],
 )
 def test_transition_retirement_matrix_is_atomic(
-    clean_repo, tmp_path, target, reason, retired,
+    tmp_path, target, reason, retired,
 ):
     conn = connect(tmp_path / "r.db")
     migrate(conn)
     repo = SqliteStrategyRepository(conn)
     rec, gate_id = _candidate_with_gate(repo)
-    manifest = build_working_tree_manifest(
-        identity=IDENTITY, resolved_config=CONFIG, universe_name="liquid-us",
-        repo_root=clean_repo,
-    )
+    manifest = _frozen_descriptor()
     repo.intake_candidate_to_paper(
         rec, capital=1000.0, actor=Actor.AGENT, account_equity=1000.0,
         max_concurrent=1, deployment_manifest=manifest, research_gate_id=gate_id,
@@ -462,16 +540,13 @@ def test_transition_retirement_matrix_is_atomic(
 
 
 def test_programmatic_retirement_contends_on_operator_lock(
-    clean_repo, tmp_path, monkeypatch,
+    tmp_path, monkeypatch,
 ):
     conn = connect(tmp_path / "r.db")
     migrate(conn)
     repo = SqliteStrategyRepository(conn)
     rec, gate_id = _candidate_with_gate(repo)
-    manifest = build_working_tree_manifest(
-        identity=IDENTITY, resolved_config=CONFIG, universe_name="liquid-us",
-        repo_root=clean_repo,
-    )
+    manifest = _frozen_descriptor()
     repo.intake_candidate_to_paper(
         rec, capital=1000.0, actor=Actor.AGENT, account_equity=1000.0,
         max_concurrent=1, deployment_manifest=manifest, research_gate_id=gate_id,

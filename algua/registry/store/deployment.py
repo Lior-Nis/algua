@@ -125,12 +125,22 @@ class DeploymentLedgerMixin:
         deployment_manifest: DeploymentManifest,
         research_gate_id: int,
     ) -> StrategyRecord:
-        """Atomically admit capital, open an epoch, and CAS candidate -> paper."""
+        """Atomically admit capital, open an epoch, and CAS candidate -> paper.
+
+        Every new admission is frozen (Story 1.3c): a non-frozen or self-inconsistent descriptor is
+        refused before the transaction opens."""
         from algua.registry import allocations
+        from algua.registry.artifact_errors import FrozenDescriptorConflict
+        from algua.registry.artifact_recording import parse_frozen_deployment_manifest
 
         if self._conn.in_transaction:
             raise RuntimeError(
                 "intake_candidate_to_paper must run at top level, not inside an open transaction")
+        try:
+            parse_frozen_deployment_manifest(deployment_manifest)
+        except DeploymentError as exc:
+            raise FrozenDescriptorConflict(
+                "paper intake admits only a verified frozen descriptor") from exc
         if rec.stage is not Stage.CANDIDATE:
             raise TransitionError(
                 f"{rec.name!r} is not a candidate (stage {rec.stage.value!r})")

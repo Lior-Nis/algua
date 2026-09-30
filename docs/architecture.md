@@ -20,9 +20,9 @@ The target is a **modular monolith + isolated live runtime + background workers*
 The existing package boundaries support that direction. Isolated immutable deployment execution
 is still partial: the [artifact-freeze design](superpowers/specs/2026-09-22-artifact-freeze-design.md)
 separates a frozen decision planner from the current supervisor. The initial pure planner seam and
-explicit deployment epochs are shipped: new paper intake records a canonical working-tree
-descriptor, ticks and forward evaluations carry its append-only deployment ID, and certificates
-cannot cross epochs. Execution is **not frozen yet**: it still imports the mutable working tree and
+explicit deployment epochs are shipped: new paper intake prepares, verifies offline and binds a
+frozen Story 1.3b descriptor (earlier working-tree deployments keep theirs), ticks and forward
+evaluations carry its append-only deployment ID, and certificates cannot cross epochs. Execution is **not frozen yet**: it still imports the mutable working tree and
 refuses a deployment-aware tick when that tree or environment drifts. The approved Story 1.3 parent
 is decomposed into four reviewable increments: complete the full two-phase behavior boundary
 in-process, materialize and verify immutable content/environments, execute frozen planners in paper,

@@ -18,12 +18,15 @@ import pytest
 from typer.testing import CliRunner
 
 import algua.cli.paper_cmd as paper_cmd
+import algua.registry.intake as intake_module
 from algua.cli.main import app
 from algua.config.settings import get_settings
 from algua.execution.alpaca_broker import AccountState
 from algua.operator.diff_policy import DiffEntry
 from algua.operator.gitops import RemoteMovedError
 from algua.operator.mergeback import merge_back_lock
+from algua.registry.allocations import active_allocation
+from algua.registry.artifact_errors import FrozenEnvironmentUnavailable, FrozenSourceDrift
 from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
 
@@ -258,6 +261,41 @@ def test_promote_not_committed_reverts(monkeypatch):
     assert payload["status"] == "promote_failed"
     assert payload["reverted"] is True
     assert ("revert", "MERGE") in git.calls
+
+
+@pytest.mark.parametrize(("exc", "code"), [
+    (FrozenEnvironmentUnavailable(), "frozen_environment_unavailable"),
+    (FrozenSourceDrift(), "frozen_source_drift"),
+], ids=["retryable", "non_retryable"])
+def test_refused_frozen_admission_is_reported_as_promoted_queued(monkeypatch, exc, code):
+    """Story 1.3c: merge-back reaches admission through the REAL ``run_intake``. A Story 1.3b
+    preparation refusal leaves the promoted candidate unadmitted (still ``candidate``: no epoch, no
+    allocation) and the cycle reports today's ``promoted_queued``, carrying the refusal in its
+    intake payload; the next intake re-prepares it."""
+    _register_backtested(_STRAT)
+    git = _FakeGit()
+    promote_calls: list = []
+    _wire(monkeypatch, gate=True, git=git, promote_calls=promote_calls)
+    monkeypatch.setattr(paper_cmd, "run_intake", intake_module.run_intake)
+
+    def refuse(*_args, **_kwargs):
+        raise exc
+
+    monkeypatch.setattr("algua.registry.intake.prepare_frozen_artifact", refuse)
+    result = _invoke()
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["ok"] is True and payload["status"] == "promoted_queued"
+    assert payload["promoted"] is True and len(promote_calls) == 1
+    assert payload["intake"]["refused"] == [{"strategy": _STRAT, "code": code}]
+    assert payload["intake"]["admitted"] == []
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        repo = SqliteStrategyRepository(conn)
+        rec = repo.get(_STRAT)
+        assert rec.stage.value == "candidate"
+        assert active_allocation(conn, rec.id) is None
+        assert repo.active_deployment(rec.id) is None
 
 
 def test_held_lock_fails_second_invocation(monkeypatch):

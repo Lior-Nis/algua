@@ -5,7 +5,8 @@ The admission DECISION is NOT made here — it is made transactionally, one cand
 ``StrategyRepository.intake_candidate_to_paper`` (which re-checks the count cap and the Σ≤equity
 capital bound UNDER the write lock). This module computes the fixed slice and the stable order in
 which candidates are offered to that primitive, then drives ``run_intake``'s loop over them one at
-a time.
+a time. Every new admission is FROZEN (Story 1.3c): before the primitive, each candidate is
+prepared (Story 1.3b) and its recorded descriptor verified offline, outside any write transaction.
 
 ``run_intake`` DOES pre-check the same bounds (``slc <= 0.0 or count >= max_concurrent``) before
 offering each candidate, against a locally-incremented count. That is a fail-SAFE filter, not a
@@ -16,21 +17,44 @@ an admission that would have succeeded — never one that should have failed.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from decimal import ROUND_FLOOR, Decimal
+from pathlib import Path
 
 from algua.audit.log import append as audit_append
+from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
-from algua.registry import allocations
+from algua.registry import allocations, artifact_errors
 from algua.registry.allocations import (
     AllocationError,
     CountCapReached,
     active_allocation,
     active_paper_lane_count,
 )
-from algua.registry.deployment import prepare_working_tree_deployment
+from algua.registry.artifact_preparation import prepare_frozen_artifact
+from algua.registry.artifact_recording import frozen_deployment_manifest
+from algua.registry.artifact_verification import verify_frozen_artifact
+from algua.registry.deployment import DeploymentManifest
 from algua.registry.store import SqliteStrategyRepository
+
+# Story 1.3b's typed preparation/verification refusals and their stable codes. The registry must
+# not import the CLI error registry; tests pin every code equal to its ``error_code``. Anything
+# else raised while preparing (SQLite faults, interrupts, untyped bugs) propagates.
+_REFUSAL_CODES: tuple[tuple[type[Exception], str], ...] = (
+    (artifact_errors.FrozenEnvironmentUnavailable, 'frozen_environment_unavailable'),
+    (artifact_errors.FrozenSourceInvalid, 'frozen_source_invalid'),
+    (artifact_errors.FrozenSourceDrift, 'frozen_source_drift'),
+    (artifact_errors.FrozenAssetsUnsupported, 'frozen_assets_unsupported'),
+    (artifact_errors.FrozenBundleCorrupt, 'frozen_bundle_corrupt'),
+    (artifact_errors.FrozenEnvironmentIncompatible, 'frozen_environment_incompatible'),
+    (artifact_errors.FrozenEnvironmentCorrupt, 'frozen_environment_corrupt'),
+    (artifact_errors.FrozenDescriptorConflict, 'frozen_descriptor_conflict'),
+    (artifact_errors.ArtifactNotFound, 'artifact_not_found'),
+)
+_REFUSALS = tuple(typ for typ, _ in _REFUSAL_CODES)
+# The only retryable 1.3b refusal: admission stops and the rest stay queued for the next intake.
+_RETRYABLE_REFUSAL = 'frozen_environment_unavailable'
 
 
 @dataclass(frozen=True)
@@ -47,6 +71,33 @@ class Candidate:
     name: str
     entry_id: int
     sid: int
+
+
+@dataclass(frozen=True)
+class FrozenAdmission:
+    """The exact recorded, offline-verified frozen descriptor one admission binds to."""
+
+    manifest: DeploymentManifest
+    research_gate_id: int
+
+
+# ``(repo, name, *, repo_root, store_root) -> FrozenAdmission``; injectable so tests need no uv/Git.
+PrepareAndVerify = Callable[..., FrozenAdmission]
+
+
+def prepare_and_verify_frozen(
+    repo: SqliteStrategyRepository, name: str, *, repo_root: Path, store_root: Path,
+) -> FrozenAdmission:
+    """Story 1.3b preparation for the current clean ``HEAD`` (qualify, export, publish, record),
+    then offline verification of THAT recorded descriptor. The verifier must confirm exactly the
+    strategy, artifact row and descriptor preparation recorded; the admission binds that row."""
+    prepared = prepare_frozen_artifact(repo, name, repo_root=repo_root, store_root=store_root)
+    verified = verify_frozen_artifact(repo, prepared.manifest.digest, store_root=store_root)
+    if (verified.strategy, verified.artifact_id, verified.manifest) != (
+            name, prepared.artifact_id, prepared.manifest):
+        raise artifact_errors.FrozenDescriptorConflict()
+    return FrozenAdmission(
+        frozen_deployment_manifest(verified.manifest), prepared.research_gate_id)
 
 
 def _to_cents(dollars: float) -> int:
@@ -122,6 +173,8 @@ def _unallocated_book_tenants(
 
 def run_intake(
     conn: sqlite3.Connection, *, equity: float, max_concurrent: int, actor: Actor,
+    prepare_and_verify: PrepareAndVerify | None = None,
+    repo_root: Path | None = None, store_root: Path | None = None,
 ) -> dict:
     """The FIFO book-admission loop over ONE registry connection — shared by the ``paper intake``
     command and the ``paper merge-back`` driver (#485) so there is exactly one admit path, never a
@@ -139,15 +192,18 @@ def run_intake(
     bounds. No stage changes, and an ALREADY-allocated tenant is never touched (intake is not a
     rebalancer).
 
-    **ADMISSION** (``admitted``) offers each candidate, in FIFO order (candidate-entry
-    ``stage_transitions.id``, tie-break
-    strategy id), to the ATOMIC ``intake_candidate_to_paper`` primitive, which under ONE write lock
-    re-checks the ``max_concurrent`` count cap, cap-checks + allocates an equal slice =
-    floor(equity / max_concurrent to cents) (Σ allocations + slice ≤ ``equity``), and CASes
-    candidate→paper — commit-or-rollback together, so there is no reachable transitioned-but-
-    unallocated state. On either hard bound (book full / no capital headroom) the remaining
-    candidates are left queued; a candidate raced out of ``candidate`` between selection and the txn
-    is reported in ``skipped_stale`` and passed over. Returns the intake envelope dict.
+    **ADMISSION** (``admitted``) takes each candidate in FIFO order (candidate-entry
+    ``stage_transitions.id``, tie-break strategy id). Outside any write transaction it runs
+    ``prepare_and_verify`` (default :func:`prepare_and_verify_frozen` over this checkout and
+    ``Settings.data_dir``), then offers that exact frozen descriptor to the ATOMIC
+    ``intake_candidate_to_paper`` primitive, which under ONE write lock re-checks the count cap,
+    allocates an equal slice = floor(equity / max_concurrent to cents) (Σ allocations + slice ≤
+    ``equity``), opens the deployment epoch on the byte-verified descriptor row and CASes
+    candidate→paper — commit-or-rollback together. A 1.3b refusal leaves the candidate untouched and
+    is reported in ``refused`` as ``{strategy, code}``: ``frozen_environment_unavailable``
+    (retryable) stops admission and queues the rest; any other refusal passes over it. On either
+    hard bound (book full / no capital headroom) the remaining candidates are left queued; a
+    candidate raced out of ``candidate`` before the CAS is reported in ``skipped_stale``.
 
     The caller is responsible for reading ``equity`` READ-ONLY from the broker BEFORE opening
     ``conn`` (no trading) and for validating ``max_concurrent`` > 0."""
@@ -158,14 +214,13 @@ def run_intake(
     readmitted: list[dict] = []
     queued: list[str] = []
     skipped_stale: list[str] = []
+    refused: list[dict] = []
     count = occupied
+    step = prepare_and_verify or prepare_and_verify_frozen
+    root = repo_root or Path(__file__).resolve().parents[2]
 
-    # ---- RE-ADMISSION first: restore the book slice of an already-admitted tenant that lost it.
-    # These strategies are ALREADY at a book stage — they passed the candidate gates and were
-    # admitted once; a bench/demotion round-trip revoked their allocation and the return edge
-    # restored only the stage. A newcomer must not take the slot out from under one, so they go to
-    # the front of the FIFO. No stage changes here: `allocate_in_lane` re-reads the stage under the
-    # SAME write lock and applies the SAME Σ ≤ equity and count-cap bounds intake applies.
+    # ---- RE-ADMISSION first (see docstring): a newcomer must not take the slot out from under a
+    # tenant that was already admitted once; no stage changes, the SAME bounds under the lock.
     for tenant in _unallocated_book_tenants(conn, repo):
         if slc <= 0.0 or count >= max_concurrent:
             queued.append(tenant.name)
@@ -199,12 +254,24 @@ def run_intake(
             queued.extend(c.name for c in ordered[i:])
             break
         try:
-            prepared = prepare_working_tree_deployment(conn, cand.name)
+            # Slow Git/uv/filesystem work, before (never inside) the admit's write transaction.
+            admission = step(repo, cand.name, repo_root=root,
+                             store_root=store_root or get_settings().data_dir)
+        except _REFUSALS as exc:
+            code = next(c for typ, c in _REFUSAL_CODES if isinstance(exc, typ))
+            audit_append(conn, actor=actor.value, action='paper_intake_refused', reason=code,
+                         strategy=cand.name)
+            refused.append({'strategy': cand.name, 'code': code})
+            if code == _RETRYABLE_REFUSAL:
+                queued.extend(c.name for c in ordered[i + 1:])
+                break
+            continue
+        try:
             repo.intake_candidate_to_paper(
                 repo.get(cand.name), capital=slc, actor=actor,
                 account_equity=equity, max_concurrent=max_concurrent,
-                deployment_manifest=prepared.manifest,
-                research_gate_id=prepared.research_gate_id)
+                deployment_manifest=admission.manifest,
+                research_gate_id=admission.research_gate_id)
         except (CountCapReached, AllocationError):
             # Hard bound in-txn (book full or no capital headroom): queue the rest, stop.
             queued.extend(c.name for c in ordered[i:])
@@ -219,5 +286,5 @@ def run_intake(
         admitted.append({'strategy': cand.name, 'capital': slc})
         count += 1
     return {'admitted': admitted, 'readmitted': readmitted, 'queued': queued,
-            'skipped_stale': skipped_stale, 'equity': equity, 'slice': slc,
+            'skipped_stale': skipped_stale, 'refused': refused, 'equity': equity, 'slice': slc,
             'occupied_before': occupied, 'max_concurrent': max_concurrent}
