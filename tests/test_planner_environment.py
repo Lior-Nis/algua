@@ -198,7 +198,13 @@ def test_environment_inventory_rejects_algua_hardlinks_and_unexpected_symlinks(
         inventory_environment(env)
 
 
-def test_provision_uses_exact_uv_commands_and_private_inputs(tmp_path: Path) -> None:
+def test_provision_uses_exact_uv_commands_and_private_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The key is built for a fixed uv version, so pin the installed version it is rechecked
+    # against; otherwise any other installed uv reads as key drift.
+    monkeypatch.setattr(
+        "algua.registry.planner_environment.installer_version", lambda: "uv 0.9.26")
     calls: list[tuple[list[str], Path, dict[str, str], int]] = []
     environment = tmp_path / "environment"
     build_root = tmp_path / "inputs"

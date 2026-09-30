@@ -831,7 +831,7 @@ inventory `test_a_walk_cleanup_error_raised_by_the_*_body_is_not_relabeled` test
 
 Codex was unavailable, so the `docs/agent/story-delivery.md` fallback ran: Blind Hunter, Edge Case
 Hunter and Acceptance Auditor as independent Claude subagents over the uncommitted rescope diff.
-17 unified findings: 13 patched, 1 deferred, 3 dismissed.
+17 unified findings: 13 patched, 1 deferred, 3 dismissed, plus one CI finding patched.
 
 - [x] [Review][Patch] The `--help` parse test missed flag conflicts and added resolve/upgrade/index
   flags, nothing pinned the exact argv, and no automated test ran real uv: replaced by the offline
@@ -869,6 +869,11 @@ Hunter and Acceptance Auditor as independent Claude subagents over the uncommitt
   were not annotated; mirrored and annotated at commit
 - [x] [Review][Patch] The companion's explanation of the dropped flag relied on prose only; the
   offline dry run now proves the exact argv against the real uv
+- [x] [Review][Patch] CI's first run of this branch (latest uv) exposed a pre-existing uv-version
+  dependence: `test_provision_uses_exact_uv_commands_and_private_inputs` built its key for uv 0.9.26
+  without pinning the installed version it is rechecked against, so any other uv read as key drift.
+  Reproduced locally with a newer-uv PATH shim, then pinned like its sibling tests
+  [tests/test_planner_environment.py:201]
 - [x] [Review][Defer] Nothing pins the uv version itself (no `required-version`, CI installs the
   latest uv); the tests exercise whichever uv production would run, and the environment key records
   the uv version so drift separates environments [.github/workflows/ci.yml:13] — deferred,
