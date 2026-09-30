@@ -233,4 +233,3 @@ def verify_working_tree_manifest(manifest: DeploymentManifest, *, repo_root: Pat
         or manifest.source_kind != "working_tree"
     ):
         raise DeploymentError("deployment manifest drift detected")
-

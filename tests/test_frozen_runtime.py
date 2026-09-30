@@ -600,4 +600,3 @@ def test_error_codes_are_stable_and_bound_to_the_deployment():
     for error in (FrozenContentUnavailable(deployment_id=3), FrozenLiveUnsupported(3)):
         assert error.deployment_id == 3
         assert isinstance(error, DeploymentError)
-
