@@ -25,6 +25,12 @@ def load_gated_strategy(
     gating can no longer drift via a copy in a command module.
     """
     strategy = load_tradable_strategy(name)
+    return strategy, require_paper_gates(conn, name, command)
+
+
+def require_paper_gates(conn: sqlite3.Connection, name: str, command: str) -> StrategyRecord:
+    """The gates of :func:`load_gated_strategy` without the checkout load: a frozen tenant
+    (Story 1.3c) clears exactly the same stage, global-halt and kill-switch walls."""
     rec = SqliteStrategyRepository(conn).get(name)
     if rec.stage not in (Stage.PAPER, Stage.FORWARD_TESTED):
         raise ValueError(
@@ -38,4 +44,4 @@ def load_gated_strategy(
             "global halt active; clear with 'algua paper resume-all'")
     if kill_switch.is_tripped(conn, name):
         raise ValueError(f"kill-switch tripped for {name}; reset with 'algua paper resume {name}'")
-    return strategy, rec
+    return rec

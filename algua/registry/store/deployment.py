@@ -85,13 +85,20 @@ class DeploymentLedgerMixin:
     def require_tick_deployment(
         self, strategy_id: int, *, repo_root=None,
     ) -> DeploymentRecord | None:
-        """Verify an active working-tree deployment, or admit only the fixed legacy cohort."""
+        """Verify an active working-tree deployment, or admit only the fixed legacy cohort.
+
+        A frozen deployment never runs from the checkout, so it is refused here before any
+        working-tree verification (Story 1.3c): paper resolves it through
+        ``frozen_runtime.resolve_paper_tenant``; the live lane refuses it."""
         from pathlib import Path
 
         from algua.registry.deployment import verify_working_tree_manifest
+        from algua.registry.frozen_tenant_errors import FrozenLiveUnsupported
 
         deployment = self.active_deployment(strategy_id)
         if deployment is not None:
+            if deployment.source_kind == "frozen":
+                raise FrozenLiveUnsupported(deployment.id)
             root = Path(repo_root) if repo_root is not None else Path(__file__).resolve().parents[3]
             verify_working_tree_manifest(deployment.manifest(), repo_root=root)
             return deployment

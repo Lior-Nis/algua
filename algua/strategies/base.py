@@ -363,32 +363,32 @@ def config_hash(strategy: LoadedStrategy) -> str:
     digest is a 128-bit sha256 prefix (#341): collision-resistant for identity/gate use, not a
     collision-proof guarantee — two differing configs are astronomically unlikely, not provably
     unable, to collide."""
+    return strategy_config_hash(strategy.config)
+
+
+def strategy_config_hash(config: StrategyConfig) -> str:
+    """:func:`config_hash` from the config alone (Story 1.3c: a frozen tenant loads no module)."""
     identity: dict[str, Any] = {
-        "name": strategy.name,
-        "universe": strategy.universe,
-        "params": strategy.params,
-        "execution": asdict(strategy.execution),
-        "construction": strategy.config.construction,
-        "construction_params": strategy.config.construction_params,
-        "needs_fundamentals": strategy.config.needs_fundamentals,
-        "needs_news": strategy.config.needs_news,
-        # #345: behavior-affecting (sizes the walk-forward embargo), and NOT inside params /
-        # execution, so it must be folded in explicitly — two runs with different declared
-        # lookbacks carve different windows and must never collide on config_hash.
-        "feature_lookback": strategy.config.feature_lookback,
+        "name": config.name,
+        "universe": config.universe,
+        "params": config.params,
+        "execution": asdict(config.execution),
+        "construction": config.construction,
+        "construction_params": config.construction_params,
+        "needs_fundamentals": config.needs_fundamentals,
+        "needs_news": config.needs_news,
+        # #345: sizes the walk-forward embargo and lives outside params/execution, so it is folded
+        # in explicitly — two runs with different declared lookbacks must never collide.
+        "feature_lookback": config.feature_lookback,
     }
-    # Model identity (issue #376) is folded in ONLY when needs_model is True, so every existing
-    # non-model strategy's config_hash is byte-identical to before (no live-approval / result-
-    # identity churn). The pinned model_ref carries name/version/digest/training_as_of AND the
-    # provenance_digest (which commits to the training snapshot/code/hyperparameters/seed/eval
-    # report), so the full training provenance — not just the version — is part of the identity.
-    if strategy.config.needs_model:
-        assert strategy.config.model_ref is not None
+    # Model identity (#376) folds in ONLY when needs_model is True (non-model hashes unchanged);
+    # the pinned model_ref's provenance_digest commits to the full training provenance.
+    if config.needs_model:
+        assert config.model_ref is not None
         identity["needs_model"] = True
-        identity["model_ref"] = strategy.config.model_ref.as_dict()
-    # Overlays fold in ONLY when declared, so every pre-existing strategy's hash is byte-identical.
-    # Policy ids, params AND order are identity: reordering two overlays is a different strategy.
-    if strategy.config.overlays:
-        identity["overlays"] = [spec.model_dump() for spec in strategy.config.overlays]
+        identity["model_ref"] = config.model_ref.as_dict()
+    # Overlays fold in ONLY when declared; policy ids, params AND order are identity.
+    if config.overlays:
+        identity["overlays"] = [spec.model_dump() for spec in config.overlays]
     payload = json.dumps(identity, sort_keys=True, allow_nan=False)
     return hashlib.sha256(payload.encode()).hexdigest()[:32]
