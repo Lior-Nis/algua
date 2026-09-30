@@ -269,9 +269,9 @@ class Store:
         return bundle
 
 
-def build_environment(root: Path) -> Path:
+def build_environment(root: Path, env_digest: str = ENV_DIGEST) -> Path:
     """A venv-like environment at its digest locator; returns its `bin/python`."""
-    env = root / "frozen/environments/sha256" / ENV_DIGEST[:2] / ENV_DIGEST
+    env = root / "frozen/environments/sha256" / env_digest[:2] / env_digest
     base = Path(os.path.realpath(sys.executable))
     (env / "bin").mkdir(parents=True)
     (env / "bin/python").symlink_to(base)

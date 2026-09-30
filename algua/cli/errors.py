@@ -95,10 +95,20 @@ def _registry() -> list[tuple[type[BaseException], str]]:
 def error_code(exc: BaseException) -> str:
     """Resolve a stable, machine-readable code for a failure envelope.
 
-    Walks the type-keyed :func:`_registry` most-specific-first and returns the first matching code;
-    anything unmatched (a genuinely unexpected/bug-class exception — ``KeyError``, a pandas error,
-    ``AttributeError``, ...) resolves to ``"internal"``. Total function: every exception is coded.
+    A frozen tenant's fault (Story 1.3c §8) carries its own stable ``code``: the dispatcher's
+    ``FrozenTenantFailure`` (one of the ten §8 codes) and the registry's frozen refusals
+    (``FrozenContentUnavailable``, ``FrozenTenantUnsupported``, ``FrozenLiveUnsupported``) resolve
+    to it. Everything else walks the type-keyed :func:`_registry` most-specific-first and returns
+    the first matching code; anything unmatched (a genuinely unexpected/bug-class exception —
+    ``KeyError``, a pandas error, ``AttributeError``, ...) resolves to ``"internal"``. Total
+    function: every exception is coded.
     """
+    # Imported lazily, like _registry's types: only ever needed while rendering an error.
+    from algua.live.frozen_dispatch import FrozenTenantFailure
+    from algua.registry.frozen_tenant_errors import FrozenTenantError
+
+    if isinstance(exc, (FrozenTenantFailure, FrozenTenantError)):
+        return exc.code
     for typ, code in _registry():
         if isinstance(exc, typ):
             return code

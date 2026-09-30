@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import closing
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -48,7 +49,7 @@ from algua.registry.artifact_recording import (
 from algua.registry.artifact_verification import FrozenVerificationResult
 from algua.registry.db import connect, migrate
 from algua.registry.deployment import DeploymentError
-from algua.registry.intake import prepare_and_verify_frozen, run_intake
+from algua.registry.intake import FrozenAdmission, prepare_and_verify_frozen, run_intake
 from algua.registry.store import SqliteStrategyRepository
 from algua.strategies.loader import load_tradable_strategy
 from tests._deployment_helpers import frozen_manifest
@@ -749,6 +750,40 @@ def test_non_retryable_refusal_skips_only_that_candidate(exc):
     assert payload["queued"] == []
     _assert_untouched(_S1, before)
     assert _stage_of(_S2) is Stage.PAPER and _has_allocation(_S2)
+
+
+@pytest.mark.parametrize("change", [
+    {"needs_model": True},  # a lane frozen paper cannot run
+    {"unknown_field": 1},  # not exactly the recorded StrategyConfig schema
+], ids=["unsupported_lane", "unknown_field"])
+def test_intake_refuses_a_verified_descriptor_whose_config_could_never_tick(change):
+    """Story 1.3c §2: after verification and before admission the recorded config must pass the
+    supervisor's strict decoder. Content that could never tick is refused with
+    ``frozen_content_unsupported`` -- no epoch, allocation or stage change -- and admission goes on
+    with the next candidate, instead of admitting a tenant that fails every cycle."""
+    _to_candidate(_S1)
+    _to_candidate(_S2)
+    before = _snapshot(_S1)
+
+    def step(repo, name, *, repo_root, store_root):
+        admission = prepare_and_verify_frozen(repo, name, repo_root=repo_root,
+                                              store_root=store_root)
+        if name != _S1:
+            return admission
+        frozen = parse_frozen_deployment_manifest(admission.manifest)
+        broken = replace(frozen, resolved_config={**frozen.resolved_config, **change})
+        return FrozenAdmission(frozen_deployment_manifest(broken), admission.research_gate_id)
+
+    payload = _run(step)
+
+    assert payload["refused"] == [{"strategy": _S1, "code": "frozen_content_unsupported"}]
+    assert not is_retryable("frozen_content_unsupported")
+    assert [a["strategy"] for a in payload["admitted"]] == [_S2]
+    _assert_untouched(_S1, before)
+    with closing(connect(get_settings().db_path)) as conn:
+        assert conn.execute(
+            "SELECT reason FROM audit_log WHERE strategy=? AND action='paper_intake_refused'",
+            (_S1,)).fetchall()[0][0] == "frozen_content_unsupported"
 
 
 def test_verification_failure_refuses_a_recorded_but_unverified_descriptor(

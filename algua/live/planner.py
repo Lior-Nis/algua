@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, TypeGuard
 
 from algua.live.planner_contract import (
     EarlyPlannerInput,
@@ -32,8 +33,10 @@ __all__ = [
     "PlannerInput",
     "PlannerPort",
     "PlannerResult",
+    "TickStrategy",
     "build_intents",
     "decide",
+    "in_process_planner",
     "phase_a",
     "phase_a_closed_bars",
     "phase_b",
@@ -86,3 +89,28 @@ class InProcessPlanner:
 
     def phase_b(self, late: LatePlannerInput) -> LatePlannerResult:
         return phase_b(self.strategy, late)
+
+
+class TickStrategy(Protocol):
+    """The strategy attributes `run_tick` itself reads: its name and its gate-bound universe. A
+    checkout-loaded `LoadedStrategy` is one; so is a frozen tenant's supervisor view (Story 1.3c),
+    which carries no planner code and so plans only behind a `PlannerPort`."""
+
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def universe(self) -> Sequence[str]: ...
+
+
+def _carries_planner_code(strategy: TickStrategy) -> TypeGuard[LoadedStrategy]:
+    # A `LoadedStrategy`, or a test double of one: the in-process planner calls `target_weights`.
+    return callable(getattr(strategy, "target_weights", None))
+
+
+def in_process_planner(strategy: TickStrategy) -> InProcessPlanner:
+    """`run_tick`'s default port. Only a strategy carrying its own planner code plans in process;
+    a supervisor view is refused here, never half-run through the in-process planner."""
+    if not _carries_planner_code(strategy):
+        raise TypeError(f"{strategy.name!r} carries no planner code; supply a planner port")
+    return InProcessPlanner(strategy)

@@ -1036,3 +1036,50 @@ def test_run_all_refresh_zero_tickable_skips_provider_and_refresh(monkeypatch):
     assert set(payload["skipped_unallocated"]) == {_S1, _S2}
     assert called == []                          # no tickable tenant -> no refresh attempted
     assert payload["snapshot"]["id"] is None and payload["snapshot"]["refreshed"] is False
+
+
+@pytest.mark.parametrize("command", ["run-all", "trade-tick"])
+def test_working_tree_tenant_plumbing_is_unchanged_by_the_frozen_path(monkeypatch, command):
+    """Story 1.3c pin, written before tenant resolution was rerouted: a working-tree/legacy tenant
+    is loaded from the checkout exactly as before (run-all: the preflight load and the pre-tick
+    re-gate; trade-tick: one load), its identity is recomputed once, and it reaches ``run_tick`` as
+    its checkout-loaded ``LoadedStrategy`` on the in-process planner (no port) with no deployment
+    context (a legacy tenant has no deployment row)."""
+    from algua.cli import paper_cmd
+    from algua.strategies.base import LoadedStrategy
+
+    _to_paper(_S1)
+    _seed_allocation(_S1)
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", _RunAllBroker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snap: object())
+    seen: list[tuple] = []
+    loads: list[tuple[str, str]] = []
+    identities: list[str] = []
+    real_load, real_identity = paper_cmd.load_gated_strategy, paper_cmd.compute_artifact_hashes
+
+    def tick(strategy, broker, provider, start, end, hooks=None, max_drawdown=None):
+        seen.append((strategy, hooks))
+        return _success_result()
+
+    def load(conn, name, label):
+        loads.append((name, label))
+        return real_load(conn, name, label)
+
+    def identity(name):
+        identities.append(name)
+        return real_identity(name)
+
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick", tick)
+    monkeypatch.setattr("algua.cli.paper_cmd.load_gated_strategy", load)
+    monkeypatch.setattr("algua.cli.paper_cmd.compute_artifact_hashes", identity)
+    args = ["paper", "run-all"] if command == "run-all" else ["paper", "trade-tick", _S1]
+
+    result = runner.invoke(app, [*args, "--snapshot", _SNAP, "--start", _START, "--end", _END])
+
+    assert result.exit_code == 0, result.stdout
+    [(strategy, hooks)] = seen
+    assert isinstance(strategy, LoadedStrategy) and strategy.name == _S1
+    assert hooks.planner is None and hooks.planner_context is None
+    label = "paper run-all" if command == "run-all" else "trade-tick"
+    assert loads == [(_S1, label)] * (2 if command == "run-all" else 1)
+    assert identities == [_S1]

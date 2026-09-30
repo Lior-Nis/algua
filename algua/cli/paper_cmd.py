@@ -67,6 +67,8 @@ from algua.execution.order_state import (
 from algua.execution.peaks import rebase_all_peaks, rebase_strategy_peak
 from algua.execution.sim_broker import SimBroker
 from algua.execution.tick_clock import tick_clock
+from algua.live.frozen_dispatch import FrozenPlanner, FrozenTarget, FrozenTenantFailure
+from algua.live.frozen_wire import WireIdentity
 from algua.live.live_loop import (
     SubmittedOrder,
     TickHalted,
@@ -93,11 +95,19 @@ from algua.registry.forward_promotion import (
     refuse_frozen_promotion,
     run_forward_gate,
 )
+from algua.registry.frozen_runtime import (
+    FrozenContentVerifier,
+    FrozenTenant,
+    PaperTenant,
+    prepare_paper_book,
+    recheck_paper_gates,
+    refuse_checkout_replay,
+    resolve_paper_tenant,
+)
 from algua.registry.gating import load_gated_strategy
 from algua.registry.human_actor import authenticate_actor, canonical_run_context
 from algua.registry.intake import run_intake
 from algua.registry.kb_sync import sync_kb_doc
-from algua.registry.paper_runtime import prepare_paper_book, prepare_paper_runtime
 from algua.registry.paper_runtime import still_paper_allocated as _still_paper_allocated
 from algua.registry.promote_run import promote_task
 from algua.registry.repository import StrategyNotFound
@@ -160,6 +170,7 @@ def run(
         raise ValueError("--max-drawdown must be in (0, 1]")
     max_drawdown = resolve_drawdown_breaker(max_drawdown, disable_drawdown_breaker)
     with registry_conn() as conn:
+        refuse_checkout_replay(conn, name)  # a frozen deployment never replays from the checkout
         if disable_drawdown_breaker:
             audit_append(conn, actor="human", action="drawdown_breaker_disabled",
                          reason="paper run invoked with --disable-drawdown-breaker", strategy=name)
@@ -595,12 +606,25 @@ def merge_back(
     }))
 
 
+def _frozen_planner(tenant: PaperTenant) -> FrozenPlanner | None:
+    """A FRESH frozen port for ONE tick of a frozen tenant, built from plain values (the port
+    never reaches the registry); ``None`` keeps a working-tree tenant on the in-process planner."""
+    if not isinstance(tenant, FrozenTenant):
+        return None
+    manifest, view = tenant.manifest, tenant.view
+    identity = WireIdentity(tenant.name, tenant.deployment_id, tenant.artifact_id,
+                            tenant.deployment.manifest_digest, manifest.bundle.digest,
+                            manifest.environment.digest)
+    target = FrozenTarget(identity, tenant.bundle_root, tenant.environment_root,
+                          tenant.interpreter, view.execution, tuple(view.universe))
+    return FrozenPlanner(target, invocations_root=get_settings().data_dir / "frozen/invocations")
+
+
 def _run_paper_strategy_tick(  # noqa: PLR0913
-    conn, name: str, strategy, rec, broker, provider, max_drawdown,
-    tick_ts, clock_source, acct, *, cancel=None, reserve_buy=None,
-    start: str, end: str, snapshot_id: str | None = None, prepared=None,
+    conn, tenant: PaperTenant, broker, provider, max_drawdown, tick_ts, clock_source, acct, *,
+    cancel=None, reserve_buy=None, start: str, end: str, snapshot_id: str | None = None,
 ) -> dict:
-    """ONE strategy's multi-tenant paper tick: NAV-snapshot sizing (#314), crash-safe ledger
+    """ONE resolved tenant's multi-tenant paper tick: NAV-snapshot sizing (#314), crash-safe ledger
     recording, breach trip + scoped flatten, tick-snapshot persistence (equity = per-strategy NAV).
     Returns ok({...}), or an {"ok": False, ...} marker on TickHalted/RiskBreach so run-all can
     surface siblings on a breach (#316b, live #270). Caller reconciles BEFORE calling this.
@@ -609,18 +633,16 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
     any broker/ledger side effect, so a setup failure is wrapped ``StrategySetupError`` for run-all
     to isolate — except a :data:`SYSTEMIC_SETUP_EXCEPTIONS` member, which propagates raw (a
     shared-infra fault is book-wide, not this tenant's). Everything from ``run_tick`` onward is
-    unwrapped: any exception escaping there is book-integrity-critical and aborts the cycle."""
+    unwrapped — any exception escaping there is book-integrity-critical and aborts the cycle — but
+    one: a frozen tenant's ``FrozenTenantFailure`` (Story 1.3c §8), which its port raises only from
+    phase dispatch, before any cancel, submit or downstream hook, is that tenant's setup error."""
+    name, rec = tenant.name, tenant.rec
+    strategy, deployment, identity = tenant.runtime
     try:
         alloc = active_allocation(conn, rec.id)
         if alloc is None:
             raise ValueError(f"{name} has no paper allocation")
         allocation = float(alloc["capital"])
-        if prepared is None:
-            prepared = prepare_paper_runtime(
-                conn, name, strategy, rec, data_dir=get_settings().data_dir,
-                identity_loader=compute_artifact_hashes,
-                logger=log)
-        strategy, deployment, identity = prepared
 
         # Only coids freshly inserted by this tick are safe to retract on noop (#311).
         freshly_recorded: set[str] = set()
@@ -658,6 +680,7 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
                 conn, name, allocation, bars, strategy.universe),
             live_positions=lambda: paper_believed_positions(conn, name),
             planner_context=planner_context_for_deployment(deployment, get_settings().exchange),
+            planner=_frozen_planner(tenant),
         )
     except (KeyboardInterrupt, SystemExit):
         raise
@@ -674,6 +697,8 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
     try:
         result = run_tick(strategy, broker, provider, utc(start), utc(end),
                           hooks=hooks, max_drawdown=max_drawdown)
+    except FrozenTenantFailure as exc:  # bound to its code and deployment_id (§8)
+        raise StrategySetupError(name, exc) from exc
     except TickHalted as exc:
         audit_append(conn, actor="system", action="trade_tick_halted", reason=str(exc),
                      strategy=name)
@@ -770,11 +795,10 @@ def trade_tick(
                     audit_append(conn, actor="human", action="drawdown_breaker_disabled",
                                  reason="paper trade-tick invoked with --disable-drawdown-breaker",
                                  strategy=name)
-                strategy, rec = load_gated_strategy(conn, name, "trade-tick")
-                prepared = prepare_paper_runtime(
-                    conn, name, strategy, rec, data_dir=get_settings().data_dir,
-                    identity_loader=compute_artifact_hashes,
-                    logger=log)
+                tenant = resolve_paper_tenant(
+                    conn, name, command="trade-tick", data_dir=get_settings().data_dir,
+                    verifier=FrozenContentVerifier(get_settings().data_dir),
+                    identity_loader=compute_artifact_hashes, logger=log, loader=load_gated_strategy)
                 broker = _alpaca_broker_from_settings()
                 provider = _select_provider(False, snapshot)
                 acct = broker.account()
@@ -818,9 +842,8 @@ def trade_tick(
 
                 try:
                     out = _run_paper_strategy_tick(
-                        conn, name, strategy, rec, broker, provider, max_drawdown,
-                        tick_ts, clock_source, acct, start=start, end=end,
-                        snapshot_id=snapshot, prepared=prepared)
+                        conn, tenant, broker, provider, max_drawdown, tick_ts, clock_source,
+                        acct, start=start, end=end, snapshot_id=snapshot)
                 except StrategySetupError as exc:
                     # SINGLE-strategy path has no siblings to isolate: unwrap the per-tenant
                     # StrategySetupError so json_errors renders the real cause's message/code (#374)
@@ -913,17 +936,18 @@ def run_all(
                           "skipped_unallocated": skipped_unallocated})
                     raise typer.Exit(1)
                 results: list[dict] = []
+                # One offline content verifier for this invocation: each distinct frozen bundle and
+                # environment is verified once, before planning, refresh and reconciliation.
                 preflight = prepare_paper_book(
-                    conn, tickable, data_dir=get_settings().data_dir,
-                    loader=load_gated_strategy, identity_loader=compute_artifact_hashes,
-                    logger=log)
-                prepared_runtimes, tickable = preflight.runtimes, preflight.tickable
+                    conn, tickable, verifier=FrozenContentVerifier(get_settings().data_dir),
+                    data_dir=get_settings().data_dir, loader=load_gated_strategy,
+                    identity_loader=compute_artifact_hashes, logger=log)
+                tickable = preflight.tickable
                 for failed_name, exc in preflight.failures:
                     setup = StrategySetupError(failed_name, exc)
                     audit_append(conn, actor="system", action="strategy_setup_error",
                                  reason=setup.code, strategy=failed_name)
-                    results.append({"ok": False, "strategy": failed_name,
-                                    "kind": "setup_error", "error": setup.code})
+                    results.append(setup.entry())
                     counters.setup_errors += 1
                 if preflight.failures and not tickable:
                     emit({"ok": False, "code": "strategy_setup_failed",
@@ -963,7 +987,7 @@ def run_all(
                 if refresh:
                     plan = build_cycle_plan(
                         conn, names=[prec.name for prec in tickable], kind=LedgerKind.PAPER,
-                        data_dir=get_settings().data_dir)
+                        data_dir=get_settings().data_dir, views=preflight.frozen_views)
                     results.extend(plan.skipped)
                     if tickable and not plan.universes:
                         audit_append(conn, actor="system", action="cycle_plan_failed",
@@ -1043,17 +1067,18 @@ def run_all(
 
                 breached = False
                 for prec in tickable:
-                    name = prec.name
+                    name, tenant = prec.name, preflight.tenants[prec.name]
                     # Per-strategy fault isolation (#374/GATE-2): ONLY a pre-side-effect setup fault
                     # is contained here (siblings still tick); any other exception is
                     # book-integrity-critical and propagates RAW to abort the cycle. The raw
                     # message is NEVER put in the envelope/audit — only the stable class code —
                     # to avoid leaking credentials/paths.
                     try:
-                        # load_gated_strategy is also pre-side-effect setup: a load/gate-token
-                        # failure here isolates this tenant, so wrap it as StrategySetupError too.
+                        # The pre-tick gate re-check (a working-tree tenant re-loads as before) is
+                        # also pre-side-effect setup: a failure isolates this tenant too.
                         try:
-                            strategy, rec = load_gated_strategy(conn, name, "paper run-all")
+                            recheck_paper_gates(conn, tenant, "paper run-all",
+                                                loader=load_gated_strategy)
                         except (KeyboardInterrupt, SystemExit):
                             raise
                         except StrategySetupError:
@@ -1069,12 +1094,10 @@ def run_all(
                         except Exception as load_exc:  # noqa: BLE001 - pre-side-effect setup fault
                             raise StrategySetupError(name, load_exc) from load_exc
                         out = _run_paper_strategy_tick(
-                            conn, name, strategy, rec, broker, provider, max_drawdown,
-                            tick_ts, clock_source, acct,
-                            reserve_buy=_paper_reserve_for(name),
+                            conn, tenant, broker, provider, max_drawdown, tick_ts, clock_source,
+                            acct, reserve_buy=_paper_reserve_for(name),
                             cancel=lambda n=name: paper_scoped_cancel(conn, broker, n),
-                            start=start, end=end, snapshot_id=snapshot,
-                            prepared=prepared_runtimes[name])
+                            start=start, end=end, snapshot_id=snapshot)
                     except StrategySetupError as exc:
                         log.error("strategy_setup_error",
                                   extra={"fields": {"lane": "paper", "strategy": name,
@@ -1082,8 +1105,7 @@ def run_all(
                                   exc_info=True)
                         audit_append(conn, actor="system", action="strategy_setup_error",
                                      reason=exc.code, strategy=name)
-                        results.append({"ok": False, "strategy": name, "kind": "setup_error",
-                                        "error": exc.code})
+                        results.append(exc.entry())
                         counters.setup_errors += 1
                         continue
                     results.append(out)

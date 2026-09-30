@@ -139,6 +139,15 @@ def decode_frozen_config(manifest: FrozenManifest) -> StrategyConfig:
     return config
 
 
+def decode_tenant_config(manifest: FrozenManifest, name: str) -> StrategyConfig:
+    """:func:`decode_frozen_config` for the tenant ``name``: a recorded config naming another
+    strategy can never tick as ``name``, so it is unsupported too."""
+    config = decode_frozen_config(manifest)
+    if config.name != name:
+        raise FrozenTenantUnsupported("recorded config names another strategy")
+    return config
+
+
 @dataclass(frozen=True)
 class FrozenStrategyView:
     """Exactly what the paper supervisor reads from a tenant, and nothing else: the tick loop

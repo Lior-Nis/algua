@@ -50,8 +50,18 @@ and asked to exit) and pass through unchanged; `SystemExit` / `KeyboardInterrupt
 Codes are keyed by exception **type** (identity), resolved most-specific-first. Every exception
 resolves — anything unmatched is `internal`.
 
+Frozen-tenant faults (Story 1.3c §8) are resolved first, by their own stable `code` attribute
+rather than by type (`algua/cli/errors.py::error_code`). Every one is deployment-bound and
+non-retryable; `paper trade-tick` exits 1 with that `code`, and `paper run-all` records the tenant
+as `{"ok": false, "strategy": ..., "kind": "setup_error", "error": <code>, "deployment_id": ...}`
+and continues its siblings.
+
 | exception type | `code` |
 |---|---|
+| `FrozenTenantFailure` | its own `code`: `frozen_content_unavailable`, `frozen_content_unsupported`, `frozen_request_too_large`, `frozen_launch_failed`, `frozen_timeout`, `frozen_exit_abnormal`, `frozen_output_exceeded`, `frozen_result_invalid`, `frozen_planner_rejected` or `frozen_live_unsupported` |
+| `FrozenContentUnavailable` | `frozen_content_unavailable` |
+| `FrozenTenantUnsupported` | `frozen_content_unsupported` |
+| `FrozenLiveUnsupported` | `frozen_live_unsupported` |
 | `FrozenSourceInvalid` | `frozen_source_invalid` |
 | `FrozenSourceDrift` | `frozen_source_drift` |
 | `FrozenAssetsUnsupported` | `frozen_assets_unsupported` |

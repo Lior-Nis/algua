@@ -1956,6 +1956,17 @@ def _paper_strategy_with_allocation(
     return name
 
 
+def _tenant(conn, name: str):
+    """Resolve ``name`` exactly as ``paper trade-tick`` does (Story 1.3c tenant routing)."""
+    from algua.registry.approvals import compute_artifact_hashes
+    from algua.registry.frozen_runtime import FrozenContentVerifier, resolve_paper_tenant
+
+    return resolve_paper_tenant(
+        conn, name, command="trade-tick", data_dir=get_settings().data_dir,
+        verifier=FrozenContentVerifier(get_settings().data_dir),
+        identity_loader=compute_artifact_hashes)
+
+
 def _latest_tick(name: str) -> dict | None:
     """Return the latest tick snapshot for a strategy from the test DB."""
     with closing(connect(get_settings().db_path)) as conn:
@@ -2086,7 +2097,6 @@ def test_run_paper_strategy_tick_breach_uses_scoped_cancel(monkeypatch, tmp_path
     # flatten — NOT the broker's account-wide cancel, which would nuke a sibling's resting orders.
     from algua.cli import paper_cmd
     from algua.registry.db import registry_conn
-    from algua.registry.gating import load_gated_strategy
 
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
@@ -2104,10 +2114,9 @@ def test_run_paper_strategy_tick_breach_uses_scoped_cancel(monkeypatch, tmp_path
         scoped_cancels["n"] += 1
 
     with registry_conn() as conn:
-        rec = SqliteStrategyRepository(conn).get(name)
-        strategy, _rec = load_gated_strategy(conn, name, "trade-tick")
+        tenant = _tenant(conn, name)
         out = paper_cmd._run_paper_strategy_tick(
-            conn, name, strategy, rec, broker, SyntheticProvider(), 0.01,
+            conn, tenant, broker, SyntheticProvider(), 0.01,
             "tick-ts", "broker", broker.account(), cancel=_scoped_cancel,
             start="2026-01-01", end="2026-02-01")
 
@@ -2124,7 +2133,6 @@ def test_tick_breach_handler_failure_propagates_not_setup_error(monkeypatch, tmp
     from algua.cli import paper_cmd
     from algua.cli._common import StrategySetupError
     from algua.registry.db import registry_conn
-    from algua.registry.gating import load_gated_strategy
 
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
@@ -2138,11 +2146,10 @@ def test_tick_breach_handler_failure_propagates_not_setup_error(monkeypatch, tmp
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("flatten exploded")))
 
     with registry_conn() as conn:
-        rec = SqliteStrategyRepository(conn).get(name)
-        strategy, _rec = load_gated_strategy(conn, name, "trade-tick")
+        tenant = _tenant(conn, name)
         with pytest.raises(RuntimeError, match="flatten exploded") as ei:
             paper_cmd._run_paper_strategy_tick(
-                conn, name, strategy, rec, broker, SyntheticProvider(), 0.01,
+                conn, tenant, broker, SyntheticProvider(), 0.01,
                 "tick-ts", "broker", broker.account(),
                 start="2026-01-01", end="2026-02-01")
         # It must NOT have been wrapped/demoted to a setup fault.
@@ -2156,7 +2163,6 @@ def test_tick_post_submission_ledger_failure_propagates_not_setup_error(monkeypa
     from algua.cli import paper_cmd
     from algua.cli._common import StrategySetupError
     from algua.registry.db import registry_conn
-    from algua.registry.gating import load_gated_strategy
 
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
@@ -2176,11 +2182,10 @@ def test_tick_post_submission_ledger_failure_propagates_not_setup_error(monkeypa
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("ledger write failed")))
 
     with registry_conn() as conn:
-        rec = SqliteStrategyRepository(conn).get(name)
-        strategy, _rec = load_gated_strategy(conn, name, "trade-tick")
+        tenant = _tenant(conn, name)
         with pytest.raises(RuntimeError, match="ledger write failed") as ei:
             paper_cmd._run_paper_strategy_tick(
-                conn, name, strategy, rec, broker, SyntheticProvider(), 0.01,
+                conn, tenant, broker, SyntheticProvider(), 0.01,
                 "tick-ts", "broker", broker.account(),
                 start="2026-01-01", end="2026-02-01")
         assert not isinstance(ei.value, StrategySetupError)
@@ -2193,7 +2198,6 @@ def test_tick_reserve_buy_lambda_crash_propagates_not_setup_error(monkeypatch, t
     from algua.cli import paper_cmd
     from algua.cli._common import StrategySetupError
     from algua.registry.db import registry_conn
-    from algua.registry.gating import load_gated_strategy
 
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
@@ -2210,11 +2214,10 @@ def test_tick_reserve_buy_lambda_crash_propagates_not_setup_error(monkeypatch, t
     monkeypatch.setattr(paper_cmd, "run_tick", _fake_run_tick)
 
     with registry_conn() as conn:
-        rec = SqliteStrategyRepository(conn).get(name)
-        strategy, _rec = load_gated_strategy(conn, name, "trade-tick")
+        tenant = _tenant(conn, name)
         with pytest.raises(RuntimeError, match="reserve pool crashed") as ei:
             paper_cmd._run_paper_strategy_tick(
-                conn, name, strategy, rec, broker, SyntheticProvider(), 0.01,
+                conn, tenant, broker, SyntheticProvider(), 0.01,
                 "tick-ts", "broker", broker.account(), reserve_buy=_boom_reserve,
                 start="2026-01-01", end="2026-02-01")
         assert not isinstance(ei.value, StrategySetupError)
@@ -2226,7 +2229,6 @@ def test_tick_missing_allocation_is_setup_error(monkeypatch, tmp_path):
     from algua.cli import paper_cmd
     from algua.cli._common import StrategySetupError
     from algua.registry.db import registry_conn
-    from algua.registry.gating import load_gated_strategy
 
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
@@ -2237,11 +2239,10 @@ def test_tick_missing_allocation_is_setup_error(monkeypatch, tmp_path):
     monkeypatch.setattr(paper_cmd, "active_allocation", lambda *a, **k: None)
 
     with registry_conn() as conn:
-        rec = SqliteStrategyRepository(conn).get(name)
-        strategy, _rec = load_gated_strategy(conn, name, "trade-tick")
+        tenant = _tenant(conn, name)
         with pytest.raises(StrategySetupError) as ei:
             paper_cmd._run_paper_strategy_tick(
-                conn, name, strategy, rec, broker, SyntheticProvider(), 0.01,
+                conn, tenant, broker, SyntheticProvider(), 0.01,
                 "tick-ts", "broker", broker.account(),
                 start="2026-01-01", end="2026-02-01")
         assert ei.value.code == "ValueError"          # redacted class code, not the raw message

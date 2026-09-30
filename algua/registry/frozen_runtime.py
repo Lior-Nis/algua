@@ -1,15 +1,16 @@
 """Paper tenant resolution for the supervisor (Story 1.3c §2).
 
-``resolve_paper_tenant`` is the one routing point on the paper tick path. A ``frozen`` tenant
-resolves from its RECORDED descriptor and offline-verified content only: the checkout strategy
-module is never imported, the identity is never recomputed from the checkout, and the working-tree
-verifier never sees the row. ``working_tree`` and legacy tenants take exactly today's
-``load_gated_strategy`` + ``prepare_paper_runtime`` path.
+``resolve_paper_tenant`` is the one routing point on the paper tick path (``trade-tick`` directly,
+``run-all`` through the ``prepare_paper_book`` preflight). A ``frozen`` tenant resolves from its
+RECORDED descriptor and offline-verified content only: the checkout strategy module is never
+imported, the identity is never recomputed from the checkout, and the working-tree verifier never
+sees the row. ``working_tree`` and legacy tenants take exactly today's ``load_gated_strategy`` +
+``prepare_paper_runtime`` path. ``paper run`` (checkout replay) refuses a frozen deployment.
 """
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,15 +23,20 @@ from algua.registry.deployment import DeploymentError
 from algua.registry.environment_contract import EnvironmentDescriptor
 from algua.registry.environment_store import EnvironmentStoreError, verify_published_environment
 from algua.registry.frozen_manifest_contract import FrozenManifest
-from algua.registry.frozen_tenant_errors import FrozenContentUnavailable, FrozenTenantUnsupported
+from algua.registry.frozen_tenant_errors import (
+    FrozenContentUnavailable,
+    FrozenLiveUnsupported,
+    FrozenTenantUnsupported,
+)
 from algua.registry.frozen_view import (
     FrozenStrategyView,
-    decode_frozen_config,
+    decode_tenant_config,
     overlay_gate_universe,
 )
 from algua.registry.gating import load_gated_strategy, require_paper_gates
 from algua.registry.repository import ArtifactIdentity, StrategyRecord
 from algua.registry.store import DeploymentRecord, SqliteStrategyRepository
+from algua.risk.global_halt import GlobalHaltActive
 from algua.strategies.base import LoadedStrategy
 
 Loader = Callable[[sqlite3.Connection, str, str], tuple[Any, Any]]
@@ -143,15 +149,28 @@ class FrozenTenant:
         return self.view, self.deployment, self.identity
 
 
-def _active_source_kind(conn: sqlite3.Connection, name: str) -> str | None:
-    """Route without raising, so a non-frozen tenant fails in exactly today's order."""
+PaperTenant = WorkingTreeTenant | FrozenTenant
+
+
+def _active_frozen_deployment(conn: sqlite3.Connection, name: str) -> int | None:
+    """The active deployment's id when it is ``frozen``. Routes without raising, so a non-frozen
+    tenant fails in exactly today's order."""
     row = conn.execute(
-        "SELECT a.source_kind FROM strategies s"
+        "SELECT d.id FROM strategies s"
         " JOIN strategy_deployments d ON d.strategy_id=s.id AND d.retired_at IS NULL"
-        " JOIN deployment_artifacts a ON a.id=d.artifact_id WHERE s.name=?",
+        " JOIN deployment_artifacts a ON a.id=d.artifact_id"
+        " WHERE s.name=? AND a.source_kind='frozen'",
         (name,),
     ).fetchone()
-    return None if row is None else str(row[0])
+    return None if row is None else int(row[0])
+
+
+def refuse_checkout_replay(conn: sqlite3.Connection, name: str) -> None:
+    """``paper run`` replays the CHECKOUT module, which never stands in for a frozen deployment:
+    refuse it with ``frozen_live_unsupported`` before anything is loaded or replayed (§2)."""
+    deployment_id = _active_frozen_deployment(conn, name)
+    if deployment_id is not None:
+        raise FrozenLiveUnsupported(deployment_id)
 
 
 def resolve_paper_tenant(
@@ -169,7 +188,7 @@ def resolve_paper_tenant(
 
     ``loader`` and ``identity_loader`` serve only the unchanged working-tree/legacy path; the
     frozen path uses the recorded descriptor, ``verifier`` and the paper gates alone."""
-    if _active_source_kind(conn, name) != "frozen":
+    if _active_frozen_deployment(conn, name) is None:
         strategy, rec = (loader or load_gated_strategy)(conn, name, command)
         strategy, deployment, identity = paper_runtime.prepare_paper_runtime(
             conn, name, strategy, rec, data_dir=data_dir, identity_loader=identity_loader,
@@ -195,9 +214,7 @@ def _resolve_frozen(
         raise FrozenContentUnavailable(
             "recorded descriptor", deployment_id=deployment.id) from exc
     try:
-        config = decode_frozen_config(manifest)
-        if config.name != name:
-            raise FrozenTenantUnsupported("recorded config names another strategy")
+        config = decode_tenant_config(manifest, name)
     except FrozenTenantUnsupported as exc:
         exc.deployment_id = deployment.id
         raise
@@ -208,3 +225,57 @@ def _resolve_frozen(
     bundle_root = verifier.bundle(manifest.bundle, deployment_id=deployment.id)
     environment_root = verifier.environment(manifest.environment, deployment_id=deployment.id)
     return FrozenTenant(rec, deployment, manifest, bundle_root, environment_root, view)
+
+
+@dataclass(frozen=True)
+class PaperBookSetup:
+    tenants: dict[str, PaperTenant]
+    tickable: list[Any]
+    failures: list[tuple[str, Exception]]
+
+    @property
+    def frozen_views(self) -> dict[str, FrozenStrategyView]:
+        """Each frozen tenant's supervisor view: what cycle planning reads for it."""
+        return {name: t.view for name, t in self.tenants.items() if isinstance(t, FrozenTenant)}
+
+
+def prepare_paper_book(
+    conn: sqlite3.Connection,
+    records: Iterable[Any],
+    *,
+    verifier: FrozenContentVerifier,
+    data_dir: Path,
+    identity_loader: Callable[[str], ArtifactIdentity],
+    logger: Any = None,
+    loader: Loader | None = None,
+) -> PaperBookSetup:
+    """Preflight every tenant before planning, refresh, reconciliation or any venue effect: resolve
+    it (a frozen tenant's content is verified offline here, once per digest for the process),
+    isolate a tenant-local failure and propagate systemic state."""
+    tenants: dict[str, PaperTenant] = {}
+    tickable: list[Any] = []
+    failures: list[tuple[str, Exception]] = []
+    for record in records:
+        try:
+            tenants[record.name] = resolve_paper_tenant(
+                conn, record.name, command="paper run-all", verifier=verifier,
+                data_dir=data_dir, identity_loader=identity_loader, logger=logger, loader=loader)
+        except (sqlite3.Error, GlobalHaltActive):
+            raise
+        except Exception as exc:  # noqa: BLE001 - per-tenant pre-effect isolation boundary
+            failures.append((record.name, exc))
+        else:
+            tickable.append(record)
+    return PaperBookSetup(tenants=tenants, tickable=tickable, failures=failures)
+
+
+def recheck_paper_gates(
+    conn: sqlite3.Connection, tenant: PaperTenant, command: str, *, loader: Loader | None = None,
+) -> None:
+    """Re-clear the paper gates right before ``tenant`` ticks (a sibling may have tripped them
+    since preflight): a working-tree tenant re-loads exactly as before, a frozen tenant clears the
+    same gates without touching the checkout."""
+    if isinstance(tenant, FrozenTenant):
+        require_paper_gates(conn, tenant.name, command)
+    else:
+        (loader or load_gated_strategy)(conn, tenant.name, command)

@@ -25,7 +25,7 @@ from pathlib import Path
 from algua.audit.log import append as audit_append
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
-from algua.registry import allocations, artifact_errors
+from algua.registry import allocations, artifact_errors, artifact_recording, frozen_tenant_errors
 from algua.registry.allocations import (
     AllocationError,
     CountCapReached,
@@ -33,9 +33,9 @@ from algua.registry.allocations import (
     active_paper_lane_count,
 )
 from algua.registry.artifact_preparation import prepare_frozen_artifact
-from algua.registry.artifact_recording import frozen_deployment_manifest
 from algua.registry.artifact_verification import verify_frozen_artifact
 from algua.registry.deployment import DeploymentManifest
+from algua.registry.frozen_view import decode_tenant_config
 from algua.registry.store import SqliteStrategyRepository
 
 # Story 1.3b's typed preparation/verification refusals and their stable codes. The registry must
@@ -51,6 +51,8 @@ _REFUSAL_CODES: tuple[tuple[type[Exception], str], ...] = (
     (artifact_errors.FrozenEnvironmentCorrupt, 'frozen_environment_corrupt'),
     (artifact_errors.FrozenDescriptorConflict, 'frozen_descriptor_conflict'),
     (artifact_errors.ArtifactNotFound, 'artifact_not_found'),
+    # Story 1.3c §2: a verified descriptor whose recorded config the supervisor cannot decode.
+    (frozen_tenant_errors.FrozenTenantUnsupported, 'frozen_content_unsupported'),
 )
 _REFUSALS = tuple(typ for typ, _ in _REFUSAL_CODES)
 # The only retryable 1.3b refusal: admission stops and the rest stay queued for the next intake.
@@ -97,7 +99,8 @@ def prepare_and_verify_frozen(
             name, prepared.artifact_id, prepared.manifest):
         raise artifact_errors.FrozenDescriptorConflict()
     return FrozenAdmission(
-        frozen_deployment_manifest(verified.manifest), prepared.research_gate_id)
+        artifact_recording.frozen_deployment_manifest(verified.manifest),
+        prepared.research_gate_id)
 
 
 def _to_cents(dollars: float) -> int:
@@ -199,11 +202,13 @@ def run_intake(
     ``intake_candidate_to_paper`` primitive, which under ONE write lock re-checks the count cap,
     allocates an equal slice = floor(equity / max_concurrent to cents) (Σ allocations + slice ≤
     ``equity``), opens the deployment epoch on the byte-verified descriptor row and CASes
-    candidate→paper — commit-or-rollback together. A 1.3b refusal leaves the candidate untouched and
-    is reported in ``refused`` as ``{strategy, code}``: ``frozen_environment_unavailable``
-    (retryable) stops admission and queues the rest; any other refusal passes over it. On either
-    hard bound (book full / no capital headroom) the remaining candidates are left queued; a
-    candidate raced out of ``candidate`` before the CAS is reported in ``skipped_stale``.
+    candidate→paper — commit-or-rollback together. A 1.3b refusal, or a verified descriptor whose
+    recorded config the strict supervisor decoder refuses (``frozen_content_unsupported``), leaves
+    the candidate untouched and is reported in ``refused`` as ``{strategy, code}``:
+    ``frozen_environment_unavailable`` (retryable) stops admission and queues the rest; any other
+    refusal passes over it. On either hard bound (book full / no capital headroom) the remaining
+    candidates are left queued; a candidate raced out of ``candidate`` before the CAS is reported
+    in ``skipped_stale``.
 
     The caller is responsible for reading ``equity`` READ-ONLY from the broker BEFORE opening
     ``conn`` (no trading) and for validating ``max_concurrent`` > 0."""
@@ -257,6 +262,9 @@ def run_intake(
             # Slow Git/uv/filesystem work, before (never inside) the admit's write transaction.
             admission = step(repo, cand.name, repo_root=root,
                              store_root=store_root or get_settings().data_dir)
+            # Content the supervisor's strict decoder refuses could never tick (Story 1.3c §2).
+            decode_tenant_config(
+                artifact_recording.parse_frozen_deployment_manifest(admission.manifest), cand.name)
         except _REFUSALS as exc:
             code = next(c for typ, c in _REFUSAL_CODES if isinstance(exc, typ))
             audit_append(conn, actor=actor.value, action='paper_intake_refused', reason=code,

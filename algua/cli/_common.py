@@ -13,6 +13,8 @@ from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 
 from algua.config.settings import get_settings
+from algua.live.frozen_dispatch import FrozenTenantFailure
+from algua.registry.frozen_tenant_errors import FrozenTenantError
 
 # Exception types that signal a SYSTEMIC / book-wide condition rather than one tenant's setup fault
 # (#374 GATE-2 fix): a locked/unavailable shared SQLite connection during one strategy's setup read
@@ -33,6 +35,11 @@ SYSTEMIC_SETUP_EXCEPTIONS: tuple[type[BaseException], ...] = (sqlite3.Error,)
 # fallback rather than trusted as-is (#374 GATE-2).
 _SAFE_SETUP_CODE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
+# Story 1.3c §8: a frozen tenant's fault (the dispatcher's ``FrozenTenantFailure``) and the
+# registry's frozen refusals carry their own stable ``code`` and the ``deployment_id`` they are
+# bound to; the setup error reports those instead of the class name.
+_FROZEN_CODED = (FrozenTenantFailure, FrozenTenantError)
+
 
 class StrategySetupError(Exception):
     """A per-tenant setup failure raised BEFORE any broker/ledger side effect began this cycle.
@@ -52,7 +59,8 @@ class StrategySetupError(Exception):
     ``code`` is a stable, redacted classifier (the raising exception's class name, allowlist-
     sanitized via :data:`_SAFE_SETUP_CODE_RE`) suitable for the JSON envelope and audit trail — the
     raw ``str(exc)`` (which can carry credentials/paths) is NEVER surfaced there; it survives only
-    in the ``exc_info=True`` structured log.
+    in the ``exc_info=True`` structured log. A frozen tenant's fault (Story 1.3c §8) is coded by its
+    own stable ``code`` instead, and its run-all :meth:`entry` also names its ``deployment_id``.
     """
 
     def __init__(self, strategy: str, cause: BaseException) -> None:
@@ -61,9 +69,17 @@ class StrategySetupError(Exception):
         # path — which has no siblings to isolate and wants the ORIGINAL fault's actionable message
         # and specific error code, not this redacted wrapper — can unwrap and re-raise it (#374).
         self.cause: BaseException = cause
-        raw_code = type(cause).__name__
+        raw_code = cause.code if isinstance(cause, _FROZEN_CODED) else type(cause).__name__
         self.code = raw_code if _SAFE_SETUP_CODE_RE.match(raw_code) else "SetupError"
         super().__init__(f"{strategy}: {self.code}")
+
+    def entry(self) -> dict:
+        """The run-all per-tenant ``setup_error`` marker; a frozen tenant's names its deployment."""
+        entry: dict = {"ok": False, "strategy": self.strategy, "kind": "setup_error",
+                       "error": self.code}
+        if isinstance(self.cause, _FROZEN_CODED):
+            entry["deployment_id"] = self.cause.deployment_id
+        return entry
 
 
 def ok(data: dict) -> dict:
