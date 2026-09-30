@@ -691,6 +691,121 @@ def test_submit_sized_reserve_below_min_notional_skips(monkeypatch):
     assert fake.posted == []
 
 
+class _SequencedPosts(_FakeRequests):
+    """Answers each POST with the next response in order."""
+
+    def __init__(self, *responses):
+        super().__init__({})
+        self.responses = list(responses)
+
+    def post(self, url, headers=None, json=None, timeout=None, allow_redirects=None):
+        self.redirects_allowed.append(allow_redirects)
+        self.posted.append(json)
+        return self.responses.pop(0)
+
+
+def _insufficient(available: str) -> _FakeResp:
+    import json
+
+    return _FakeResp(403, text=json.dumps({"available": available, "code": 40310000,
+                                           "message": "insufficient qty available for order"}))
+
+
+def test_a_full_exit_sells_the_exact_held_shares_not_a_notional(monkeypatch):
+    # Production 2026-09-29 (#677): a notional full exit sized at the prior close (924.59) converted
+    # at the venue's lower current price into MORE shares than held -> 403 insufficient qty.
+    fake = _SequencedPosts(_FakeResp(201, {"id": "exit-1"}))
+    monkeypatch.setattr(ab, "requests", fake)
+    snap = ab.TickSnapshot(equity=100_000.0, market_values={"COST": 1320.6031},
+                           qtys={"COST": 1.428312053})
+    oid = _broker().submit_sized(OrderIntent("COST", Side.SELL, 0.0, T0), snap,
+                                 client_order_id="c1")
+    assert oid == "exit-1"
+    assert fake.posted == [{"symbol": "COST", "qty": "1.428312053", "side": "sell",
+                            "type": "market", "time_in_force": "day", "client_order_id": "c1"}]
+
+
+def test_an_exit_the_account_cannot_fully_fill_sells_what_the_account_holds(monkeypatch):
+    # A sibling tenant's ledger short (left by the incident) means the account holds less than this
+    # tenant's ledger: the refused exit is re-posted once for the venue's available qty.
+    fake = _SequencedPosts(_insufficient("8.848617394"), _FakeResp(201, {"id": "exit-2"}))
+    monkeypatch.setattr(ab, "requests", fake)
+    snap = ab.TickSnapshot(equity=50_000.0, market_values={"MRK": 1315.4},
+                           qtys={"MRK": 8.855574267})
+    assert _broker().submit_sized(OrderIntent("MRK", Side.SELL, 0.0, T0), snap,
+                                  client_order_id="c2") == "exit-2"
+    assert [body["qty"] for body in fake.posted] == ["8.855574267", "8.848617394"]
+    assert fake.posted[1]["client_order_id"] == "c2"
+
+
+@pytest.mark.parametrize("refusal", [
+    _insufficient("0"),
+    _FakeResp(403, text='{"code":40310000,"message":"potential wash trade detected"}'),
+    _FakeResp(403, text="forbidden"),
+])
+def test_an_exit_refusal_without_available_shares_still_raises(monkeypatch, refusal):
+    fake = _SequencedPosts(refusal)
+    monkeypatch.setattr(ab, "requests", fake)
+    snap = ab.TickSnapshot(equity=50_000.0, market_values={"MRK": 1315.4}, qtys={"MRK": 8.8})
+    with pytest.raises(BrokerError, match="403"):
+        _broker().submit_sized(OrderIntent("MRK", Side.SELL, 0.0, T0), snap)
+    assert len(fake.posted) == 1
+
+
+def test_a_liquidation_refused_for_insufficient_qty_still_raises(monkeypatch):
+    # flatten must never report a full liquidation after a silently partial sale
+    fake = _SequencedPosts(_insufficient("5"))
+    monkeypatch.setattr(ab, "requests", fake)
+    with pytest.raises(BrokerError, match="403"):
+        _broker().submit_offset("MRK", 8.8, "flat-1")
+    assert len(fake.posted) == 1
+
+
+def test_a_partial_sell_refusal_is_not_resized(monkeypatch):
+    fake = _SequencedPosts(_insufficient("5"))
+    monkeypatch.setattr(ab, "requests", fake)
+    snap = ab.TickSnapshot(equity=100_000.0, market_values={"AAA": 60_000.0}, qtys={"AAA": 600.0})
+    with pytest.raises(BrokerError, match="403"):
+        _broker().submit_sized(OrderIntent("AAA", Side.SELL, 0.5, T0), snap)
+    assert len(fake.posted) == 1 and "notional" in fake.posted[0]
+
+
+def test_partial_sells_short_covers_and_dust_keep_their_existing_sizing(monkeypatch):
+    fake = _SequencedPosts(_FakeResp(201, {"id": "o1"}), _FakeResp(201, {"id": "o2"}))
+    monkeypatch.setattr(ab, "requests", fake)
+    snap = ab.TickSnapshot(equity=100_000.0, market_values={"AAA": 60_000.0, "SHT": -2.74,
+                                                            "DST": 0.4},
+                           qtys={"AAA": 600.0, "SHT": -0.0274, "DST": 0.004})
+    _broker().submit_sized(OrderIntent("AAA", Side.SELL, 0.5, T0), snap)
+    _broker().submit_sized(OrderIntent("SHT", Side.BUY, 0.0, T0), snap)
+    assert fake.posted[0]["notional"] == "10000.00" and "qty" not in fake.posted[0]
+    assert fake.posted[1] == {"symbol": "SHT", "notional": "2.74", "side": "buy",
+                              "type": "market", "time_in_force": "day"}
+    assert _broker().submit_sized(OrderIntent("DST", Side.SELL, 0.0, T0), snap) == "noop"
+
+
+@pytest.mark.parametrize(("status", "text", "expected"), [
+    (403, '{"available":"1.5","code":40310000}', "1.5"),
+    (403, '{"available":"0","code":40310000}', None),
+    (403, '{"available":"-2","code":40310000}', None),
+    (403, '{"available":"NaN","code":40310000}', None),
+    (403, '{"available":"1.5","code":40010001}', None),
+    (403, '{"code":40310000}', None),
+    (403, '["not", "an", "object"]', None),
+    (403, "not json", None),
+    (422, '{"available":"1.5","code":40310000}', None),
+])
+def test_available_qty_reads_only_alpacas_structured_insufficient_qty_refusal(
+    status, text, expected,
+):
+    from decimal import Decimal
+
+    from algua.execution.alpaca_rejections import available_qty
+
+    got = available_qty(status, text)
+    assert got == (None if expected is None else Decimal(expected))
+
+
 # ---------------------------------------------------------------------------
 # #124 forward-test gate: clock, account id, windowed activities
 # ---------------------------------------------------------------------------
