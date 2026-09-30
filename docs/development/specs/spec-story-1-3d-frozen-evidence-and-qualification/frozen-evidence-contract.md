@@ -11,6 +11,11 @@ Normative companion to [SPEC.md](SPEC.md). Builds on the Story 1.3c contract; te
 - Not attempts, and not recorded here: phases the supervisor settled without a child (a
   supervisor-found breach, a pending venue belief, a supervisor refusal of its own input). Those keep
   their existing records (kill-switch/breach audit, run-all `setup_error` entry).
+- Encoding failures fall on either side of that line. The Phase B captured-state encoding check the
+  supervisor performs while computing its own verdict (`_late` in `frozen_dispatch.py`: the
+  captured quantities and market values round-tripped through the wire encoding) is a supervisor
+  refusal of its own input (`frozen_planner_rejected`, no row). An encoding failure inside the
+  attempt (`encode_request`) is an attempt refused before launch, recorded with no request bytes.
 - Exactly one row is written per attempt, once the supervisor has fully judged it: *success* means
   the result decoded and passed every Story 1.3c §7 cross-check for that phase; otherwise the row
   carries the `FrozenTenantFailure` code the supervisor raised. A Phase B decision later turned into
@@ -41,9 +46,7 @@ CREATE TABLE IF NOT EXISTS frozen_invocations (
     request_sha256        TEXT CHECK (request_sha256 IS NULL OR length(request_sha256) = 64),
     bars_sha256           TEXT CHECK (bars_sha256 IS NULL OR length(bars_sha256) = 64),
     phase_a_binding       TEXT,
-    result_kind           TEXT CHECK (result_kind IS NULL OR result_kind IN (
-                              'early_no_decision', 'snapshot_required', 'risk_failure',
-                              'late_no_decision', 'decision')),
+    result_kind           TEXT,
     result_sha256         TEXT CHECK (result_sha256 IS NULL OR length(result_sha256) = 64),
     failure_code          TEXT CHECK (failure_code IS NULL OR failure_code IN (
                               'frozen_content_unavailable', 'frozen_content_unsupported',
@@ -61,6 +64,9 @@ CREATE TABLE IF NOT EXISTS frozen_invocations (
     ended_at              TEXT NOT NULL,
     CHECK ((result_sha256 IS NULL) <> (failure_code IS NULL)),
     CHECK ((result_sha256 IS NULL) = (result_kind IS NULL)),
+    CHECK (result_kind IS NULL
+           OR (phase = 'a' AND result_kind IN ('early_no_decision', 'snapshot_required'))
+           OR (phase = 'b' AND result_kind IN ('risk_failure', 'late_no_decision', 'decision'))),
     CHECK ((request_json IS NULL) = (request_sha256 IS NULL)),
     CHECK ((phase = 'b') = (phase_a_invocation_id IS NOT NULL)),
     CHECK (diagnostic IS NULL OR failure_code IS NOT NULL),
@@ -145,13 +151,27 @@ BEGIN SELECT RAISE(ABORT, 'a tick''s deployment and invocation link cannot chang
 - `bars_start` and `bars_end` are ISO-8601 UTC renderings of the exact bounds passed to `get_bars`.
 - `phase_a_binding` is the binding Phase A produced (on phase `a` rows) and the binding Phase B
   received (on phase `b` rows); the trigger requires them equal.
-- `diagnostic` is Story 1.3c's `process_diagnostic` (printable ASCII, at most 8 KiB), on failure rows
-  only.
+- `diagnostic` is the raised `FrozenTenantFailure`'s sanitized, bounded diagnostic (printable ASCII,
+  at most 8 KiB), on failure rows only. It equals Story 1.3c's `process_diagnostic` only for process
+  failures (the codes `process_failure` derives from how the child ended); for every other code it
+  is the supervisor's own reason (the refusal, or the cross-check that failed).
+- `stderr_truncated` (like `timed_out` and `stdout_exceeded`) is the child's contained-process
+  flag: 1 when the child's stderr overflowed the 64 KiB capture and the capture was cut. It is
+  distinct from the `stderr_truncated=true` marker inside a process diagnostic, which is also set
+  when only the diagnostic's own sanitized stderr head was cut to fit 8 KiB; the column can be 0
+  while that marker says true.
+- A success's `result_kind` is one its phase can produce, checked by the table (Story 1.3c §7; the
+  per-phase sets are `PHASE_RESULT_KINDS` in `algua/contracts/frozen_evidence.py`, and a test ties
+  them, and the failure codes, to the DDL). Phase A succeeds only by matching the supervisor's
+  `early_no_decision` or `snapshot_required` verdict, since a supervisor-found breach launches no
+  child. Phase B succeeds with `late_no_decision`, a cross-checked `decision` (also when the weight
+  rerun turns it into a breach), or a `risk_failure` of a kind only the strategy's weights can cause.
 - Rows are retained indefinitely (Phase 1): about two 10–20 KiB rows per frozen tenant per session.
   Ticks are not made immutable beyond the linked columns.
 - v48 is forward-only. Running 1.3c code on a v48 database aborts `run-all` at the first frozen
   tenant (after that tenant's orders are sent). Before any rollback, retire frozen deployments or
-  drop `tick_snapshots_frozen_link`; the runbook records this.
+  drop `tick_snapshots_frozen_link`; the operator runbook (`deploy/systemd/README.md`, "Schema v48
+  (Story 1.3d) is forward-only") records this.
 
 ## 3. Recording seam (CAP-1, CAP-2)
 
@@ -192,23 +212,38 @@ BEGIN SELECT RAISE(ABORT, 'a tick''s deployment and invocation link cannot chang
 
 ## 5. Promotion (CAP-4)
 
-- One chokepoint, `promotion_identity(conn, record, *, data_dir) -> (deployment, identity)` in
-  `algua/registry/forward_promotion.py`:
-  - working-tree: exactly today's `compute_artifact_hashes` plus the deployment-hash match;
-  - frozen: parse the recorded descriptor, verify its bundle and environment offline with a *fresh*
-    `FrozenContentVerifier`, and return the descriptor's hashes. A verification failure refuses with
-    `frozen_content_unavailable` / `frozen_content_unsupported` before any evaluation row, look
-    count, token or stage change.
-- Order: `paper promote` keeps today's ledger-only frozen check in its current slot (where
-  `refuse_frozen_promotion` runs). Only for a frozen deployment does it call `promotion_identity`
-  there, before actor authentication; working-tree and legacy strategies keep today's order and the
-  places where identity is computed, so their refusal order is unchanged. Identity is resolved once
-  and `(deployment, identity)` is passed into `run_forward_gate`, so the environment is verified
-  once per promotion.
-- `authenticate_actor` receives a lazy identity callable that only a human actor calls (so a human
-  challenge binds the descriptor hashes for a frozen deployment); `promote_run.py` passes the
-  checkout identity without growing past its size pin. No path of `paper promote` imports a frozen
-  tenant's checkout module.
+- The promotion chokepoint in `algua/registry/forward_promotion.py` has two steps:
+  - `promotion_slot(conn, record, *, data_dir) -> PromotionSlot` is the ledger-only read in the slot
+    where `refuse_frozen_promotion` ran, once per promotion, before actor authentication. It records
+    the active epoch's id (`None` for the legacy cohort). For a frozen deployment it parses the
+    recorded descriptor, strictly decodes its config, verifies its bundle and environment offline
+    with a *fresh* `FrozenContentVerifier`, and resolves the frozen identity there. A verification
+    failure refuses with `frozen_content_unavailable` / `frozen_content_unsupported` before
+    authentication and before any evaluation row, look count, token or stage change. A working-tree
+    or legacy strategy is not hashed here.
+  - `promotion_identity(conn, record, slot) -> PromotionIdentity` runs at today's working-tree
+    identity site, after preflight and broker construction. Frozen: it returns the slot's identity
+    with no re-read and no re-verification. Working-tree: exactly today's `compute_artifact_hashes`
+    plus `require_tick_deployment` plus the deployment-hash match, in today's order and with today's
+    messages, but only for the epoch the slot read; if the active epoch's id differs from the slot's
+    it refuses with `DeploymentError("active deployment changed during forward promotion")`
+    (`invalid_input`, not retryable), both before hashing and after the verified read. An epoch that
+    became frozen is always a new deployment row, so it is refused too: this step never takes a
+    frozen branch. Legacy: the unchanged "requires one active deployment epoch" refusal.
+- `PromotionIdentity` is an opaque frozen value: the deployment record, the three hashes and, for a
+  frozen deployment, the verified descriptor's manifest digest. Only the two functions above can
+  mint it; constructing it elsewhere, including through `dataclasses.replace`, raises.
+  `run_forward_gate(..., promotion: PromotionIdentity)` accepts nothing else, refuses a value minted
+  for another strategy and re-verifies nothing; evidence assembly still requires the epoch to be
+  active. The admissibility filter, the evaluation row and the transition's pinned hashes all come
+  from that one value, so the environment is verified once per promotion.
+- `authenticate_actor` receives a lazy identity callable that only a human actor calls: the checkout
+  identity for working-tree and legacy strategies, the slot's descriptor hashes for a frozen
+  deployment. For a frozen deployment only, the signed canonical run context also binds
+  `deployment_id` and `manifest_digest`, so a signature over one epoch cannot authenticate another
+  epoch that shares the three hashes; a working-tree or legacy challenge is byte-identical to the
+  pre-1.3d encoding. `promote_run.py` passes the checkout identity without growing past its size
+  pin. No path of `paper promote` imports a frozen tenant's checkout module.
 - `refuse_frozen_promotion` and the `frozen_qualification_pending` code are removed from
   `paper promote` and `run_forward_gate`. The raw `registry transition` edge to `forward_tested`
   keeps refusing a frozen deployment, now as a `TransitionError` (`wrong_stage`: "reach
@@ -247,7 +282,11 @@ BEGIN SELECT RAISE(ABORT, 'a tick''s deployment and invocation link cannot chang
   wrong-deployment or wrong-snapshot link; a working-tree tick with a link; duplicate link); link
   immutability; the admissibility filter and its count; promotion success from linked evidence
   without checkout access, promotion refusal on corrupt/replaced/permission-drifted content, the
-  human-actor challenge binding descriptor hashes, the raw-edge refusal, go-live still refused;
+  human-actor challenge binding descriptor hashes (and, for a frozen deployment, its epoch and
+  manifest digest, refused on another epoch with identical hashes; working-tree and legacy challenge
+  bytes golden-pinned), `PromotionIdentity` unmintable outside the chokepoint, `run_forward_gate`
+  refusing unminted and foreign-strategy values, an epoch change between slot and resolution refused
+  before any row, the raw-edge refusal, go-live still refused;
   replay determinism; sibling isolation and systemic failures unchanged; working-tree and legacy
   evidence and promotion unchanged; migration from v47 (column, triggers, version).
 - Known churn: `docs/architecture.md` (names `frozen_qualification_pending`); tests that stamp

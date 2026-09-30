@@ -27,8 +27,9 @@ paper tenant's planner runs each phase in a fresh child process launched from it
 and environment (`algua/live/frozen_dispatch.py`); the current supervisor re-derives every
 strategy-free risk wall and owns all effects. Working-tree deployments still import the mutable
 working tree and refuse a deployment-aware tick when that tree or environment drifts. Every frozen
-planner attempt is recorded append-only and each frozen tick links its final invocation; forward
-evidence for a frozen deployment counts only linked ticks, and `paper promote` qualifies it from its
+planner attempt the supervisor decides to run a child for is recorded append-only (phases it
+settles itself are not) and each frozen tick links its final invocation; forward evidence for a
+frozen deployment counts only linked ticks, and `paper promote` qualifies it from its
 recorded descriptor and freshly verified content, never the checkout (the raw `registry transition`
 edge refuses it). The live lane and go-live refuse frozen deployments (`frozen_live_unsupported`).
 The approved Story 1.3 parent is decomposed into four reviewable increments: complete the full

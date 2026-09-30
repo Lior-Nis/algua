@@ -49,7 +49,7 @@ development_status:
   1-3a-complete-two-phase-planner-boundary-in-process: done
   1-3b-materialize-and-verify-recoverable-planner-artifacts: done
   1-3c-execute-frozen-planners-in-paper: done
-  1-3d-bind-operational-evidence-and-qualification: ready-for-dev
+  1-3d-bind-operational-evidence-and-qualification: review
   epic-1-retrospective: optional
   epic-2: backlog
   epic-2-retrospective: optional
