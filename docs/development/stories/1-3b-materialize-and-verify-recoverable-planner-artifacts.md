@@ -4,7 +4,7 @@ baseline_commit: 24c4a2bc138822c5a74ea0ed91d6d5f03c402d97
 
 # Story 1.3b: Materialize and verify recoverable planner artifacts
 
-Status: in-progress
+Status: done
 
 Prepared: 2026-09-27. Baseline: Story 1.3a merge `24c4a2b` (PR #674).
 Epic: 1. Parent: Story 1.3. Requirements: FR4, FR6, FR9–FR10 and NFR1, NFR3–NFR8.
@@ -445,7 +445,7 @@ These identities are non-cyclic. An environment-only change does not change `bun
 - [x] [Review][Patch] Correct the offline-evidence finding's implementation pointer to the real
   end-to-end acceptance test in `test_frozen_artifact_offline.py`
   [docs/development/stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md:425]
-- [ ] [Review][Patch] Pin a `uv sync` argv that the repository's uv 0.9.26 accepts: `--no-env-file`
+- [x] [Review][Patch] Pin a `uv sync` argv that the repository's uv 0.9.26 accepts: `--no-env-file`
   is a `uv run` option, so the normative sync argv exits with `unexpected argument
   '--no-env-file'` and real locked provisioning can never succeed. Correcting it changes the keyed
   sync argv, the environment-key golden vector and the normative companion together, so it needs
@@ -524,45 +524,45 @@ These identities are non-cyclic. An environment-only change does not change `bun
 
 #### Review round against `529f6d5..463cb7d` (2026-09-28)
 
-- [ ] [Review][Patch] Keep an arbitrary digit-string port, including one longer than Python's
+- [x] [Review][Patch] Keep an arbitrary digit-string port, including one longer than Python's
   4,300-digit integer conversion limit, inside `EnvironmentIncompatible` instead of a raw
   `ValueError` (Todoist 6hfP4pGmv6GfHhCp) [algua/registry/planner_environment_lock.py:81]
-- [ ] [Review][Patch] Translate only a `WalkCleanupError` that originates from scoped-walk
+- [x] [Review][Patch] Translate only a `WalkCleanupError` that originates from scoped-walk
   cleanup at the bundle store, environment store and inventory boundaries, so a consumer
   operation that itself raises one stays primary and is not mislabeled (Todoist
   6hfP4pM7xgQqWXpG) [algua/registry/artifact_store.py:45]
-- [ ] [Review][Patch] Canonicalize the wheel URL in a uv failure report and compare its identity
+- [x] [Review][Patch] Canonicalize the wheel URL in a uv failure report and compare its identity
   with an identity-indexed owner derived from the raw lock, keeping the exact single-report and
   cause rules, so uv's normalized spelling of an accepted raw URL is still recognized
   (Todoist 6hfP4pQC2Mvgq32p) [algua/registry/planner_environment_outage.py:68]
-- [ ] [Review][Patch] Follow safe simple assignment propagation and rebinding of imported walk
+- [x] [Review][Superseded] Follow safe simple assignment propagation and rebinding of imported walk
   module/function references in the scoped-walk repository guard, without false positives;
   dynamic `__import__`/`vars` access stays out of scope (Todoist 6hfP4pQr5H8cM3qp)
   [tests/primitives/test_scoped_walk.py:172]
-- [ ] [Review][Patch] Surface an inner-walk cleanup failure when an entered `scoped_walk`
+- [x] [Review][Patch] Surface an inner-walk cleanup failure when an entered `scoped_walk`
   context-manager generator is itself abandoned, instead of letting `generator.close()` suppress
   it, while preserving consumer-error and interrupt precedence (Todoist 6hfP4pVJxJ2jhRhp)
   [algua/primitives/bounded_walk.py:142]
 
 #### Review round against `9da4fd4` (2026-09-28)
 
-- [ ] [Review][Patch] Conservatively merge possible binding states across `if`/`while`,
+- [x] [Review][Superseded] Conservatively merge possible binding states across `if`/`while`,
   zero-or-more-iteration `for`/`async for`, `try` handlers/`else`/`finally` and `match` cases,
   so the scoped-walk guard flags a raw walk whenever any feasible path keeps or reaches the
   imported alias and no branch inherits a sibling's impossible-path state; reproduced false
   negatives: conditional, `try` and `match` rebinds and a zero-iteration loop (Todoist
   6hfP9ww7Mx3rcx8p) [tests/primitives/test_scoped_walk.py:394]
-- [ ] [Review][Patch] Model Python function binding and call timing for simple static cases: a
+- [x] [Review][Superseded] Model Python function binding and call timing for simple static cases: a
   call made before an enclosing rebind still reaches the alias, and a name that is a lexical
   local of its function (assignment, import, loop/`with`/`except`/match target anywhere in the
   body) is never resolved to an enclosing binding, honoring `global`/`nonlocal`; no arbitrary
   call-graph soundness is claimed (Todoist 6hfP9wrVj8P5QG9p)
   [tests/primitives/test_scoped_walk.py:271]
-- [ ] [Review][Patch] Preserve right-hand-side-before-target evaluation and propagate every safe
+- [x] [Review][Superseded] Preserve right-hand-side-before-target evaluation and propagate every safe
   simple alias: self-assignment, chained plain assignment (`a = b = w`), annotated
   self-assignment, alias-producing walrus and `type` alias target rebinding, retaining every
   unrelated-rebind negative (Todoist 6hfP9wwJr96P4fqG) [tests/primitives/test_scoped_walk.py:375]
-- [ ] [Review][Patch] Inspect executable parameter/return and annotated-assignment annotations,
+- [x] [Review][Superseded] Inspect executable parameter/return and annotated-assignment annotations,
   honoring postponed `from __future__ import annotations` evaluation, keep a lambda deferred
   inside a comprehension in that comprehension's lexical environment, and bind a comprehension
   walrus in the containing scope (Todoist 6hfP9x2F8GCg8Wmp)
@@ -570,75 +570,75 @@ These identities are non-cyclic. An environment-only change does not change `bun
 
 #### Review findings against `47062b9` (2026-09-28)
 
-- [ ] [Review][Patch] Terminate analyzed loop paths at `break`/`continue`, carry those transfers
+- [x] [Review][Superseded] Terminate analyzed loop paths at `break`/`continue`, carry those transfers
   through enclosing `finally` suites, and exclude impossible zero-iteration/`else` paths for
   statically unconditional loops (Todoist 6hfPJjCg4JQrc6Rp)
   [tests/primitives/test_scoped_walk.py:321]
-- [ ] [Review][Patch] Inspect executable match-pattern expressions and preserve exact capture,
+- [x] [Review][Superseded] Inspect executable match-pattern expressions and preserve exact capture,
   guard-fallthrough and irrefutable-pattern state without retaining impossible aliases (Todoist
   6hfPJj6JjXppmjpG) [tests/primitives/test_scoped_walk.py:442]
-- [x] [Review][Defer] Model exception-suppressing `with`/`async with` flow so an exception raised
+- [x] [Review][Superseded] Model exception-suppressing `with`/`async with` flow so an exception raised
   before rebinding can preserve a reachable imported alias (Todoist 6hfPJj8H8RXq3vmG)
-  [tests/primitives/test_scoped_walk.py:517] — deferred, pre-existing
-- [x] [Review][Defer] Honor simple class-body `global` writes to the containing module while
+  [tests/primitives/test_scoped_walk.py:517] — superseded by the rescope
+- [x] [Review][Superseded] Honor simple class-body `global` writes to the containing module while
   keeping ordinary class locals isolated (Todoist 6hfPJj9J9jQVvpFG)
-  [tests/primitives/test_scoped_walk.py:486] — deferred, pre-existing
+  [tests/primitives/test_scoped_walk.py:486] — superseded by the rescope
 
 #### Review findings against `762f984` (2026-09-28)
 
-- [ ] [Review][Patch] Classify statically constant `while` conditions so truthy constants do not
+- [x] [Review][Superseded] Classify statically constant `while` conditions so truthy constants do not
   retain impossible zero-iteration/`else` paths and falsey constants do not execute an unreachable
   body (Todoist 6hfPWRXC8MMwMrcG) [tests/primitives/test_scoped_walk.py:419]
-- [ ] [Review][Patch] Detect a deferred function's raw walk when it is called before a later
+- [x] [Review][Superseded] Detect a deferred function's raw walk when it is called before a later
   enclosing alias rebind, rather than analyzing the body only against the scope's final bindings
   (Todoist 6hfPWX5RW3Hpvw7p) [tests/primitives/test_scoped_walk.py:331]
-- [ ] [Review][Patch] Join match-guard named-expression bindings only onto the guard-success path,
+- [x] [Review][Superseded] Join match-guard named-expression bindings only onto the guard-success path,
   preserving the feasible guard-failure state without retaining a stale alias after success
   (Todoist 6hfPWX55FXhj52Jp) [tests/primitives/test_scoped_walk.py:486]
-- [ ] [Review][Patch] Cover nested and conditional `finally` transfer forwarding, a continue-only
+- [x] [Review][Superseded] Cover nested and conditional `finally` transfer forwarding, a continue-only
   unconditional loop, and an actual deferred-function call from the endless-loop fixture
   (Todoist 6hfPWRXGjPGr9qgp) [tests/primitives/test_scoped_walk.py:833]
 
 #### Review findings against `3b80ed9` (2026-09-28)
 
-- [ ] [Review][Patch] Classify every side-effect-free literal and unary-literal `while` condition,
+- [x] [Review][Superseded] Classify every side-effect-free literal and unary-literal `while` condition,
   not only `ast.Constant`, so unreachable bodies and impossible zero-iteration exits do not enter
   the binding join (Todoist 6hfPWRXC8MMwMrcG) [tests/primitives/test_scoped_walk.py:275]
-- [ ] [Review][Patch] Preserve separate truthy and falsey states through `and`/`or` and conditional
+- [x] [Review][Superseded] Preserve separate truthy and falsey states through `and`/`or` and conditional
   expressions so match-guard success cannot inherit failure-only aliases and later cases receive
   only feasible false-guard bindings (Todoist 6hfPfM2QXfxpvjvp)
   [tests/primitives/test_scoped_walk.py:416]
-- [ ] [Review][Patch] Give lambdas the bounded same-scope call identity used for plain definitions,
+- [x] [Review][Superseded] Give lambdas the bounded same-scope call identity used for plain definitions,
   so a call before a later enclosing rebind cannot hide a raw walk (Todoist 6hfPfM48RRh6Mc2G)
   [tests/primitives/test_scoped_walk.py:396]
-- [ ] [Review][Patch] Record import-time calls from class bodies against their enclosing bindings
+- [x] [Review][Superseded] Record import-time calls from class bodies against their enclosing bindings
   while keeping class-local names isolated (Todoist 6hfPfM3X26Qxj9FG)
   [tests/primitives/test_scoped_walk.py:573]
-- [ ] [Review][Patch] Model generator advancement and coroutine awaiting at execution time, or use
+- [x] [Review][Superseded] Model generator advancement and coroutine awaiting at execution time, or use
   a bounded conservative state model that cannot miss an alias becoming raw after object creation
   (Todoist 6hfPfM2HWPqcrXCG) [tests/primitives/test_scoped_walk.py:439]
-- [ ] [Review][Patch] Make the callback/endless-loop fixture prove the mechanism named by the test,
+- [x] [Review][Superseded] Make the callback/endless-loop fixture prove the mechanism named by the test,
   rather than passing only because the loop fallback retains the same alias independently of the
   opaque callback (Todoist 6hfPfJxg8X2mrGpp) [tests/primitives/test_scoped_walk.py:817]
 
 #### Review findings against `bdaf792` (2026-09-28)
 
-- [ ] [Review][Patch] Complete the side-effect-free literal evaluator for unary booleans and
+- [x] [Review][Superseded] Complete the side-effect-free literal evaluator for unary booleans and
   nested safe literals, so every admitted statically true/false loop condition removes its
   impossible body or exit instead of retaining a false-positive alias path (Todoist
   6hfPWRXC8MMwMrcG) [tests/primitives/test_scoped_walk.py:276]
-- [ ] [Review][Patch] Keep lazy-object existence and accumulated bindings correlated across
+- [x] [Review][Superseded] Keep lazy-object existence and accumulated bindings correlated across
   mutually exclusive branches, so a generator or coroutine created only on a safe path cannot
   inherit a raw alias reached only on a sibling path (Todoist 6hfPmMP337jqHpGG)
   [tests/primitives/test_scoped_walk.py:446]
-- [ ] [Review][Patch] Propagate later caller-scope states into a lazy object returned by a followed
+- [x] [Review][Superseded] Propagate later caller-scope states into a lazy object returned by a followed
   same-scope factory, so a generator, generator expression or coroutine advanced after the caller
   alias becomes raw cannot evade the guard (Todoist 6hfPmMMPmhrfqvjG)
   [tests/primitives/test_scoped_walk.py:426]
-- [ ] [Review][Patch] Seed a nested class body from its lexical/module bindings rather than the
+- [x] [Review][Superseded] Seed a nested class body from its lexical/module bindings rather than the
   outer class namespace, which Python does not close over, while preserving ordinary class-local
   isolation (Todoist 6hfPmMQ6h2xXcJ8G) [tests/primitives/test_scoped_walk.py:720]
-- [ ] [Review][Patch] Thread only a comprehension filter's truthy state into later filters and the
+- [x] [Review][Superseded] Thread only a comprehension filter's truthy state into later filters and the
   element, so a rebind required for evaluation cannot be merged with an impossible false path
   (Todoist 6hfPmMMpfmMvppxG) [tests/primitives/test_scoped_walk.py:495]
 
@@ -720,7 +720,7 @@ These identities are non-cyclic. An environment-only change does not change `bun
 - [x] [Review][Patch] Resolve cross-scope calls from the callee's defining lexical environment
   rather than filtering the current caller state (Todoist 6hfQqH3pfGW6W7Vp)
   [tests/primitives/test_scoped_walk.py:888]
-- [ ] [Review][Patch] Include lambda bodies in cross-scope call propagation with their locals
+- [x] [Review][Superseded] Include lambda bodies in cross-scope call propagation with their locals
   (Todoist 6hfQqH2qxwxhVWHG) [tests/primitives/test_scoped_walk.py:725] -- unchecked by the rescue
   review: no fixture fails before the change, and a program runs the other way (see the rescue
   entry of the Debug Log)
@@ -766,25 +766,117 @@ false negatives listed at the end of the rescue entry of the Debug Log.
 
 #### Codex rescue review against `229182c` (2026-09-29)
 
-- [ ] [Review][Patch] Propagate feasible conditional-expression and walrus assignment aliases so a
+- [x] [Review][Superseded] Propagate feasible conditional-expression and walrus assignment aliases so a
   raw `bounded_walk` call cannot evade the scoped-walk guard (Todoist 6hfV5wHWFc6pfC3p)
   [tests/primitives/test_scoped_walk.py:1575]
-- [ ] [Review][Patch] Stop pre-seeding module builtin shadows from syntactic global writes in
+- [x] [Review][Superseded] Stop pre-seeding module builtin shadows from syntactic global writes in
   helpers that are never called; propagate those shadows through feasible effects instead
   (Todoist 6hfV5wJWVqrj9F2p) [tests/primitives/test_scoped_walk.py:624]
-- [ ] [Review][Patch] Make the remaining loop-created-object and distinct-late-bound-name
+- [x] [Review][Superseded] Make the remaining loop-created-object and distinct-late-bound-name
   alive-state shapes near-linear under deterministic work counts (Todoist 6hfV5wMPh7FVrV6G)
   [tests/primitives/test_scoped_walk.py:305]
-- [ ] [Review][Patch] Treat `raise` as a terminating helper path while preserving exception-handler
+- [x] [Review][Superseded] Treat `raise` as a terminating helper path while preserving exception-handler
   flow, so only feasible exits contribute effects (Todoist 6hfV5wMVp26w2R2p)
   [tests/primitives/test_scoped_walk.py:1796]
-- [ ] [Review][Patch] Describe this rescue round as five analyzer fixes plus one evidence correction,
+- [x] [Review][Superseded] Describe this rescue round as five analyzer fixes plus one evidence correction,
   name both modified files, and qualify complexity claims to proven shapes (Todoist
   6hfV5wHR9QvgpF5G)
   [docs/development/stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md:1375]
-- [ ] [Review][Patch] Replace all six stale rescue evidence pointers with current named tests and
+- [x] [Review][Superseded] Replace all six stale rescue evidence pointers with current named tests and
   implementation locations or immutable commit-qualified evidence (Todoist 6hfV5wMP2cHM8Cjp)
   [docs/development/stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md:744]
+
+#### Rescope decision (2026-09-30)
+
+Codex's weekly usage limit stopped the delivery loop after `22aac24`. Its dispatched implementer
+finished the six `229182c` follow-ups but left them uncommitted (+1,262/-217 lines in the guard
+file); that diff is not adopted. Since `635e1f6`, whose finding replaced the regex guard with an
+AST guard, fourteen review rounds had grown the guard into a ~3,400-line Python flow analyzer, each
+round finding new static evasions. Soundness for arbitrary Python is unattainable, while exactly
+three production consumers exist and all use `scoped_walk`. On 2026-09-30 Lior decided the guard's
+threat model is accidental direct use, not adversarial obfuscation (which is left to code review),
+and in the same decision approved fixing the `uv sync` argv blocker as this story's reviewed
+contract change.
+
+- [x] [Review][Patch] Make the raw traversal module-private (`_bounded_walk`), leaving
+  `scoped_walk` the walk module's only public function, and replace the flow analyzer with a guard
+  that no file under `algua/` or `scripts/` except the walk module names `_bounded_walk`
+  [tests/primitives/test_scoped_walk.py::test_no_other_module_names_the_raw_walk,
+  test_scoped_walk_is_the_walk_modules_only_public_function]
+- [x] [Review][Patch] Drop `--no-env-file` from the keyed `uv sync` argv: `uv sync` has no env-file
+  options and never reads `.env` files, and uv 0.9.26 rejects the flag, so real provisioning could
+  never succeed. The argv now equals the companion's argv block exactly, and a real offline dry run
+  of it under the production environment against the committed lock is part of the root gate
+  [tests/test_planner_environment.py::test_the_keyed_argv_is_exactly_the_normative_argv,
+  test_the_installed_uv_runs_the_exact_keyed_argv_against_the_committed_lock]. No environment or
+  descriptor was ever recorded under the old key (zero `deployment_artifacts` rows, no store)
+  [algua/registry/planner_environment.py:44]
+- [x] [Review][Patch] Report a cleanup failure, and propagate an interrupt, when an entered
+  `scoped_walk` scope is abandoned (the still-open `6hfP4pVJxJ2jhRhp`), sharing the
+  close-and-translate step with the normal exit
+  [tests/primitives/test_scoped_walk.py::test_an_abandoned_scope_reports_the_cleanup_failure]
+
+Bookkeeping. Open analyzer findings are marked `[x] [Review][Superseded]`: closed by removing the
+analyzer, never implemented. That includes the two `229182c` evidence corrections, whose subject is
+the removed analyzer's evidence, and the two analyzer deferrals. Analyzer findings implemented in
+earlier rounds (including the `635e1f6` AST guard itself) stay `[x] [Review][Patch]` as history.
+Every `tests/primitives/test_scoped_walk.py:<line>` pointer above refers to that file as of
+`22aac24`. The three production findings of the `529f6d5..463cb7d` round (port digits, cleanup-
+error origin, uv's URL spelling) were already implemented and tested
+(`test_port_digit_strings_of_any_length_stay_environment_incompatible`, the bundle, sealing and
+inventory `test_a_walk_cleanup_error_raised_by_the_*_body_is_not_relabeled` tests,
+`test_uvs_normalized_spelling_of_a_locked_alias_is_retryable_evidence`) and are now checked.
+
+#### BMAD review of the rescope (2026-09-30)
+
+Codex was unavailable, so the `docs/agent/story-delivery.md` fallback ran: Blind Hunter, Edge Case
+Hunter and Acceptance Auditor as independent Claude subagents over the uncommitted rescope diff.
+17 unified findings: 13 patched, 1 deferred, 3 dismissed.
+
+- [x] [Review][Patch] The `--help` parse test missed flag conflicts and added resolve/upgrade/index
+  flags, nothing pinned the exact argv, and no automated test ran real uv: replaced by the offline
+  dry run of the exact argv under the production environment and the argv-equals-companion test;
+  mutation-checked with a conflicting `--frozen`, an unknown `--no-env-file` and spec-only drift
+  [tests/test_planner_environment.py:73]
+- [x] [Review][Patch] The companion promised a golden vector that changes with the argv, but the
+  environment-key vector uses a synthetic argv; the companion now binds the argv block itself and
+  names its two enforcing tests; "pinned uv 0.9.26" corrected to the repository's uv 0.9.26
+  [docs/development/specs/spec-story-1-3b-artifact-environment-contract/artifact-environment-contract.md:186]
+- [x] [Review][Patch] The abandoned-scope tests reached the scope only through contextlib's private
+  `gen`, lacked close assertions and interrupt coverage: now a public consumer-generator shape,
+  every fault kind, `KeyboardInterrupt`/`SystemExit` propagation and a clean close
+  [tests/primitives/test_scoped_walk.py:209]
+- [x] [Review][Patch] A `GeneratorExit` reaching the scope is abandonment: documented, consistent
+  with the raw walk's own abandonment rule [algua/primitives/bounded_walk.py:195]
+- [x] [Review][Patch] A walk iterated after its scope closed silently yielded nothing (an empty
+  tree reads as nothing to seal): it now raises
+  [tests/primitives/test_scoped_walk.py::test_a_walk_used_after_its_scope_closed_fails_loudly]
+- [x] [Review][Patch] The privacy guard missed a public alias inside the walk module and scripts
+  outside `algua/`, read files with the locale encoding and overclaimed "every spelling"
+  [tests/primitives/test_scoped_walk.py:309]
+- [x] [Review][Patch] The rescope overstated what CODEOWNERS covers; obfuscated access is left to
+  code review [tests/primitives/test_scoped_walk.py:283]
+- [x] [Review][Patch] The record claimed every analyzer finding was superseded, mislabeled the two
+  evidence corrections, left the two analyzer deferrals as deferred and left stale line pointers
+  unexplained; corrected above
+- [x] [Review][Patch] Cleanup-error-origin evidence named the bundle store only; the sealing and
+  inventory tests are now cited
+- [x] [Review][Patch] `deferred-work.md` collapsed two dated deferral sections and dropped their
+  Todoist IDs; provenance restored [docs/development/stories/deferred-work.md]
+- [x] [Review][Patch] Full-gate evidence was not recorded for the rescope; recorded in the
+  Completion Notes
+- [x] [Review][Patch] The three rescope items were not mirrored to Todoist and the superseded tasks
+  were not annotated; mirrored and annotated at commit
+- [x] [Review][Patch] The companion's explanation of the dropped flag relied on prose only; the
+  offline dry run now proves the exact argv against the real uv
+- [x] [Review][Defer] Nothing pins the uv version itself (no `required-version`, CI installs the
+  latest uv); the tests exercise whichever uv production would run, and the environment key records
+  the uv version so drift separates environments [.github/workflows/ci.yml:13] — deferred,
+  pre-existing
+- Dismissed: a planted `.env` test (the private build root holds only the three committed inputs
+  and the environment is a replacement); `[x]` conflating fixed and superseded (the explicit
+  `[Superseded]` tag carries it); a consumer generator that catches `Exception` and yields while
+  being closed (a generic Python pitfall, not specific to this walk).
 
 ## Development notes
 
@@ -1767,6 +1859,23 @@ uv run lint-imports
   non-retryable. The `--no-env-file` defect stays deferred, and the keyed argv, identity
   schemas, golden digests and every live, authority, deployment and capital wall are unchanged.
 
+- Rescope of 2026-09-30 complete (see the Rescope decision and its BMAD review). Red first: the
+  first privacy guard failed on the public `bounded_walk`; a `--help` parse of the keyed sync argv
+  failed with uv's `unexpected argument '--no-env-file'`; both abandoned-scope failure tests failed
+  with `DID NOT RAISE`. A real `provision_environment` from the committed build inputs failed with
+  `locked environment provisioning failed` under the old argv and now provisions and verifies the
+  environment in 8.0 s (manual: it downloads every wheel through a private uv cache, so the gate
+  runs the exact argv as an offline dry run instead, 0.03 s). Mutation checks, each red then green
+  on revert: a `_bounded_walk` alias injected into `artifact_store.py`; a public `raw_walk` alias
+  in the walk module; the closed-scope flag never set; the `GeneratorExit` branch removed (six
+  abandoned-scope tests red, the interrupt cases included); a conflicting `--frozen` and an unknown
+  `--no-env-file` added to argv and companion (dry-run test red); companion-only drift (argv
+  equality test red). `test_scoped_walk.py` shrank from 3,621 to 324 lines.
+  Final root gate on the reviewed tree, by exit code: `uv run pytest -q -p no:randomly` 5,109
+  passed in 507.76 s (426 fewer tests than before because the analyzer's fixtures were removed),
+  `uv run ruff check .` clean, `uv run mypy algua` clean (332 source files), `uv run lint-imports`
+  28 kept and 0 broken, `git diff --check` clean.
+
 ### File List
 
 - `algua/registry/artifact_contract.py`
@@ -1973,3 +2082,8 @@ uv run lint-imports
   repository ruff, mypy and import-contract gates and `git diff --check` pass, and the full
   sequential root gate passes (5,529 tests in 509.63 s). Story and sprint status remain
   `in-progress`; independent re-review is outstanding.
+- 2026-09-30: Rescoped the scoped-walk guard to accidental use (module-private raw walk, flow
+  analyzer removed, 29 open analyzer findings superseded), fixed the keyed `uv sync` argv so real
+  provisioning succeeds, surfaced abandoned-scope cleanup failures, and applied all 13 patches of
+  the BMAD fallback review (Codex unavailable). All review findings are resolved; the story is
+  `done` pending merge.
