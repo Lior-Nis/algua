@@ -132,6 +132,32 @@ def test_decoder_round_trips_every_loadable_repo_strategy(name):
     assert view.config.feature_lookback == loaded.config.feature_lookback
 
 
+@pytest.mark.parametrize("execution", [
+    dict(max_gross_exposure=1),
+    dict(fees=0, slippage=0),
+    dict(max_weight_per_symbol=1, target_gross_utilization=1),
+    dict(capacity=dict(reference_aum=1_000_000, max_participation_rate=0.05, adv_window_bars=20)),
+    dict(capacity=dict(reference_aum=1e6, max_participation_rate=1, adv_window_bars=20)),
+], ids=["gross", "zero-costs", "weight-and-utilization", "int-aum", "int-rate"])
+def test_decoder_round_trips_a_config_authored_with_whole_numbers(execution):
+    """A whole number written into a float field (``max_gross_exposure=1``) is an ordinary way to
+    author a strategy. The descriptor's hash and its recorded config must describe the same value,
+    so such a candidate decodes instead of being refused at every intake."""
+    execution = dict(execution)  # never mutate the shared parameter
+    capacity = execution.pop("capacity", None)
+    config = _config(execution=ExecutionContract(
+        rebalance_frequency="1d", **execution,
+        capacity=CapacityLimit(**capacity) if capacity is not None else None))
+    manifest = _manifest(_recorded(config), digest=strategy_config_hash(config))
+
+    decoded = decode_frozen_config(manifest)
+
+    assert decoded.execution == config.execution
+    assert canonical_json(decoded.model_dump(mode="json")) == canonical_json(
+        manifest.resolved_config)
+    assert strategy_config_hash(decoded) == manifest.config_hash
+
+
 def test_at_least_the_readiness_cohort_of_repo_strategies_is_tradable():
     """Guards the parametrized proof above against silently skipping everything."""
     tradable = []
@@ -288,9 +314,10 @@ def test_decoder_refuses_a_config_hash_mismatch():
 
 
 def test_decoder_refuses_a_record_that_does_not_dump_back_exactly():
-    """An int where the schema holds a float is a JSON number, so it decodes and constructs; its
-    hash is even self-consistent (computed over the int). Only the exact dump-back sees that the
-    recorded bytes are not what ``model_dump(mode="json")`` produces (``0`` vs ``0.0``)."""
+    """An int where the schema holds a float is a JSON number, so it decodes and constructs (the
+    constructor stores it as ``0.0``, so it even hashes to the descriptor's hash). Only the exact
+    dump-back sees that the recorded bytes are not what ``model_dump(mode="json")`` produces
+    (``0`` vs ``0.0``)."""
     config = _config(execution=ExecutionContract(rebalance_frequency="1d", fees=0))
     recorded = _recorded(config)
     recorded["execution"]["fees"] = 0

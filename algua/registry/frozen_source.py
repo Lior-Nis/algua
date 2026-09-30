@@ -25,6 +25,10 @@ _READ_CHUNK = 64 * 1024
 _OID = re.compile(rb"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _MODES = {b"100644", b"100755"}
 _BUILD_INPUTS = (".python-version", "pyproject.toml", "uv.lock")
+# A well-formed ``__pycache__`` entry, ``<module>.<cache_tag>[.opt-<N>].pyc`` (PEP 3147/488). Python
+# only loads one for an existing source, so a cache whose source is gone (a deleted module, a test's
+# temporary module) cannot shadow anything either.
+_CACHE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\.[a-z]+-[0-9]+(?:\.opt-[0-9]+)?\.pyc")
 
 
 class FrozenSourceError(ValueError):
@@ -205,12 +209,15 @@ def export_build_inputs(repo_root: Path, source_ref: str) -> tuple[FrozenFile, .
     return files
 
 
-def _generated_cache(path: str, tracked: set[str]) -> bool:
-    pure = PurePosixPath(path)
-    if pure.parent.name != "__pycache__" or pure.suffix not in {".pyc", ".pyo"}:
-        return False
-    module = pure.name.split(".", 1)[0]
-    return str(pure.parent.parent / f"{module}.py") in tracked
+def _untracked_kind(item: Path, relative: str) -> str:
+    """The class of an offending path, named in the refusal."""
+    pure = PurePosixPath(relative)
+    if item.is_symlink() or item.is_dir():
+        return "untracked symlink" if item.is_symlink() else "untracked directory"
+    if pure.suffix != ".py" and pure.parent.name == "__pycache__":
+        return "malformed bytecode cache"
+    return {".py": "untracked Python source", ".pyc": "sourceless bytecode",
+            ".pyo": "sourceless bytecode"}.get(pure.suffix, "untracked file")
 
 
 def _admit_index_record(record: bytes, tracked: set[str]) -> None:
@@ -269,22 +276,22 @@ def assert_clean_head(repo_root: Path) -> str:
     source_root = root / "algua"
     if not source_root.is_dir() or source_root.is_symlink():
         raise FrozenSourceError("working tree has no canonical algua source root")
-    untracked: list[str] = []
+    untracked: list[tuple[str, str]] = []
     for item in source_root.rglob("*"):
         relative = item.relative_to(root).as_posix()
         if item.is_dir() and not item.is_symlink():
-            if any(path.startswith(relative + "/") for path in tracked):
-                continue
-            descendants = [path for path in item.rglob("*") if path.is_file() or path.is_symlink()]
-            if item.name == "__pycache__" and descendants and all(
-                _generated_cache(path.relative_to(root).as_posix(), tracked)
-                for path in descendants
+            # Judged by its files; one holding none imports as a namespace HEAD does not have.
+            if any(path.startswith(relative + "/") for path in tracked) or any(
+                path.is_file() or path.is_symlink() for path in item.rglob("*")
             ):
                 continue
-            untracked.append(relative)
+            untracked.append((relative, _untracked_kind(item, relative)))
         elif (item.is_file() or item.is_symlink()) and relative not in tracked:
-            if not _generated_cache(relative, tracked):
-                untracked.append(relative)
+            if item.is_symlink() or item.parent.name != "__pycache__" \
+                    or _CACHE_NAME.fullmatch(item.name) is None:
+                untracked.append((relative, _untracked_kind(item, relative)))
     if untracked:
-        raise FrozenSourceError("working tree contains untracked source/config shadowing")
+        path, kind = min(untracked)
+        raise FrozenSourceError(f"working tree contains untracked source/config shadowing: "
+                                f"{kind} {path!r} (1 of {len(untracked)})")
     return head

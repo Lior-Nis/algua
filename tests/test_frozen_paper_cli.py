@@ -236,3 +236,28 @@ def test_paper_run_refuses_a_frozen_deployment_before_replaying_anything(world):
     assert world.audit(TENANT) == [("paper_intake", "slice 20000.0")]
     assert CHECKOUT_DOTTED not in sys.modules
 
+
+
+def test_raw_forward_and_go_live_transitions_never_import_the_checkout_module(world):
+    """``registry transition`` refuses the frozen tenant on the forward edge and the go-live
+    challenge before hashing the checkout (armed to raise): no module import, no pinned
+    checkout code_hash and no stage change."""
+    CHECKOUT_MODULE.write_text(RAISING_MODULE)
+    history = "SELECT from_stage, to_stage, code_hash FROM stage_transitions WHERE strategy_id=?"
+    tenant_id = world.deployment().strategy_id
+    before = world.rows(history, tenant_id)
+
+    forward = runner.invoke(app, ["registry", "transition", TENANT, "--to", "forward_tested",
+                                  "--actor", "human", "--reason", "raw forward edge"])
+    with world.conn() as conn:  # the shape a pre-fix raw forward transition left behind
+        conn.execute("UPDATE strategies SET stage='forward_tested' WHERE id=?", (tenant_id,))
+        conn.commit()
+    live = runner.invoke(app, ["registry", "transition", TENANT, "--to", "live",
+                               "--actor", "human"])
+
+    assert json.loads(forward.stdout)["code"] == "frozen_qualification_pending"
+    assert json.loads(live.stdout)["code"] == "frozen_live_unsupported"
+    assert (forward.exit_code, live.exit_code) == (1, 1)
+    assert world.rows(history, tenant_id) == before
+    assert world.rows("SELECT * FROM live_challenges") == []
+    assert CHECKOUT_DOTTED not in sys.modules

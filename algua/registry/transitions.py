@@ -83,6 +83,7 @@ def transition_strategy(
         # re-entry to candidate from below always re-runs the research gate.
         consume_gate_id = _validate_shortlist_gate(repo=repo, name=name, strategy_id=rec.id)
     elif rec.stage is Stage.PAPER and target == Stage.FORWARD_TESTED:
+        refuse_frozen_deployment(repo, rec.id, target)
         # Identity is pinned for BOTH actors: the agent's token consume re-checks it inside
         # apply_transition, and a human raw transition records it for audit (#124).
         identity = _compute_hashes(name)
@@ -134,6 +135,7 @@ def _validate_live_gate(
     """
     if actor is not Actor.HUMAN:
         raise TransitionError("transition to live requires a human actor")
+    refuse_frozen_deployment(repo, strategy_id, Stage.LIVE)
     # ONE identity computation feeds both walls below: a per-wall recompute would open a drift
     # window between the certificate's identity and the approval's (#124 GATE-2).
     identity = _compute_hashes(name)
@@ -191,6 +193,28 @@ def _validate_forward_gate(
             "transition to forward_tested requires a fresh passing forward-gate evaluation for"
             " the current code+config+dependency; run `algua paper promote`")
     return gate_id
+
+
+def refuse_frozen_deployment(repo: StrategyRepository, strategy_id: int, target: Stage) -> None:
+    """Story 1.3c §2/§9: the forward and go-live edges never judge a FROZEN deployment by the
+    checkout. Their identity hash imports the checkout strategy module and pins its code_hash,
+    which never stands in for the bundle the tenant runs, so a frozen deployment is refused first,
+    from the deployment ledger alone: ``-> live`` with ``frozen_live_unsupported``, the forward
+    edge with ``frozen_qualification_pending`` (as ``paper promote``). Working-tree and legacy
+    strategies pass untouched. A repository without a ledger connection fails closed."""
+    from algua.registry.forward_promotion import refuse_frozen_promotion
+    from algua.registry.frozen_tenant_errors import FrozenLiveUnsupported
+    from algua.registry.store import SqliteStrategyRepository
+
+    conn = getattr(repo, "connection", None)  # like the certificate verifier: sqlite store only
+    if conn is None:
+        raise TransitionError("the frozen-deployment check needs a sqlite-backed repository")
+    if target is not Stage.LIVE:
+        refuse_frozen_promotion(conn, strategy_id)
+        return
+    deployment = SqliteStrategyRepository(conn).active_deployment(strategy_id)
+    if deployment is not None and deployment.source_kind == "frozen":
+        raise FrozenLiveUnsupported(deployment.id)
 
 
 def _compute_hashes(name: str) -> ArtifactIdentity:

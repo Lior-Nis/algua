@@ -265,3 +265,224 @@ def test_refuse_frozen_promotion_passes_working_tree_and_legacy_strategies():
         frozen_id = _admit_frozen(conn)
         with pytest.raises(FrozenQualificationPending):
             refuse_frozen_promotion(conn, frozen_id)
+
+
+# ---------------------------------------------------------------------------
+# `registry transition`: the raw forward edge and the go-live ceremony. Both would otherwise hash
+# the CHECKOUT (importing its strategy module) and pin that code_hash for a frozen tenant.
+# ---------------------------------------------------------------------------
+
+_CHECKOUT_TARGETS = {
+    "cli_identity": "algua.cli.registry_cmd.compute_artifact_hashes",
+    "transition_identity": "algua.registry.transitions._compute_hashes",
+    "approvals_identity": "algua.registry.approvals.compute_artifact_hashes",
+    "checkout_import": "algua.registry.approvals.load_strategy",
+    "checkout_config": "algua.strategies.loader.load_strategy_config",
+    "forward_token": "algua.registry.transitions._validate_forward_gate",
+    "certificate": "algua.registry.transitions._default_forward_certificate_verifier",
+    "issue_challenge": "algua.registry.live_gate.issue_challenge",
+    "verify_signature": "algua.registry.live_gate.verify_pending",
+}
+
+
+def _checkout_spies(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Tripwires on every checkout hash/import, the forward token, the go-live certificate and
+    challenge steps, and the stage write. Returns the list each tripped step records into."""
+    spies = _Spies.__new__(_Spies)
+    spies.calls = []
+    for label, target in _CHECKOUT_TARGETS.items():
+        monkeypatch.setattr(target, spies._tripwire(label))
+    monkeypatch.setattr(
+        SqliteStrategyRepository, "apply_transition", spies._tripwire("apply_transition"))
+    return spies.calls
+
+
+def _live_snapshot(conn: sqlite3.Connection, strategy_id: int) -> dict:
+    return {
+        **_snapshot(conn, strategy_id),
+        "live_challenges": conn.execute("SELECT COUNT(*) FROM live_challenges").fetchone()[0],
+        "live_authorizations": conn.execute(
+            "SELECT COUNT(*) FROM live_authorizations").fetchone()[0],
+    }
+
+
+def _admit_frozen_at(stage: str) -> int:
+    """A frozen tenant moved to ``stage`` by hand: the shape a pre-fix raw transition left."""
+    with closing(_registry_conn()) as conn:
+        sid = _admit_frozen(conn)
+        conn.execute("UPDATE strategies SET stage=? WHERE id=?", (stage, sid))
+        conn.commit()
+    return sid
+
+
+@pytest.mark.parametrize("actor", ["human", "agent"])
+def test_registry_transition_to_forward_tested_refuses_a_frozen_deployment_first(
+    monkeypatch, actor,
+):
+    with closing(_registry_conn()) as conn:
+        sid = _admit_frozen(conn)
+        before = _live_snapshot(conn, sid)
+    calls = _checkout_spies(monkeypatch)
+
+    result = runner.invoke(app, [
+        "registry", "transition", NAME, "--to", "forward_tested", "--actor", actor,
+        "--reason", "raw forward edge"])
+
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["code"] == "frozen_qualification_pending"
+    assert payload["retryable"] is False
+    assert calls == []
+    with closing(_registry_conn()) as conn:
+        assert _live_snapshot(conn, sid) == before
+    assert before["stage"] == "paper"
+
+
+def test_transition_strategy_refuses_the_frozen_forward_edge_directly(monkeypatch):
+    from algua.registry.transitions import transition_strategy
+
+    with closing(_registry_conn()) as conn:
+        sid = _admit_frozen(conn)
+        before = _live_snapshot(conn, sid)
+        calls = _checkout_spies(monkeypatch)
+        with pytest.raises(FrozenQualificationPending):
+            transition_strategy(
+                SqliteStrategyRepository(conn), NAME, Stage.FORWARD_TESTED, Actor.HUMAN, "raw")
+        assert calls == []
+        assert _live_snapshot(conn, sid) == before
+
+
+def test_go_live_challenge_refuses_a_frozen_deployment_before_hashing(monkeypatch):
+    sid = _admit_frozen_at("forward_tested")
+    with closing(_registry_conn()) as conn:
+        before = _live_snapshot(conn, sid)
+        deployment_id = SqliteStrategyRepository(conn).active_deployment(sid).id
+    calls = _checkout_spies(monkeypatch)
+
+    result = runner.invoke(
+        app, ["registry", "transition", NAME, "--to", "live", "--actor", "human"])
+
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["code"] == "frozen_live_unsupported"
+    assert payload.get("action") != "go_live_challenge"
+    assert payload["retryable"] is False
+    assert calls == []
+    with closing(_registry_conn()) as conn:
+        after = _live_snapshot(conn, sid)
+    assert after == before and after["live_challenges"] == 0
+    assert after["stage"] == "forward_tested"
+    assert deployment_id is not None
+
+
+def test_go_live_signature_completion_refuses_a_frozen_deployment_before_hashing(
+    monkeypatch, tmp_path,
+):
+    sid = _admit_frozen_at("forward_tested")
+    with closing(_registry_conn()) as conn:
+        before = _live_snapshot(conn, sid)
+    signature = tmp_path / "challenge.sig"
+    signature.write_bytes(b"not a signature")
+    calls = _checkout_spies(monkeypatch)
+
+    result = runner.invoke(app, [
+        "registry", "transition", NAME, "--to", "live", "--actor", "human",
+        "--signature", str(signature)])
+
+    assert result.exit_code == 1, result.stdout
+    assert json.loads(result.stdout)["code"] == "frozen_live_unsupported"
+    assert calls == []
+    with closing(_registry_conn()) as conn:
+        after = _live_snapshot(conn, sid)
+    assert after == before and after["live_authorizations"] == 0
+
+
+def test_transition_strategy_refuses_a_frozen_go_live_before_any_verifier(monkeypatch):
+    from algua.registry.frozen_tenant_errors import FrozenLiveUnsupported
+    from algua.registry.transitions import transition_strategy
+
+    sid = _admit_frozen_at("forward_tested")
+    consulted: list[str] = []
+
+    def verifier(*_args, **_kwargs):
+        consulted.append("verifier")
+        return True
+
+    with closing(_registry_conn()) as conn:
+        before = _live_snapshot(conn, sid)
+        calls = _checkout_spies(monkeypatch)
+        with pytest.raises(FrozenLiveUnsupported) as info:
+            transition_strategy(
+                SqliteStrategyRepository(conn), NAME, Stage.LIVE, Actor.HUMAN, "go live",
+                approval_verifier=verifier, forward_certificate_verifier=verifier)
+        assert info.value.deployment_id == SqliteStrategyRepository(conn).active_deployment(
+            sid).id
+        assert calls == [] and consulted == []
+        assert _live_snapshot(conn, sid) == before
+
+
+def test_go_live_actor_wall_still_fires_first_for_a_frozen_deployment(monkeypatch):
+    """The human-actor wall keeps its place ahead of the frozen refusal on both go-live paths."""
+    _admit_frozen_at("forward_tested")
+    calls = _checkout_spies(monkeypatch)
+
+    result = runner.invoke(
+        app, ["registry", "transition", NAME, "--to", "live", "--actor", "agent"])
+
+    assert result.exit_code == 1, result.stdout
+    assert "requires a human actor" in json.loads(result.stdout)["error"]
+    assert calls == []
+
+
+def _legacy_at(name: str, stage: str) -> int:
+    with closing(_registry_conn()) as conn:
+        rec = SqliteStrategyRepository(conn).add(name)
+        force_legacy_strategy(conn, rec.id, stage=stage)
+    return rec.id
+
+
+def test_legacy_raw_forward_transition_still_pins_the_checkout_identity(monkeypatch):
+    """Unchanged for a non-frozen strategy: the raw human edge hashes and pins identity."""
+    sid = _legacy_at("legacy_fwd", "paper")
+    hashed: list[str] = []
+    monkeypatch.setattr(
+        "algua.registry.transitions._compute_hashes",
+        lambda name: hashed.append(name) or IDENTITY)
+
+    result = runner.invoke(app, [
+        "registry", "transition", "legacy_fwd", "--to", "forward_tested", "--actor", "human",
+        "--reason", "raw"])
+
+    assert result.exit_code == 0, result.stdout
+    assert json.loads(result.stdout)["stage"] == "forward_tested"
+    assert hashed == ["legacy_fwd"]
+    with closing(_registry_conn()) as conn:
+        row = conn.execute(
+            "SELECT code_hash, config_hash, dependency_hash FROM stage_transitions"
+            " WHERE strategy_id=? ORDER BY id DESC LIMIT 1", (sid,)).fetchone()
+    assert tuple(row) == tuple(IDENTITY)
+
+
+def test_legacy_go_live_challenge_still_hashes_then_checks_the_certificate(monkeypatch):
+    from algua.contracts.lifecycle import TransitionError
+
+    _legacy_at("legacy_live", "forward_tested")
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        "algua.cli.registry_cmd.compute_artifact_hashes",
+        lambda name: seen.append(("hash", name)) or IDENTITY)
+
+    def no_certificate(_repo, name, _sid, identity):
+        seen.append(("certificate", name, identity))
+        raise TransitionError("no forward certificate")
+
+    monkeypatch.setattr(
+        "algua.registry.transitions._default_forward_certificate_verifier",
+        lambda: no_certificate)
+
+    result = runner.invoke(
+        app, ["registry", "transition", "legacy_live", "--to", "live", "--actor", "human"])
+
+    assert result.exit_code == 1, result.stdout
+    assert "no forward certificate" in json.loads(result.stdout)["error"]
+    assert seen == [("hash", "legacy_live"), ("certificate", "legacy_live", IDENTITY)]

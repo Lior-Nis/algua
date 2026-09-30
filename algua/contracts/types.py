@@ -6,6 +6,8 @@ from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from algua.contracts.float_fields import store_ints_as_floats
+
 if TYPE_CHECKING:  # keep contracts import-light; pandas only needed for typing
     import pandas as pd
 
@@ -36,6 +38,7 @@ class CapacityLimit:
     adv_window_bars: int          # trailing window length (bars) for the dollar-ADV estimate
 
     def __post_init__(self) -> None:
+        store_ints_as_floats(self)  # `1` and `1.0` are one identity (asdict vs model_dump)
         # Fail closed on every neutering value, mirroring ExecutionContract's own guards: a
         # non-finite / non-positive reference_aum, an out-of-range rate, or a sub-1 window would
         # silently disable or corrupt the cap. bool is an int subtype, so a `True` passed to any
@@ -87,8 +90,7 @@ class ExecutionContract:
     fees: float = 0.0005
     slippage: float = 0.0005
     # Optional ADV / participation capacity budget (issue #344). None = no capacity cap (default),
-    # so existing strategies are byte-unchanged. Last field: the whole codebase builds
-    # ExecutionContract with keyword args, so appending here is safe.
+    # so existing strategies are byte-unchanged.
     capacity: CapacityLimit | None = None
     # Intra-bar fill REFERENCE price (issue #383). The t->t+1 lag pins WHEN a lagged decision
     # fills (bar t+1); this pins WHICH price on that bar it fills at, so the backtest and the
@@ -132,6 +134,7 @@ class ExecutionContract:
     target_gross_utilization: float = 0.95
 
     def __post_init__(self) -> None:
+        store_ints_as_floats(self)  # `1` and `1.0` are one identity (asdict vs model_dump)
         if self.decision_lag_bars < 1:
             raise ValueError("decision_lag_bars must be >= 1 (no same-bar fills)")
         if self.warmup_bars < 0:
