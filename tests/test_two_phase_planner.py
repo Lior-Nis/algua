@@ -438,3 +438,93 @@ def test_any_behavior_affecting_early_change_changes_the_binding():
     changed_result = phase_a(changed_strategy, changed_config)
     assert isinstance(changed_result, SnapshotRequired)
     assert changed_result.phase_a_binding != baseline.phase_a_binding
+
+
+def _unsorted_bars_with_today() -> pd.DataFrame:
+    """Raw captured bars as a provider could deliver them: newest first, a same-day (unclosed)
+    bar on `NOW`'s date, an NFD-spelled out-of-universe symbol and an integer volume column."""
+    rows = [
+        (datetime(2023, 1, 5, tzinfo=UTC), "AAA", 11.0),
+        (datetime(2023, 1, 4, tzinfo=UTC), "é", 3.0),
+        (datetime(2023, 1, 4, tzinfo=UTC), "OLD", 5.0),
+        (datetime(2023, 1, 4, tzinfo=UTC), "AAA", 10.0),
+        (datetime(2023, 1, 3, tzinfo=UTC), "OLD", 5.0),
+        (datetime(2023, 1, 3, tzinfo=UTC), "AAA", 10.0),
+        (datetime(2023, 1, 2, tzinfo=UTC), "OLD", 5.0),
+        (datetime(2023, 1, 2, tzinfo=UTC), "AAA", 10.0),
+    ]
+    frame = pd.DataFrame(
+        [
+            {"timestamp": ts, "symbol": symbol, "open": price, "high": price, "low": price,
+             "close": price, "adj_close": price, "volume": 100}
+            for ts, symbol, price in rows
+        ]
+    ).set_index("timestamp")
+    assert str(frame["volume"].dtype) == "int64"
+    return frame
+
+
+def _expected_closed_bars() -> pd.DataFrame:
+    rows = [
+        (datetime(2023, 1, 2, tzinfo=UTC), "OLD", 5.0),
+        (datetime(2023, 1, 2, tzinfo=UTC), "AAA", 10.0),
+        (datetime(2023, 1, 3, tzinfo=UTC), "OLD", 5.0),
+        (datetime(2023, 1, 3, tzinfo=UTC), "AAA", 10.0),
+        (datetime(2023, 1, 4, tzinfo=UTC), "é", 3.0),
+        (datetime(2023, 1, 4, tzinfo=UTC), "OLD", 5.0),
+        (datetime(2023, 1, 4, tzinfo=UTC), "AAA", 10.0),
+    ]
+    return pd.DataFrame(
+        [
+            {"timestamp": ts, "symbol": symbol, "open": price, "high": price, "low": price,
+             "close": price, "adj_close": price, "volume": 100.0}
+            for ts, symbol, price in rows
+        ]
+    ).set_index("timestamp")
+
+
+def test_phase_a_closed_bars_golden_selection():
+    """Pinned before the closed-bar selection was carved out of `prepare_early` (Story 1.3c T6):
+    NFC symbols, float64 values, a STABLE timestamp sort and closed sessions only."""
+    from algua.live.planner import phase_a_closed_bars
+
+    strategy = _strategy()
+    early = _early(strategy, bars=_unsorted_bars_with_today(), positions={"OLD": 2.0})
+    pd.testing.assert_frame_equal(
+        phase_a_closed_bars(strategy, early), _expected_closed_bars(), check_exact=True
+    )
+
+
+def test_closed_bar_selection_is_strategy_free_and_matches_phase_a():
+    """The supervisor side of a frozen tick recomputes the closed bars without a strategy and
+    checks the child's decision timestamp against them (contract §3)."""
+    from algua.live.planner import phase_a_closed_bars
+    from algua.live.planner_early import closed_universe_bars
+
+    strategy = _strategy()
+    raw = _unsorted_bars_with_today()
+    pristine = raw.copy()
+    early = _early(strategy, bars=raw, positions={"OLD": 2.0})
+
+    closed = closed_universe_bars(raw, NOW, ("AAA",))
+
+    pd.testing.assert_frame_equal(closed.bars, phase_a_closed_bars(strategy, early))
+    pd.testing.assert_frame_equal(
+        closed.universe_bars, _expected_closed_bars().query("symbol == 'AAA'"), check_exact=True
+    )
+    first = phase_a(strategy, early)
+    assert isinstance(first, SnapshotRequired)
+    assert closed.decision_ts == first.decision_ts == datetime(2023, 1, 4, tzinfo=UTC)
+    pd.testing.assert_frame_equal(raw, pristine)  # the captured input is never mutated
+
+
+def test_closed_bar_selection_without_a_closed_universe_session_has_no_decision_time():
+    from algua.live.planner_early import closed_universe_bars
+
+    raw = _unsorted_bars_with_today()
+    only_today = closed_universe_bars(raw.iloc[:1], NOW, ("AAA",))
+    assert only_today.bars.empty and only_today.universe_bars.empty
+    assert only_today.decision_ts is None
+    out_of_universe = closed_universe_bars(raw[raw["symbol"] == "OLD"], NOW, ("AAA",))
+    assert len(out_of_universe.bars) == 3 and out_of_universe.universe_bars.empty
+    assert out_of_universe.decision_ts is None

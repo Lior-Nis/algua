@@ -13,6 +13,7 @@ from algua.calendar.factory import get_calendar
 from algua.contracts.types import OrderIntent
 from algua.execution.alpaca_broker import _AlpacaBroker
 from algua.live import planner as decision_planner
+from algua.live.planner import InProcessPlanner, PlannerPort
 from algua.live.planner_contract import (
     BOUNDARY_VERSION,
     CapturedStrategyState,
@@ -32,7 +33,6 @@ from algua.live.planner_contract import (
 )
 from algua.risk.limits import (
     MAX_STALE_SESSIONS,
-    WEIGHT_TOL,
     RiskBreach,
     check_mark_freshness,
 )
@@ -204,6 +204,9 @@ class TickHooks:
     # intent, so the paper lane can retract that phantom intent row (#311). None -> skipped.
     on_noop: Callable[[OrderIntent, str | None], None] | None = None
     planner_context: PlannerContext | None = None
+    # The planner port every planner call goes through (Story 1.3c: a frozen deployment's
+    # dispatcher). None -> InProcessPlanner(strategy), today's in-process facade calls.
+    planner: PlannerPort | None = None
 
 
 class TickHalted(RuntimeError):
@@ -292,7 +295,8 @@ def run_tick(
         gate_universe=tuple(strategy.universe),
         max_drawdown=max_drawdown,
     )
-    first = decision_planner.phase_a(strategy, early)
+    planner = hooks.planner if hooks.planner is not None else InProcessPlanner(strategy)
+    first = planner.phase_a(early)
     _raise_planner_failure(first)
     if isinstance(first, EarlyNoDecision):
         return _tick_result(first.state)
@@ -300,9 +304,7 @@ def run_tick(
         raise RuntimeError("planner returned an unknown Phase A result")
 
     if hooks.live_snapshot is not None:
-        snap, drawdown_equity = hooks.live_snapshot(
-            decision_planner.phase_a_closed_bars(strategy, early)
-        )
+        snap, drawdown_equity = hooks.live_snapshot(planner.closed_bars(early))
     else:
         snap = broker.snapshot(strategy.universe)
         drawdown_equity = snap.equity
@@ -316,7 +318,7 @@ def run_tick(
         venue_belief=VenueBeliefPending(),
     )
     late = LatePlannerInput(early, first.phase_a_binding, captured)
-    second = decision_planner.phase_b(strategy, late)
+    second = planner.phase_b(late)
     _raise_planner_failure(second)
     if not isinstance(second, VenueBeliefRequired):
         raise RuntimeError("planner did not request venue belief after late risk validation")
@@ -325,10 +327,7 @@ def run_tick(
         if hooks.venue_belief is None
         else VenueBeliefEnabled(dict(hooks.venue_belief()))
     )
-    second = decision_planner.phase_b(
-        strategy,
-        replace(late, captured=replace(captured, venue_belief=venue_belief)),
-    )
+    second = planner.phase_b(replace(late, captured=replace(captured, venue_belief=venue_belief)))
     _raise_planner_failure(second)
     if isinstance(second, LateNoDecision):
         return _tick_result(second.state)
@@ -399,14 +398,3 @@ def run_tick(
         reconcile_ok=second.state.reconcile_ok,
         realized_gross=second.state.realized_gross,
     )
-
-
-def check_gross_exposure_realized(gross: float, max_gross: float) -> None:
-    """Gross-exposure check on REALIZED (broker-held) weights rather than targets. Raises the same
-    RiskBreach kind family so the CLI trips the kill-switch + flattens exactly as for a target
-    breach; the detail names it as realized so the audit trail is unambiguous (#27)."""
-    if gross > max_gross + WEIGHT_TOL:
-        raise RiskBreach(
-            "gross_exposure_realized",
-            f"realized gross exposure {gross:.4f} exceeds max_gross_exposure {max_gross:.4f}",
-        )

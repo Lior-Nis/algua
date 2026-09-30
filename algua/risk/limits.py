@@ -46,6 +46,25 @@ MAX_STALE_SESSIONS = 2
 #: neither lane re-introduces a local copy.
 DARK_FEED_KINDS = frozenset({"stale_marks", "unvaluable_marks"})
 
+#: Every `RiskBreach.kind` the system raises: the closed vocabulary a frozen planner child may
+#: report as `risk_kind` (Story 1.3c), so a child cannot invent a kind the supervisor's breach
+#: routing has never seen. `tests/test_failure_vocabularies.py` scans `algua/` to keep it exact.
+RISK_BREACH_KINDS = frozenset(
+    {
+        "drawdown",
+        "gross_exposure",
+        "gross_exposure_realized",
+        "long_only",
+        "max_weight_per_symbol",
+        "non_finite_weight",
+        "non_positive_equity",
+        "out_of_universe",
+        "reconcile",
+        "stale_marks",
+        "unvaluable_marks",
+    }
+)
+
 
 class RiskBreach(ValueError):
     """A hard risk-limit breach. Subclasses ValueError so existing CLI error handling
@@ -189,9 +208,12 @@ def check_mark_freshness(stale_by_symbol: dict[str, float], max_stale: int) -> N
     counted in completed exchange sessions; `math.inf` encodes a symbol absent from the frame
     (no mark at all), and a negative value encodes a bar dated ahead of now (a clock/feed fault).
     Raises RiskBreach('stale_marks', ...) so the caller trips + flattens rather than sizing real
-    orders against an unreliable world. An empty mapping has no offenders and passes."""
+    orders against an unreliable world. An empty mapping has no offenders and passes.
+    Offenders are listed in symbol order, never the caller's iteration order (often a set's, which
+    follows the process hash seed), so the breach text is identical across processes."""
     offenders: dict[str, str] = {}
-    for s, n in stale_by_symbol.items():
+    for s in sorted(stale_by_symbol):
+        n = stale_by_symbol[s]
         if math.isinf(n):
             offenders[s] = "no_mark"  # absent from the frame (finding 3)
         elif n < 0:

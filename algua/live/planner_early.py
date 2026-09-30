@@ -193,7 +193,7 @@ def assert_marks_usable(
             "refusing to value/size the book off an unvaluable feed",
         )
     stale: dict[str, float] = {}
-    for symbol in symbols:
+    for symbol in sorted(symbols):  # symbol order, so an unmappable mark is named deterministically
         timestamp = latest_ts.get(symbol)
         if timestamp is None:
             stale[symbol] = math.inf
@@ -210,6 +210,31 @@ def assert_marks_usable(
 
 
 @dataclass(frozen=True)
+class ClosedBars:
+    bars: pd.DataFrame
+    universe_bars: pd.DataFrame
+    decision_ts: datetime | None
+
+
+def closed_universe_bars(
+    raw_bars: pd.DataFrame, now: datetime, gate_universe: Collection[str]
+) -> ClosedBars:
+    """Phase A's strategy-free closed-bar selection: NFC symbols, float64 values, a stable
+    timestamp sort and only sessions dated before `now`; the decision time is the latest closed
+    gate-universe bar. A frozen tick's supervisor recomputes this to check the child's result."""
+    bars = raw_bars.copy()
+    bars["symbol"] = bars["symbol"].map(_normalized)
+    for column in ("open", "high", "low", "close", "adj_close", "volume"):
+        bars[column] = bars[column].astype("float64")
+    bars = bars.sort_index(kind="stable")
+    if not bars.empty:
+        bars = bars[[timestamp.date() < now.date() for timestamp in bars.index]]
+    universe_bars = bars[bars["symbol"].isin(_normalized_symbols(gate_universe, "gate_universe"))]
+    decision_ts = universe_bars.index.max() if not universe_bars.empty else None
+    return ClosedBars(bars, universe_bars, decision_ts)
+
+
+@dataclass(frozen=True)
 class PreparedEarly:
     bars: pd.DataFrame
     universe_bars: pd.DataFrame
@@ -220,20 +245,12 @@ class PreparedEarly:
 
 
 def prepare_early(strategy: LoadedStrategy, early: EarlyPlannerInput) -> PreparedEarly:
-    bars = early.raw_bars.copy()
-    bars["symbol"] = bars["symbol"].map(_normalized)
-    for column in ("open", "high", "low", "close", "adj_close", "volume"):
-        bars[column] = bars[column].astype("float64")
-    bars = bars.sort_index(kind="stable")
-    if not bars.empty:
-        bars = bars[[timestamp.date() < early.now.date() for timestamp in bars.index]]
-    universe_bars = bars[
-        bars["symbol"].isin(_normalized_symbols(early.gate_universe, "gate_universe"))
-    ]
-    decision_ts = universe_bars.index.max() if not universe_bars.empty else None
-    warming = universe_bars.index.nunique() <= strategy.execution.warmup_bars
-    latest_ts, latest_close = _latest_values(bars)
-    return PreparedEarly(bars, universe_bars, latest_ts, latest_close, decision_ts, warming)
+    closed = closed_universe_bars(early.raw_bars, early.now, early.gate_universe)
+    warming = closed.universe_bars.index.nunique() <= strategy.execution.warmup_bars
+    latest_ts, latest_close = _latest_values(closed.bars)
+    return PreparedEarly(
+        closed.bars, closed.universe_bars, latest_ts, latest_close, closed.decision_ts, warming
+    )
 
 
 def phase_a(strategy: LoadedStrategy, early: EarlyPlannerInput) -> EarlyPlannerResult:
