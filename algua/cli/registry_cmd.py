@@ -205,6 +205,7 @@ def transition(
                 raise TransitionError("transition to live requires a human actor")
             rec = repo.get(name)
             validate_transition(rec.stage, Stage.LIVE)  # reject non-paper before issuing
+            transitions.refuse_frozen_deployment(repo, rec.id, Stage.LIVE)  # before hashing
             # The certificate check BEFORE any challenge is issued, so the human signs with
             # the evidence in front of them (#124). Built via the same transitions helper the
             # signature-completion wall uses — no duplicate logic. Module-attribute access on

@@ -25,6 +25,7 @@ from typing import Any
 
 from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
 from algua.registry.approvals import compute_artifact_hashes
+from algua.registry.artifact_errors import FrozenQualificationPending
 from algua.registry.deployment import DeploymentError
 from algua.registry.forward_evidence import (
     ActivitiesFetch,
@@ -65,6 +66,18 @@ def guard_forward_relaxations(actor: Actor, criteria: ForwardGateCriteria) -> No
     if relaxed:
         raise ValueError(
             "forward-gate relaxation requires --actor human: " + ", ".join(sorted(relaxed)))
+
+
+def refuse_frozen_promotion(conn: sqlite3.Connection, strategy_id: int) -> None:
+    """Story 1.3c §9 (CAP-5): refuse a strategy whose ACTIVE deployment is frozen with
+    ``FrozenQualificationPending`` — frozen evidence has no forward-qualification contract until
+    Story 1.3d. Reads only the deployment ledger (no actor authentication, no checkout identity
+    hashing), so every forward-promotion entry point can call it FIRST, ahead of any gate
+    evaluation, token mint or stage change. Working-tree and legacy (no deployment) strategies
+    pass through untouched."""
+    deployment = SqliteStrategyRepository(conn).active_deployment(strategy_id)
+    if deployment is not None and deployment.source_kind == "frozen":
+        raise FrozenQualificationPending()
 
 
 def forward_promotion_preflight(
@@ -110,8 +123,10 @@ def run_forward_gate(
 
     Identity is computed ONCE via ``compute_artifact_hashes`` and feeds the evidence
     admissibility filter, the evaluation row, AND the transition's pinned hashes — they can
-    never disagree."""
+    never disagree. A frozen deployment is refused before that hash (Story 1.3c §9): defense in
+    depth for a caller that skipped the CLI's own first-step refusal."""
     rec = repo.get(name)
+    refuse_frozen_promotion(conn, rec.id)
     identity = compute_artifact_hashes(name)
     deployment = SqliteStrategyRepository(conn).require_tick_deployment(rec.id)
     if deployment is None:

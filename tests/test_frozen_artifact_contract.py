@@ -4,11 +4,11 @@ import json
 
 import pytest
 
+from algua.contracts.canonical import canonical_json
 from algua.registry.artifact_contract import (
     ArtifactFile,
     BuildInputs,
     BundleDescriptor,
-    canonical_json,
 )
 from algua.registry.artifact_manifest import parse_frozen_manifest
 from algua.registry.environment_contract import (
@@ -523,7 +523,7 @@ def test_frozen_manifest_rejects_surrogate_text_at_construction(changes) -> None
 
 @pytest.mark.parametrize("value", ["\ud800", {"k\udfff": 1}, [{"v": "\ud83d"}]])
 def test_canonical_json_rejects_surrogate_text_with_a_stable_error(value) -> None:
-    from algua.registry.artifact_contract import canonical_json
+    from algua.contracts.canonical import canonical_json
 
     with pytest.raises(ValueError, match="UTF-8") as caught:
         canonical_json(value)

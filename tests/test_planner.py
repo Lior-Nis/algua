@@ -24,7 +24,9 @@ def test_planner_returns_validated_weights_and_sorted_rebalance_intents():
     )
     request = PlannerInput(view, {"OLD": 0.2, "AAA": 0.5}, ts)
     result = plan(strategy, request)
-    pd.testing.assert_series_equal(result.weights, weights)
+    # Validated and emitted once as float64 in symbol order (Story 1.3c: the supervisor re-runs
+    # the weight rules on exactly this data).
+    pd.testing.assert_series_equal(result.weights, weights.astype("float64").sort_index())
     assert result.intents == [
         OrderIntent("BBB", Side.BUY, 0.25, ts),
         OrderIntent("OLD", Side.SELL, 0.0, ts),
@@ -81,7 +83,8 @@ def test_planner_dependency_closure_has_no_operational_authority():
     allowed_leaves = {
         "algua.calendar.market_calendar", "algua.live.planner_binding",
         "algua.live.planner_contract", "algua.live.planner_decision",
-        "algua.live.planner_early", "algua.live.planner_late", "algua.risk.limits",
+        "algua.live.planner_early", "algua.live.planner_late",
+        "algua.live.planner_validation", "algua.risk.limits",
         "algua.strategies.base",
     }
     forbidden = {

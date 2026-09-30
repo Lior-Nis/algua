@@ -20,13 +20,18 @@ The target is a **modular monolith + isolated live runtime + background workers*
 The existing package boundaries support that direction. Isolated immutable deployment execution
 is still partial: the [artifact-freeze design](superpowers/specs/2026-09-22-artifact-freeze-design.md)
 separates a frozen decision planner from the current supervisor. The initial pure planner seam and
-explicit deployment epochs are shipped: new paper intake records a canonical working-tree
-descriptor, ticks and forward evaluations carry its append-only deployment ID, and certificates
-cannot cross epochs. Execution is **not frozen yet**: it still imports the mutable working tree and
-refuses a deployment-aware tick when that tree or environment drifts. The approved Story 1.3 parent
-is decomposed into four reviewable increments: complete the full two-phase behavior boundary
-in-process, materialize and verify immutable content/environments, execute frozen planners in paper,
-then bind operational evidence and qualification. Existing migration-time tenants remain an
+explicit deployment epochs are shipped: new paper intake prepares, verifies offline and binds a
+frozen Story 1.3b descriptor (earlier working-tree deployments keep theirs), ticks and forward
+evaluations carry its append-only deployment ID, and certificates cannot cross epochs. A frozen
+paper tenant's planner runs each phase in a fresh child process launched from its verified bundle
+and environment (`algua/live/frozen_dispatch.py`); the current supervisor re-derives every
+strategy-free risk wall and owns all effects. Working-tree deployments still import the mutable
+working tree and refuse a deployment-aware tick when that tree or environment drifts. Frozen
+promotion stays refused (`frozen_qualification_pending`) until Story 1.3d binds invocation
+evidence; the live lane refuses frozen deployments. The approved Story 1.3 parent is decomposed into
+four reviewable increments: complete the full two-phase behavior boundary in-process (done),
+materialize and verify immutable content/environments (done), execute frozen planners in paper
+(done), then bind operational evidence and qualification. Existing migration-time tenants remain an
 explicit unmigrated cohort. The supervisor retains broker access, reconciliation and account-wide
 risk controls. Development and deployed artifacts belong to one product/repository; no production
 fork is required.

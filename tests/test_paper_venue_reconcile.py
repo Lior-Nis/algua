@@ -14,7 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 from algua.cli.main import app
-from algua.cli.paper_cmd import _ingest_paper_venue
+from algua.cli.paper_venue import ingest_paper_venue
 from algua.config.settings import get_settings
 from algua.execution.alpaca_broker import AccountState, TickSnapshot
 from algua.execution.live_ledger import LedgerKind, fill_cursor, paper_believed_positions
@@ -72,7 +72,7 @@ def test_ingest_uses_far_past_first_then_advances_cursor(tmp_path):
     )
     c.commit()
     broker = FakeBroker({_FAR_PAST: [_fill("a1", "AAA", 5, "buy", "o1")]})
-    _ingest_paper_venue(c, broker, broker.clock())
+    ingest_paper_venue(c, broker, broker.clock())
     assert paper_believed_positions(c, "s") == {"AAA": 5.0}
     assert fill_cursor(c, LedgerKind.PAPER) == "2026-01-02T00:00:00Z"  # = until (broker clock)
 
@@ -81,7 +81,7 @@ def test_ingest_fails_closed_on_transport_error(tmp_path):
     c = _conn(tmp_path)
     broker = FakeBroker({_FAR_PAST: RuntimeError("503")})
     with pytest.raises(RuntimeError):
-        _ingest_paper_venue(c, broker, broker.clock())
+        ingest_paper_venue(c, broker, broker.clock())
     assert fill_cursor(c, LedgerKind.PAPER) is None  # cursor must NOT advance on failure
 
 

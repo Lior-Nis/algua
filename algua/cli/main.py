@@ -34,7 +34,7 @@ from algua.cli import (  # noqa: F401 - imports register subcommands
     strategy_cmd,
 )
 from algua.cli.app import app, emit
-from algua.cli.errors import error_code, is_retryable
+from algua.cli.errors import error_envelope, is_retryable
 
 # Composition root: mount idea_app under research_app HERE (not inside idea_cmd) so no cli command
 # module imports a sibling. Typer builds the command tree lazily at get_command(app) inside main(),
@@ -88,9 +88,8 @@ def main(args: list[str] | None = None) -> None:
         # command body, the Typer callback, or arg parsing still renders as the JSON error envelope
         # (never a raw traceback), so an agent's stdout parser is never broken (issue #337). Exit/
         # UsageError/Abort are caught above (no double-emit); SystemExit/KeyboardInterrupt are
-        # BaseException and pass straight through. `code`/`retryable` reuse the shared seam (DRY).
-        code = error_code(exc)
-        emit({"ok": False, "error": str(exc), "code": code, "retryable": is_retryable(code)})
+        # BaseException and pass straight through. The envelope reuses the shared seam (DRY).
+        emit(error_envelope(exc))
         sys.exit(1)
     if isinstance(result, int) and result != 0:
         sys.exit(result)

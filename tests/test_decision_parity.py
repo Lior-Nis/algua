@@ -262,3 +262,67 @@ def test_out_of_universe_weight_breaches_both_paths() -> None:
     with pytest.raises(RiskBreach) as ei_paper:
         run_paper(strat, SimBroker(cash=1_000_000.0), SyntheticProvider(seed=0), START, END)
     assert ei_paper.value.kind == "out_of_universe"
+
+
+# --- one canonical weight vector for the child's validation and the supervisor's (Story 1.3c) ----
+
+
+def _planned(weights: pd.Series, **execution: float) -> LoadedStrategy:
+    cfg = StrategyConfig(
+        name="planned", universe=["AAA", "BBB"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, **execution),
+        params={}, construction="top_k_equal_weight", construction_params={"top_k": 1},
+    )
+    return LoadedStrategy(config=cfg, signal_fn=lambda v, p: weights, construct_fn=_identity)
+
+
+def _plan(strategy: LoadedStrategy):
+    from algua.live.planner_decision import PlannerInput, plan
+
+    return plan(strategy, PlannerInput(pd.DataFrame(), {}, START))
+
+
+def test_plan_validates_and_emits_the_weights_as_float64_in_symbol_order() -> None:
+    """A frozen tick's supervisor re-validates the emitted weights as a float64 Series in symbol
+    order (their wire form); `plan` validates and emits exactly that Series, so the child and the
+    supervisor judge identical data."""
+    result = _plan(_planned(pd.Series({"BBB": 0.25, "AAA": 0.5}, dtype="float32")))
+
+    assert str(result.weights.dtype) == "float64"
+    assert list(result.weights.index) == ["AAA", "BBB"]
+    assert result.weights.to_dict() == {"AAA": 0.5, "BBB": 0.25}
+
+
+def test_float32_weights_at_the_cap_breach_as_the_supervisor_sees_them() -> None:
+    """float32(0.1) passes a float32 comparison with the 0.1 cap (NumPy compares in float32) but is
+    0.10000000149 as the float64 the order is sized from and the supervisor re-validates."""
+    import numpy as np
+
+    from algua.risk.limits import validate_decision_weights
+
+    strategy = _planned(pd.Series({"AAA": 0.1}, dtype="float32"), max_weight_per_symbol=0.1)
+    with pytest.raises(RiskBreach) as in_plan:
+        _plan(strategy)
+    with pytest.raises(RiskBreach) as in_supervisor:
+        validate_decision_weights(pd.Series({"AAA": float(np.float32(0.1))}, dtype="float64"),
+                                  strategy.execution, strategy.name, ["AAA", "BBB"])
+    assert in_plan.value.kind == in_supervisor.value.kind == "max_weight_per_symbol"
+    assert in_plan.value.detail == in_supervisor.value.detail
+
+
+@pytest.mark.parametrize(
+    "weights",
+    [
+        pd.Series({"AAA": True}),  # a bool must not coerce to 1.0
+        pd.Series({"AAA": "0.5"}),  # nor a numeric string to 0.5
+        pd.Series([0.2, 0.3], index=["AAA", "AAA"]),
+        pd.Series({"AAA": float("inf")}, dtype="float32"),
+    ],
+    ids=["bool", "string", "duplicate", "float32_inf"],
+)
+def test_the_float64_canonical_form_keeps_the_weight_dtype_guards(weights) -> None:
+    # A gross of 2 keeps the construction's utilization step from rescaling (and so retyping) the
+    # vector before it reaches the planner.
+    with pytest.raises(RiskBreach) as raised:
+        _plan(_planned(weights, max_gross_exposure=2.0))
+    assert raised.value.kind == "non_finite_weight"

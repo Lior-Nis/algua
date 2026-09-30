@@ -61,7 +61,11 @@ BUDGET: dict[str, int] = {
     # and guards are ~8 lines; the rest is the comment deriving the 0.95 default from an explicit
     # between-tick move policy (u <= 1/(1+r)), sizing 5% as a stress allowance against measured
     # session returns, and saying what it does NOT solve. It belongs on the contract it constrains.
-    "algua/contracts/types.py": 465,
+    # +3 for Story 1.3c: both contract __post_init__s first store an int written into a float
+    # field as the equal float, so config_hash (asdict) and the recorded frozen config
+    # (model_dump) agree on `1` vs `1.0`. The normaliser itself lives in
+    # algua/contracts/float_fields.py; what remains here is its import and the two calls.
+    "algua/contracts/types.py": 468,
     # +33 for #560: submits recover from Alpaca's duplicate-client_order_id 422 instead of aborting
     # the whole multi-tenant cycle, and `_post_order` now reports WHETHER it recovered so the caller
     # can refund a buying-power reservation no new order consumed. The classification and the

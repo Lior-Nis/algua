@@ -13,7 +13,11 @@ def resolve_tick(
     conn: sqlite3.Connection, strategy_id: int, name: str,
     identity_loader: Callable[[str], ArtifactIdentity],
 ) -> tuple[DeploymentRecord | None, ArtifactIdentity]:
-    """Verify the active descriptor and current identity before any tick effects."""
+    """Verify the active descriptor and current identity before any tick effects.
+
+    The working-tree/legacy resolver of the live lane (and of non-frozen paper tenants): a frozen
+    row is refused with ``frozen_live_unsupported`` by ``require_tick_deployment`` before the
+    checkout identity is computed (Story 1.3c §2)."""
     deployment = SqliteStrategyRepository(conn).require_tick_deployment(strategy_id)
     identity = identity_loader(name)
     if deployment is not None and (

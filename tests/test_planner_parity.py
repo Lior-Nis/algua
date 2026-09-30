@@ -294,3 +294,277 @@ def test_supervisor_routes_pre_cancel_work_through_two_stateless_phases(monkeypa
     assert all(item.deployment_id == 7 for item in captured_early)
     assert all(item.artifact_id == 11 for item in captured_early)
     assert all(item.manifest_digest == "a" * 64 for item in captured_early)
+
+
+# --- Story 1.3c T6: the planner port (contract §3) -------------------------------------------
+# `TickHooks.planner` is the one seam a frozen dispatcher replaces. Unset, run_tick must make
+# exactly today's in-process calls (the golden masters above stay the proof of that); set, every
+# planner call must go through it, with the venue-belief handshake and error mapping unchanged.
+
+
+class _RecordingPort:
+    """Delegates to the in-process adapter and records each port call into the effect trace."""
+
+    def __init__(self, strategy, events):
+        from algua.live.planner import InProcessPlanner
+
+        self.inner = InProcessPlanner(strategy)
+        self.events = events
+        self.early: list = []
+        self.late: list = []
+
+    def phase_a(self, early):
+        self.events.append("port.phase_a")
+        self.early.append(early)
+        return self.inner.phase_a(early)
+
+    def closed_bars(self, early):
+        self.events.append("port.closed_bars")
+        self.early.append(early)
+        return self.inner.closed_bars(early)
+
+    def phase_b(self, late):
+        self.events.append("port.phase_b")
+        self.late.append(late)
+        return self.inner.phase_b(late)
+
+
+_DECISION_TAIL = [
+    "decision",
+    "halt",
+    "cancel",
+    "halt",
+    "halt",
+    ("before", "AAA"),
+    ("submit", "AAA", 0.5),
+    ("persist", "AAA"),
+    "halt",
+    ("before", "OLD"),
+    ("submit", "OLD", 0.0),
+    ("noop", "OLD"),
+]
+
+
+def test_in_process_adapter_makes_exactly_todays_facade_calls(monkeypatch):
+    from algua.live import planner
+
+    calls = []
+    sentinel = object()
+    for name in ("phase_a", "phase_a_closed_bars", "phase_b"):
+        monkeypatch.setattr(
+            planner, name, lambda s, v, name=name: calls.append((name, s, v)) or sentinel
+        )
+    strategy, early, late = object(), object(), object()
+    adapter = planner.InProcessPlanner(strategy)
+    assert adapter.phase_a(early) is sentinel
+    assert adapter.closed_bars(early) is sentinel
+    assert adapter.phase_b(late) is sentinel
+    assert calls == [
+        ("phase_a", strategy, early),
+        ("phase_a_closed_bars", strategy, early),
+        ("phase_b", strategy, late),
+    ]
+
+
+def test_run_tick_routes_every_planner_call_through_the_port_live_snapshot_path():
+    from algua.live.planner_contract import VenueBeliefEnabled, VenueBeliefPending
+
+    args, events, _ = scenario(held={"OLD": 10.0}, qtys={"OLD": 20.0})
+    port = _RecordingPort(args["strategy"], events)
+    args["hooks"].planner = port
+
+    result = run_tick(**args)
+
+    assert events == [
+        "positions",
+        ("fetch", ("AAA", "OLD")),
+        "port.phase_a",
+        "port.closed_bars",
+        "snapshot",
+        "port.phase_b",
+        "belief",
+        "port.phase_b",
+        *_DECISION_TAIL,
+    ]
+    assert len({id(early) for early in port.early}) == 1
+    assert all(late.early is port.early[0] for late in port.late)
+    pending, resolved = port.late
+    assert pending.captured.venue_belief == VenueBeliefPending()
+    assert resolved.captured.venue_belief == VenueBeliefEnabled({"OLD": 20.0})
+    assert resolved.phase_a_binding == pending.phase_a_binding
+    assert resolved.captured.request_id == pending.captured.request_id == port.early[0].request_id
+    assert result.target_weights == {"AAA": 0.5}
+    assert result.positions_before == {"OLD": 20.0}
+
+
+def test_run_tick_routes_through_the_port_on_the_broker_snapshot_path():
+    args, events, _ = scenario(held={"OLD": 10.0}, qtys={"OLD": 20.0})
+    snap = TickSnapshot(equity=100.0, qtys={"OLD": 20.0}, market_values={"OLD": 20.0})
+
+    def broker_snapshot(universe):
+        events.append(("broker.snapshot", tuple(universe)))
+        return snap
+
+    args["broker"].snapshot = broker_snapshot
+    args["hooks"].live_snapshot = None
+    args["hooks"].planner = _RecordingPort(args["strategy"], events)
+    args["broker"].submit_sized = lambda intent, s, coid, reserve=None: (
+        events.append(("submit", intent.symbol, intent.target_weight))
+        or ("noop" if intent.symbol == "OLD" else "accepted")
+    )
+
+    run_tick(**args)
+
+    assert events == [
+        "positions",
+        ("fetch", ("AAA", "OLD")),
+        "port.phase_a",
+        ("broker.snapshot", ("AAA",)),
+        "port.phase_b",
+        "belief",
+        "port.phase_b",
+        *_DECISION_TAIL,
+    ]
+
+
+def test_unset_planner_and_explicit_in_process_adapter_are_indistinguishable():
+    from algua.live.planner import InProcessPlanner
+
+    outcomes = []
+    for explicit in (False, True):
+        args, events, _ = scenario(held={"OLD": 10.0}, qtys={"OLD": 20.0})
+        if explicit:
+            args["hooks"].planner = InProcessPlanner(args["strategy"])
+        outcomes.append((repr(run_tick(**args)), events))
+    assert outcomes[0] == outcomes[1]
+
+
+class _ScriptedPort:
+    """A port that never runs a strategy: canned results, as a frozen dispatcher would return."""
+
+    def __init__(self, events, phase_a, closed_bars=None, phase_b=()):
+        self.events = events
+        self._a, self._bars, self._b = phase_a, closed_bars, list(phase_b)
+        self.late: list = []
+
+    def phase_a(self, early):
+        self.events.append("port.phase_a")
+        return self._a
+
+    def closed_bars(self, early):
+        self.events.append("port.closed_bars")
+        return self._bars
+
+    def phase_b(self, late):
+        self.events.append("port.phase_b")
+        self.late.append(late)
+        return self._b.pop(0)
+
+
+def _scripted_decision():
+    from algua.contracts.types import OrderIntent, Side
+    from algua.live.planner_contract import Decision, PlannerState
+
+    state = PlannerState(DECISION, (("AAA", 0.25),), (("OLD", 20.0),), 100.0, 100.0, True, 0.2)
+    return Decision(state, (OrderIntent("AAA", Side.BUY, 0.25, DECISION),))
+
+
+def test_an_injected_port_is_the_only_planner_the_tick_consults(monkeypatch):
+    from algua.live import planner
+    from algua.live.planner_contract import SnapshotRequired, VenueBeliefRequired
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("run_tick bypassed the injected planner port")
+
+    for name in ("phase_a", "phase_a_closed_bars", "phase_b", "plan"):
+        monkeypatch.setattr(planner, name, forbidden)
+    args, events, bars = scenario(held={"OLD": 10.0}, qtys={"OLD": 20.0})
+    args["hooks"].planner = _ScriptedPort(
+        events,
+        SnapshotRequired(DECISION, False, "f" * 64),
+        bars[bars.index < NOW],
+        [VenueBeliefRequired(), _scripted_decision()],
+    )
+
+    result = run_tick(**args)
+
+    assert events == [
+        "positions",
+        ("fetch", ("AAA", "OLD")),
+        "port.phase_a",
+        "port.closed_bars",
+        "snapshot",
+        "port.phase_b",
+        "belief",
+        "port.phase_b",
+        "halt",
+        "cancel",
+        "halt",
+        "halt",
+        ("before", "AAA"),
+        ("submit", "AAA", 0.25),
+        ("persist", "AAA"),
+    ]
+    assert result.decision_ts == DECISION
+    assert result.target_weights == {"AAA": 0.25}
+    assert result.positions_before == {"OLD": 20.0}
+
+
+def _port_failure_cases():
+    from algua.live.planner_contract import (
+        EarlyNoDecision,
+        LateNoDecision,
+        PhaseBindingFailure,
+        PlannerInputFailure,
+        PlannerRiskFailure,
+        PlannerState,
+        VenueBeliefRequired,
+    )
+
+    state = PlannerState(DECISION, (), (), 0.0, None, True, 0.0)
+    head = ["positions", ("fetch", ("AAA", "OLD")), "port.phase_a"]
+    late = [*head, "port.closed_bars", "snapshot", "port.phase_b"]
+    final = [*late, "belief", "port.phase_b"]
+    risk = PlannerRiskFailure("drawdown", "dd detail", False)
+    return [
+        ("a-risk", [risk], RiskBreach, "dd detail", head),
+        ("a-input", [PlannerInputFailure("invalid_now", "bad now")], ValueError, "bad now", head),
+        ("a-unknown", [object()], RuntimeError, "unknown Phase A result", head),
+        ("a-no-decision", [EarlyNoDecision("warming", state)], None, None, head),
+        ("b1-risk", [risk], RiskBreach, "dd detail", late),
+        ("b1-binding", [PhaseBindingFailure("phase_a_binding_mismatch", "mixed")], ValueError,
+         "mixed", late),
+        ("b1-early-decision", [LateNoDecision("warming", state)], RuntimeError,
+         "did not request venue belief", late),
+        ("b2-risk", [VenueBeliefRequired(), risk], RiskBreach, "dd detail", final),
+        ("b2-input", [VenueBeliefRequired(), PlannerInputFailure("invalid_captured_state", "cap")],
+         ValueError, "cap", final),
+        ("b2-repeat", [VenueBeliefRequired(), VenueBeliefRequired()], RuntimeError,
+         "unknown Phase B result", final),
+    ]
+
+
+@pytest.mark.parametrize("case", _port_failure_cases(), ids=lambda case: case[0])
+def test_port_results_keep_todays_error_mapping_and_stop_before_effects(case):
+    from algua.live.planner_contract import SnapshotRequired
+
+    label, results, error, message, trace = case
+    args, events, bars = scenario(held={"OLD": 10.0}, qtys={"OLD": 20.0})
+    if label.startswith("a-"):
+        port = _ScriptedPort(events, results[0])
+    else:
+        port = _ScriptedPort(
+            events, SnapshotRequired(DECISION, False, "f" * 64), bars[bars.index < NOW], results
+        )
+    args["hooks"].planner = port
+    if error is None:
+        result = run_tick(**args)
+        assert result.decision_ts == DECISION and result.submitted == []
+    else:
+        with pytest.raises(error) as exc:
+            run_tick(**args)
+        assert type(exc.value) is error
+        assert message in str(exc.value)
+        if error is RiskBreach:
+            assert exc.value.kind == "drawdown"
+    assert events == trace

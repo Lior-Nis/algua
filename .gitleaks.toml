@@ -33,4 +33,8 @@ stopwords = [
 # secrets elsewhere (including other test files) are still caught. — tracking: #395
 paths = [
   '''tests/registry/test_negative_results\.py''',
+  # Golden 32-hex config_hash pins keyed by repo strategy names; the names containing "linear"
+  # (model_linear_scores, model_scaled_linear) trip the Linear client-secret rule. They are
+  # public identity hashes, not credentials. Scoped to this one file. — Story 1.3c
+  '''tests/test_contract_float_fields\.py''',
 ]

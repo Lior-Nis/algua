@@ -236,3 +236,80 @@ def test_check_mark_freshness_raises_on_future_dated():
         check_mark_freshness({"BBB": -1.0}, max_stale=2)
     assert ei.value.kind == "stale_marks"
     assert "future_dated" in ei.value.detail
+
+
+def test_check_mark_freshness_lists_offenders_in_sorted_order():
+    # Story 1.3c §7: the breach text must not depend on the caller's iteration order, so a frozen
+    # child and the in-process planner (different hash seeds) report byte-identical details.
+    from algua.risk.limits import RiskBreach, check_mark_freshness
+
+    details = []
+    for stale in (
+        {"ZZZ": 3.0, "AAA": math.inf, "MMM": -1.0, "BBB": 1.0},
+        {"BBB": 1.0, "MMM": -1.0, "AAA": math.inf, "ZZZ": 3.0},
+    ):
+        with pytest.raises(RiskBreach) as ei:
+            check_mark_freshness(stale, max_stale=2)
+        details.append(ei.value.detail)
+    assert details[0] == details[1]
+    assert (
+        "{'AAA': 'no_mark', 'MMM': 'future_dated(-1)', 'ZZZ': 'stale(3)'}" in details[0]
+    )
+
+
+def test_unmappable_mark_names_the_same_symbol_whatever_the_iteration_order():
+    # The planner's per-symbol session mapping stops at the first unmappable mark; which symbol
+    # the breach names must not depend on the order a set happened to iterate in.
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from algua.live.planner_early import assert_marks_usable
+    from algua.risk.limits import RiskBreach
+
+    def unmappable(timestamp, now):
+        raise ValueError("out of calendar bounds")
+
+    calendar = SimpleNamespace(sessions_stale=unmappable)
+    ts = datetime(2023, 1, 4, tzinfo=UTC)
+    details = []
+    for symbols in (["ZZZ", "AAA"], ["AAA", "ZZZ"]):
+        with pytest.raises(RiskBreach) as ei:
+            assert_marks_usable(
+                symbols, {"AAA": ts, "ZZZ": ts}, {"AAA": 1.0, "ZZZ": 1.0},
+                datetime(2023, 1, 5, tzinfo=UTC), calendar,
+            )
+        assert ei.value.kind == "stale_marks"
+        details.append(ei.value.detail)
+    assert details[0] == details[1]
+    assert details[0].startswith("cannot map AAA mark")
+
+
+_FRESH_PROCESS_BREACH = """
+from datetime import UTC, datetime
+from algua.live.planner_early import assert_marks_usable
+from algua.risk.limits import RiskBreach
+try:
+    assert_marks_usable({"AAA", "BBB", "CCC", "DDD", "EEE", "FFF"}, {}, {},
+                        datetime(2023, 1, 5, tzinfo=UTC), object())
+except RiskBreach as exc:
+    print(exc.detail)
+"""
+
+
+def test_mark_breach_text_is_identical_across_fresh_processes():
+    # The planner values a SET of held/consumed symbols; set order follows PYTHONHASHSEED, which a
+    # fresh frozen child does not share with the supervisor. The detail must not follow it.
+    import os
+    import subprocess
+    import sys
+
+    details = set()
+    for seed in ("0", "1", "2", "3"):
+        env = {**os.environ, "PYTHONHASHSEED": seed}
+        out = subprocess.run(
+            [sys.executable, "-c", _FRESH_PROCESS_BREACH],
+            env=env, capture_output=True, text=True, check=True, timeout=60,
+        )
+        details.add(out.stdout)
+    assert len(details) == 1, details
+    assert "{'AAA': 'no_mark', 'BBB': 'no_mark', 'CCC': 'no_mark'," in details.pop()

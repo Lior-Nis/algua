@@ -89,7 +89,7 @@ def run_paper(
             raise RiskBreach(
                 "non_positive_equity",
                 f"run_paper sizing equity {equity} is not a usable (positive, finite) "
-                f"denominator — refusing to size against it (sign-flip / divide-by-zero / NaN)",
+                f"denominator - refusing to size against it (sign-flip / divide-by-zero / NaN)",
             )
         positions = broker.get_positions()
         bar_closes = closes.loc[t]

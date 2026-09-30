@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import math
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Any
 
 from algua.calendar.factory import get_calendar
 from algua.cli._common import SYSTEMIC_SETUP_EXCEPTIONS
@@ -50,10 +52,13 @@ class CyclePlan:
 
 def build_cycle_plan(
     conn: sqlite3.Connection, *, names: list[str], kind: LedgerKind, data_dir: Path,
+    views: Mapping[str, Any] | None = None,
 ) -> CyclePlan:
     """Resolve each strategy's operational universe (#559: the gate-bound one, never the CONFIG
     template), held symbols, and history need. Admission is ``load_tradable_strategy`` — the SAME
     path the tick helpers use — so a tenant cannot pass planning and fail only at tick time. A
+    frozen paper tenant (Story 1.3c) is planned from its supervisor view in ``views`` instead: its
+    already-resolved gate universe and recorded contract, never the checkout module. A
     per-strategy failure is ISOLATED (excluded from the plan, listed in ``skipped``) so one
     tenant's bad state never blocks its siblings; a systemic fault (``SYSTEMIC_SETUP_EXCEPTIONS``
     — a locked sqlite — or an ``OSError`` from the filesystem) propagates raw to abort the
@@ -64,9 +69,12 @@ def build_cycle_plan(
     skipped: list[dict] = []
     for name in names:
         try:
-            strategy = load_tradable_strategy(name)
-            symbols, _source = resolve_operational_universe(
-                conn, data_dir, name, list(strategy.universe))
+            if views is not None and name in views:
+                strategy, symbols = views[name], list(views[name].universe)
+            else:
+                strategy = load_tradable_strategy(name)
+                symbols, _source = resolve_operational_universe(
+                    conn, data_dir, name, list(strategy.universe))
         except (KeyboardInterrupt, SystemExit):
             raise
         except _ABORT_CYCLE_EXCEPTIONS:

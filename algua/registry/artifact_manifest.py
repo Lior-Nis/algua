@@ -4,17 +4,19 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from algua.contracts.planner import PLANNER_PROTOCOL_VERSION
-from algua.registry.artifact_contract import (
-    DESCRIPTOR_VERSION,
+from algua.contracts.canonical import (
     FROZEN_WIRE,
     FROZEN_WIRE_NAME,
     FROZEN_WIRE_VERSION,
+    canonical_json,
+)
+from algua.contracts.planner import PLANNER_PROTOCOL_VERSION
+from algua.registry.artifact_contract import (
+    DESCRIPTOR_VERSION,
     MAX_MANIFEST_BYTES,
     PLANNER_BOUNDARY_VERSION,
     BundleDescriptor,
     _require_keys,
-    canonical_json,
 )
 from algua.registry.environment_contract import (
     EnvironmentDescriptor,

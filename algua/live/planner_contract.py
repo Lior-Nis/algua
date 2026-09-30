@@ -19,6 +19,36 @@ if TYPE_CHECKING:
 
 BOUNDARY_VERSION = 1
 
+#: Every `PlannerInputFailure` / `PhaseBindingFailure` code the planner returns: the closed
+#: vocabulary a frozen child may report as `planner_rejected.code` (Story 1.3c).
+#: `tests/test_failure_vocabularies.py` scans `algua/` to keep it exact.
+PLANNER_FAILURE_CODES = frozenset(
+    {
+        # Phase A input validation.
+        "unsupported_boundary_version",
+        "invalid_request_id",
+        "strategy_identity_mismatch",
+        "invalid_deployment_identity",
+        "invalid_config_hash",
+        "invalid_resolved_config",
+        "invalid_now",
+        "unsupported_timeframe",
+        "invalid_calendar",
+        "invalid_raw_bars",
+        "invalid_early_input",
+        "invalid_max_drawdown",
+        "invalid_gate_universe",
+        # Phase B binding and captured-state validation.
+        "phase_a_outcome_mismatch",
+        "invalid_phase_a_binding",
+        "phase_a_binding_mismatch",
+        "request_id_mismatch",
+        "invalid_venue_belief",
+        "missing_decision_time",
+        "invalid_captured_state",
+    }
+)
+
 
 @dataclass(frozen=True)
 class EarlyPlannerInput:

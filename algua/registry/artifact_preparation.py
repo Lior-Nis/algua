@@ -7,14 +7,13 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from algua.contracts.canonical import FROZEN_WIRE, canonical_json
 from algua.contracts.planner import PLANNER_PROTOCOL_VERSION
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.artifact_contract import (
     DESCRIPTOR_VERSION,
-    FROZEN_WIRE,
     PLANNER_BOUNDARY_VERSION,
     BundleDescriptor,
-    canonical_json,
 )
 from algua.registry.artifact_errors import (
     FrozenAssetsUnsupported,
@@ -119,10 +118,15 @@ def prepare_frozen_artifact(
     except (FrozenSourceError, DeploymentError, LookupError, ValueError) as exc:
         raise FrozenSourceDrift() from exc
     try:
-        resolved_config = strategy.config.model_dump(mode="json")
-        resolved_config = json.loads(canonical_json(resolved_config))
+        dumped = strategy.config.model_dump(mode="json")
+        resolved_config = json.loads(canonical_json(dumped))
     except (TypeError, ValueError) as exc:
         raise FrozenSourceInvalid() from exc
+    if resolved_config != dumped:
+        # Canonical JSON NFC-normalises text but config_hash hashes it raw: a decomposed string
+        # would record a config that never re-hashes to identity.config_hash (Story 1.3c §2), so
+        # it would be admitted and then refused at every tick. Refuse it before publishing.
+        raise FrozenSourceInvalid()
     try:
         source = export_source(root, source_ref)
         build_inputs = export_build_inputs(root, source_ref)

@@ -318,3 +318,73 @@ def test_preparation_rejects_model_config_before_artifact_identity_or_model_byte
         )
     assert conn.execute("SELECT COUNT(*) FROM deployment_artifacts").fetchone()[0] == 0
     assert not (tmp_path / "store").exists()
+
+
+class _Published(Exception):
+    """Raised by the first publishing step, proving preparation got past the config checks."""
+
+
+def _nfd_preparation(monkeypatch, tmp_path, params: dict):
+    """A candidate whose loaded CONFIG carries ``params``; every step from ``export_source`` on
+    (nothing of which may run for a refused config) raises ``_Published``."""
+    from algua.contracts.types import ExecutionContract
+    from algua.strategies.base import StrategyConfig
+
+    conn = connect(tmp_path / "registry.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    _candidate(repo, _frozen_manifest())
+    config = StrategyConfig(
+        name="s", universe=["AAPL"], execution=ExecutionContract(rebalance_frequency="1d"),
+        params=params, construction="top_n")
+    monkeypatch.setattr(
+        "algua.registry.artifact_preparation.assert_clean_head", lambda _root: "a" * 40)
+    monkeypatch.setattr(
+        "algua.registry.artifact_preparation.load_strategy_config", lambda _name: config)
+    monkeypatch.setattr(
+        "algua.registry.artifact_preparation.compute_artifact_hashes",
+        lambda _name: ArtifactIdentity("b" * 32, "c" * 32, "d" * 64))
+    monkeypatch.setattr(
+        "algua.registry.artifact_preparation.load_tradable_strategy",
+        lambda _name: SimpleNamespace(model_handle=None, config=config))
+
+    def published(*_args, **_kwargs):
+        raise _Published()
+
+    for step in ("export_source", "export_build_inputs", "publish_bundle",
+                 "provision_environment", "publish_environment"):
+        monkeypatch.setattr(f"algua.registry.artifact_preparation.{step}", published)
+    return conn
+
+
+@pytest.mark.parametrize("params", [
+    {"label": "café"},        # decomposed (NFD) text value
+    {"café": 1},              # decomposed (NFD) key
+    {"nested": ["x", {"k": "Å"}]},
+])
+def test_preparation_refuses_decomposed_unicode_before_publishing(
+    tmp_path, monkeypatch, params,
+) -> None:
+    """Canonical JSON NFC-normalises the recorded config but ``config_hash`` hashes the raw text,
+    so a decomposed string records a config that can never re-hash to the descriptor's identity:
+    admitted, then refused at every tick. It is refused up front as invalid source instead."""
+    from algua.registry.artifact_errors import FrozenSourceInvalid
+
+    conn = _nfd_preparation(monkeypatch, tmp_path, params)
+
+    with pytest.raises(FrozenSourceInvalid):
+        prepare_frozen_artifact(
+            SqliteStrategyRepository(conn), "s", repo_root=tmp_path,
+            store_root=tmp_path / "store")
+    assert conn.execute("SELECT COUNT(*) FROM deployment_artifacts").fetchone()[0] == 0
+    assert not (tmp_path / "store").exists()
+
+
+def test_preparation_passes_composed_non_ascii_text_to_publishing(tmp_path, monkeypatch) -> None:
+    """The refusal is exactly "NFC would change it": already-composed text proceeds."""
+    conn = _nfd_preparation(monkeypatch, tmp_path, {"label": "café", "k": "Å"})
+
+    with pytest.raises(_Published):
+        prepare_frozen_artifact(
+            SqliteStrategyRepository(conn), "s", repo_root=tmp_path,
+            store_root=tmp_path / "store")

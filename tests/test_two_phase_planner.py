@@ -438,3 +438,277 @@ def test_any_behavior_affecting_early_change_changes_the_binding():
     changed_result = phase_a(changed_strategy, changed_config)
     assert isinstance(changed_result, SnapshotRequired)
     assert changed_result.phase_a_binding != baseline.phase_a_binding
+
+
+def _unsorted_bars_with_today() -> pd.DataFrame:
+    """Raw captured bars as a provider could deliver them: newest first, a same-day (unclosed)
+    bar on `NOW`'s date, an NFD-spelled out-of-universe symbol and an integer volume column."""
+    rows = [
+        (datetime(2023, 1, 5, tzinfo=UTC), "AAA", 11.0),
+        (datetime(2023, 1, 4, tzinfo=UTC), "é", 3.0),
+        (datetime(2023, 1, 4, tzinfo=UTC), "OLD", 5.0),
+        (datetime(2023, 1, 4, tzinfo=UTC), "AAA", 10.0),
+        (datetime(2023, 1, 3, tzinfo=UTC), "OLD", 5.0),
+        (datetime(2023, 1, 3, tzinfo=UTC), "AAA", 10.0),
+        (datetime(2023, 1, 2, tzinfo=UTC), "OLD", 5.0),
+        (datetime(2023, 1, 2, tzinfo=UTC), "AAA", 10.0),
+    ]
+    frame = pd.DataFrame(
+        [
+            {"timestamp": ts, "symbol": symbol, "open": price, "high": price, "low": price,
+             "close": price, "adj_close": price, "volume": 100}
+            for ts, symbol, price in rows
+        ]
+    ).set_index("timestamp")
+    assert str(frame["volume"].dtype) == "int64"
+    return frame
+
+
+def _expected_closed_bars() -> pd.DataFrame:
+    rows = [
+        (datetime(2023, 1, 2, tzinfo=UTC), "OLD", 5.0),
+        (datetime(2023, 1, 2, tzinfo=UTC), "AAA", 10.0),
+        (datetime(2023, 1, 3, tzinfo=UTC), "OLD", 5.0),
+        (datetime(2023, 1, 3, tzinfo=UTC), "AAA", 10.0),
+        (datetime(2023, 1, 4, tzinfo=UTC), "é", 3.0),
+        (datetime(2023, 1, 4, tzinfo=UTC), "OLD", 5.0),
+        (datetime(2023, 1, 4, tzinfo=UTC), "AAA", 10.0),
+    ]
+    return pd.DataFrame(
+        [
+            {"timestamp": ts, "symbol": symbol, "open": price, "high": price, "low": price,
+             "close": price, "adj_close": price, "volume": 100.0}
+            for ts, symbol, price in rows
+        ]
+    ).set_index("timestamp")
+
+
+def test_phase_a_closed_bars_golden_selection():
+    """Pinned before the closed-bar selection was carved out of `prepare_early` (Story 1.3c T6):
+    NFC symbols, float64 values, a STABLE timestamp sort and closed sessions only."""
+    from algua.live.planner import phase_a_closed_bars
+
+    strategy = _strategy()
+    early = _early(strategy, bars=_unsorted_bars_with_today(), positions={"OLD": 2.0})
+    pd.testing.assert_frame_equal(
+        phase_a_closed_bars(strategy, early), _expected_closed_bars(), check_exact=True
+    )
+
+
+def test_closed_bar_selection_is_strategy_free_and_matches_phase_a():
+    """The supervisor side of a frozen tick recomputes the closed bars without a strategy and
+    checks the child's decision timestamp against them (contract §3)."""
+    from algua.live.planner import phase_a_closed_bars
+    from algua.live.planner_early import closed_universe_bars
+
+    strategy = _strategy()
+    raw = _unsorted_bars_with_today()
+    pristine = raw.copy()
+    early = _early(strategy, bars=raw, positions={"OLD": 2.0})
+
+    closed = closed_universe_bars(raw, NOW, ("AAA",))
+
+    pd.testing.assert_frame_equal(closed.bars, phase_a_closed_bars(strategy, early))
+    pd.testing.assert_frame_equal(
+        closed.universe_bars, _expected_closed_bars().query("symbol == 'AAA'"), check_exact=True
+    )
+    first = phase_a(strategy, early)
+    assert isinstance(first, SnapshotRequired)
+    assert closed.decision_ts == first.decision_ts == datetime(2023, 1, 4, tzinfo=UTC)
+    pd.testing.assert_frame_equal(raw, pristine)  # the captured input is never mutated
+
+
+def test_closed_bar_selection_without_a_closed_universe_session_has_no_decision_time():
+    from algua.live.planner_early import closed_universe_bars
+
+    raw = _unsorted_bars_with_today()
+    only_today = closed_universe_bars(raw.iloc[:1], NOW, ("AAA",))
+    assert only_today.bars.empty and only_today.universe_bars.empty
+    assert only_today.decision_ts is None
+    out_of_universe = closed_universe_bars(raw[raw["symbol"] == "OLD"], NOW, ("AAA",))
+    assert len(out_of_universe.bars) == 3 and out_of_universe.universe_bars.empty
+    assert out_of_universe.decision_ts is None
+
+
+def test_a_reconcile_breach_reads_the_same_whatever_the_mapping_order():
+    # A frozen child receives every mapping sorted by symbol (wire v1), the in-process planner in
+    # broker order; the breach text must not depend on which (Story 1.3c parity).
+    strategy = _strategy()
+    early = _early(strategy, positions={"OLD": 2.0})
+    first = phase_a(strategy, early)
+    assert isinstance(first, SnapshotRequired)
+
+    def breach(belief: dict[str, float]) -> str:
+        result = phase_b(
+            strategy, LatePlannerInput(early, first.phase_a_binding, _captured(belief=belief)))
+        assert isinstance(result, PlannerRiskFailure) and result.kind == "reconcile"
+        return result.detail
+
+    assert breach({"ZZZ": 1.0, "OLD": 5.0}) == breach({"OLD": 5.0, "ZZZ": 1.0})
+
+
+# --- golden master: every strategy-free verdict, pinned before it was shared (Story 1.3c) --------
+#
+# The early and late strategy-free verdicts were carved out of `phase_a`/`phase_b` so the frozen
+# supervisor computes them with the same code. These digests were pinned against the planner BEFORE
+# that carve, over each outcome's exact canonical form (types, field order, tuple order, float.hex
+# numbers, ISO timestamps), so the carve is proven behaviour-identical, text included.
+
+
+def _canon(value: object) -> object:
+    from dataclasses import is_dataclass
+    from enum import Enum
+
+    if is_dataclass(value) and not isinstance(value, type):
+        fields_ = {field.name: _canon(getattr(value, field.name)) for field in fields(value)}
+        return [type(value).__name__, fields_]
+    if isinstance(value, datetime):
+        return pd.Timestamp(value).isoformat()
+    if isinstance(value, float):
+        return value.hex()
+    if isinstance(value, (tuple, list)):
+        return [_canon(item) for item in value]
+    if isinstance(value, Enum):
+        return value.value
+    return value
+
+
+def _golden_digest(result: object) -> tuple[str, str]:
+    import hashlib
+
+    text = json.dumps(_canon(result), sort_keys=True)
+    return hashlib.sha256(text.encode()).hexdigest()[:16], text
+
+
+def _shifted(symbol: str, days: int) -> pd.DataFrame:
+    bars = _bars()
+    bars.index = pd.DatetimeIndex(
+        [ts - timedelta(days=days) if sym == symbol else ts
+         for ts, sym in zip(bars.index, bars.symbol, strict=True)],
+        name="timestamp",
+    )
+    return bars
+
+
+def _nan_close(symbol: str) -> pd.DataFrame:
+    bars = _bars()
+    bars.loc[(bars.symbol == symbol) & (bars.index == datetime(2023, 1, 4, tzinfo=UTC)),
+             "close"] = float("nan")
+    return bars
+
+
+def _golden_early(case: str) -> tuple[LoadedStrategy, EarlyPlannerInput]:
+    ready, warm = _strategy(), _strategy(warmup=3)
+    held = {"OLD": 2.0}
+    return {
+        "a_snapshot": (ready, _early(ready, positions=held)),
+        "a_snapshot_flat": (ready, _early(ready)),
+        "a_no_bars_held": (ready, _early(ready, bars=_bars().iloc[0:0], positions=held)),
+        "a_no_bars_flat": (ready, _early(ready, bars=_bars().iloc[0:0])),
+        "a_warming_flat": (warm, _early(warm, positions={"ZERO": 0.0})),
+        "a_warming_held": (warm, _early(warm, positions=held)),
+        "a_stale_held": (ready, _early(ready, bars=_shifted("OLD", 21), positions=held)),
+        "a_unvaluable_held": (ready, _early(ready, bars=_nan_close("OLD"), positions=held)),
+        "a_no_mark_held": (ready, _early(ready, positions={"ZZZ": 1.0})),
+        "a_input_failure": (ready, replace(_early(ready), request_id="xyz")),
+    }[case]
+
+
+def _golden_late(case: str) -> tuple[LoadedStrategy, LatePlannerInput]:
+    ready, warm = _strategy(), _strategy(warmup=3)
+    heavy = replace(ready, construct_fn=lambda scores, view, params: scores * 3.0)
+    pending = VenueBeliefPending()
+    captured = _captured()
+    strategy, early, late_captured, binding = {
+        "b_pending": (ready, None, replace(captured, venue_belief=pending), None),
+        "b_decision_disabled": (ready, None, captured, None),
+        "b_decision_enabled": (ready, None, _captured(belief={"OLD": 2.0}), None),
+        "b_reconcile": (ready, None, _captured(belief={"OLD": 3.0, "ZZZ": 1.0}), None),
+        "b_drawdown": (ready, None, replace(captured, persisted_peak_equity=200.0), None),
+        "b_drawdown_pending": (
+            ready, None, replace(captured, persisted_peak_equity=200.0, venue_belief=pending),
+            None,
+        ),
+        "b_non_positive": (ready, None, _captured(sizing=0.0), None),
+        "b_realized_gross": (ready, None, replace(captured, market_values={"OLD": 200.0}), None),
+        "b_invalid_captured": (ready, None, replace(captured, drawdown_equity=float("nan")), None),
+        "b_bad_belief_tag": (
+            ready, None, replace(captured, venue_belief=VenueBeliefEnabled({}, tag="x")), None,
+        ),
+        "b_binding_mismatch": (ready, None, captured, "0" * 64),
+        "b_universe_stale": (
+            ready, _early(ready, bars=_shifted("AAA", 21), positions={"OLD": 2.0}), captured, None,
+        ),
+        "b_weights_breach": (heavy, None, captured, None),
+        "b_warming_held": (warm, None, captured, None),
+        "b_warming_held_drawdown": (
+            warm, None, replace(captured, persisted_peak_equity=200.0), None,
+        ),
+    }[case]
+    early = _early(strategy, positions={"OLD": 2.0}) if early is None else early
+    first = phase_a(strategy, early)
+    assert isinstance(first, SnapshotRequired)
+    return strategy, LatePlannerInput(
+        early, first.phase_a_binding if binding is None else binding, late_captured
+    )
+
+
+#: scenario -> (outcome type, sha256[:16] of its canonical form), pinned pre-carve.
+GOLDEN = {
+    "a_snapshot": ("SnapshotRequired", "1f1d20ad591d2992"),
+    "a_snapshot_flat": ("SnapshotRequired", "631b7e2483de0510"),
+    "a_no_bars_held": ("PlannerRiskFailure", "858bb5064e82c01c"),
+    "a_no_bars_flat": ("EarlyNoDecision", "b1771f868b9c6cec"),
+    "a_warming_flat": ("EarlyNoDecision", "bb0dcb30ba14651b"),
+    "a_warming_held": ("SnapshotRequired", "978d7c24486ad0d6"),
+    "a_stale_held": ("PlannerRiskFailure", "80f82a7811e04630"),
+    "a_unvaluable_held": ("PlannerRiskFailure", "fb16aa86875ac800"),
+    "a_no_mark_held": ("PlannerRiskFailure", "474c55468f396b87"),
+    "a_input_failure": ("PlannerInputFailure", "08831f79d01bd999"),
+    "b_pending": ("VenueBeliefRequired", "ad2382c95cea9cde"),
+    "b_decision_disabled": ("Decision", "0e90f3a129edb111"),
+    "b_decision_enabled": ("Decision", "0e90f3a129edb111"),
+    "b_reconcile": ("PlannerRiskFailure", "7e86ce38ea231d97"),
+    "b_drawdown": ("PlannerRiskFailure", "bb61415480eea80c"),
+    "b_drawdown_pending": ("PlannerRiskFailure", "bb61415480eea80c"),
+    "b_non_positive": ("PlannerRiskFailure", "ad3cedd9f9c6b5e5"),
+    "b_realized_gross": ("PlannerRiskFailure", "b626e5a71ad4b101"),
+    "b_invalid_captured": ("PlannerInputFailure", "5604a0fb550ab0c9"),
+    "b_bad_belief_tag": ("PlannerInputFailure", "3d2bd1fed1f25ee3"),
+    "b_binding_mismatch": ("PhaseBindingFailure", "15d9b6631dffa427"),
+    "b_universe_stale": ("PlannerRiskFailure", "539599bdcd17dfc0"),
+    "b_weights_breach": ("PlannerRiskFailure", "3da69b86839fc1ad"),
+    "b_warming_held": ("LateNoDecision", "c7ccb16f106f6c48"),
+    "b_warming_held_drawdown": ("PlannerRiskFailure", "bb61415480eea80c"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(GOLDEN))
+def test_every_planner_outcome_matches_its_pre_carve_golden(case):
+    if case.startswith("a_"):
+        result: object = phase_a(*_golden_early(case))
+    else:
+        result = phase_b(*_golden_late(case))
+    digest, text = _golden_digest(result)
+    assert (type(result).__name__, digest) == GOLDEN[case], text
+
+
+def test_realized_gross_is_summed_in_symbol_order_whatever_the_broker_order():
+    # A frozen child receives captured values sorted by symbol while the in-process planner sees
+    # broker order; the state (and the realized-gross wall) must be the same either way (Story 1.3c
+    # parity). The sum runs in symbol order; Python's compensated sum() also keeps it exact here.
+    from algua.live.planner_late import _late_state
+
+    def gross(order: list[str]) -> float:
+        values = {"A": 10.0, "B": 20.0, "C": 30.0}
+        captured = CapturedStrategyState(
+            request_id="0123456789abcdef0123456789abcdef", sizing_equity=100.0,
+            drawdown_equity=100.0, quantities={symbol: 1.0 for symbol in order},
+            market_values={symbol: values[symbol] for symbol in order},
+            persisted_peak_equity=100.0, venue_belief=VenueBeliefDisabled())
+        return _late_state(captured, None)[0].realized_gross
+
+    import math
+
+    assert gross(["C", "B", "A"]) == gross(["A", "B", "C"]) == gross(["B", "C", "A"])
+    assert gross(["A", "B", "C"]) == math.fsum([0.1, 0.2, 0.3])

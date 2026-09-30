@@ -118,6 +118,84 @@ def test_clean_head_allows_only_recognized_generated_cache(repo: Path) -> None:
         assert_clean_head(repo)
 
 
+@pytest.mark.parametrize("name", [
+    "gone.cpython-312.pyc", "gone.cpython-311.opt-1.pyc", "_tmp_probe.cpython-312.opt-2.pyc",
+])
+def test_clean_head_accepts_orphaned_bytecode_caches(repo: Path, name: str) -> None:
+    """Python never imports a ``__pycache__`` entry whose source is gone (PEP 3147), so the caches
+    a deleted module (or a test's temporary module) leaves behind cannot shadow anything."""
+    cache = repo / "algua/__pycache__"
+    cache.mkdir()
+    (cache / name).write_bytes(b"orphaned")
+    assert assert_clean_head(repo) == _git(repo, "rev-parse", "HEAD")
+
+
+def test_clean_head_accepts_a_deleted_package_that_left_only_its_caches(repo: Path) -> None:
+    """Git removes a deleted package's tracked files but not its untracked ``__pycache__``, so the
+    directory survives holding caches alone; it can only ever import as an empty namespace."""
+    cache = repo / "algua/removed/__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "__init__.cpython-312.pyc").write_bytes(b"orphaned")
+    (cache / "helper.cpython-312.pyc").write_bytes(b"orphaned")
+    assert assert_clean_head(repo) == _git(repo, "rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize(("path", "kind"), [
+    ("algua/stray.py", "untracked Python source"),
+    ("algua/tool.pyc", "sourceless bytecode"),  # legacy sourceless bytecode IS importable
+    ("algua/legacy.pyc", "sourceless bytecode"),
+    ("algua/removed/helper.cpython-312.pyc", "sourceless bytecode"),  # not inside __pycache__
+    ("algua/__pycache__/foreign.pyc", "malformed bytecode cache"),
+    ("algua/__pycache__/gone.cpython-312.pyc.140234", "malformed bytecode cache"),
+    ("algua/__pycache__/gone.cpython.pyc", "malformed bytecode cache"),
+    ("algua/__pycache__/gone.cpython-312.opt-.pyc", "malformed bytecode cache"),
+    ("algua/__pycache__/gone-x.cpython-312.pyc", "malformed bytecode cache"),
+    ("algua/__pycache__/shadow.py", "untracked Python source"),  # importable as a namespace
+    ("algua/__pycache__/nested/gone.cpython-312.pyc", "sourceless bytecode"),
+    ("algua/notes.txt", "untracked file"),
+])
+def test_clean_head_still_refuses_everything_but_well_formed_caches(
+    repo: Path, path: str, kind: str,
+) -> None:
+    """Only a well-formed ``<name>.<cache_tag>[.opt-N].pyc`` directly inside ``__pycache__`` is
+    accepted; everything else is refused and the refusal names the offending path's class."""
+    target = repo / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"x")
+    with pytest.raises(FrozenSourceError, match="untracked") as info:
+        assert_clean_head(repo)
+    assert kind in str(info.value)
+    assert repr(path) in str(info.value)
+
+
+def test_clean_head_refuses_an_orphaned_cache_beside_a_stray_source(repo: Path) -> None:
+    cache = repo / "algua/__pycache__"
+    cache.mkdir()
+    (cache / "gone.cpython-312.pyc").write_bytes(b"orphaned")
+    (repo / "algua/gone.py").write_text("x = 1\n")
+    with pytest.raises(FrozenSourceError, match="untracked Python source 'algua/gone.py'"):
+        assert_clean_head(repo)
+
+
+def test_clean_head_names_an_untracked_symlink_and_directory(repo: Path) -> None:
+    os.symlink("__init__.py", repo / "algua/shadow.py")
+    with pytest.raises(FrozenSourceError, match="untracked symlink 'algua/shadow.py'"):
+        assert_clean_head(repo)
+    (repo / "algua/shadow.py").unlink()
+    (repo / "algua/empty").mkdir()
+    with pytest.raises(FrozenSourceError, match="untracked directory 'algua/empty'"):
+        assert_clean_head(repo)
+
+
+def test_clean_head_refuses_a_symlink_even_with_a_cache_name(repo: Path) -> None:
+    cache = repo / "algua/__pycache__"
+    cache.mkdir()
+    (repo / "elsewhere.pyc").write_bytes(b"x")
+    os.symlink(repo / "elsewhere.pyc", cache / "__init__.cpython-312.pyc")
+    with pytest.raises(FrozenSourceError, match="untracked symlink"):
+        assert_clean_head(repo)
+
+
 def test_export_checks_blob_size_before_reading(monkeypatch, tmp_path: Path) -> None:
     oid = "a" * 40
     calls: list[tuple[str, ...]] = []

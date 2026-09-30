@@ -5,12 +5,12 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from algua.contracts.canonical import _utf8_nfc
 from algua.registry.artifact_contract import (
     ArtifactFile,
     _digest,
     _inventory_payload,
     _require_digest,
-    _utf8_nfc,
     canonical_relative_path,
 )
 

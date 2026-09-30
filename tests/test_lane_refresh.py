@@ -73,6 +73,29 @@ def test_plan_resolves_gate_bound_universe_held_and_history_floor(tmp_path):
     assert "TSLA" not in plan.min_rows
 
 
+def test_plan_reads_a_frozen_tenants_view_never_its_checkout_module(monkeypatch):
+    """Story 1.3c: a frozen paper tenant is planned from its supervisor view -- the gate universe
+    resolved at preflight and the recorded contract -- and is never loaded from the checkout."""
+    from algua.contracts.types import ExecutionContract
+    from algua.registry.frozen_view import FrozenStrategyView
+    from algua.strategies.base import StrategyConfig
+
+    def _no_checkout(name):
+        raise AssertionError(f"{name} was loaded from the checkout")
+
+    monkeypatch.setattr(lane_refresh, "load_tradable_strategy", _no_checkout)
+    view = FrozenStrategyView(StrategyConfig(
+        name="frozen_s", universe=["MSFT", "AAPL"],
+        execution=ExecutionContract(rebalance_frequency="1d", warmup_bars=7),
+        construction="top_k_equal_weight", construction_params={"top_k": 1},
+        feature_lookback=20))
+    with closing(_conn()) as conn:
+        plan = build_cycle_plan(conn, names=["frozen_s"], kind=LedgerKind.PAPER,
+                                data_dir=get_settings().data_dir, views={"frozen_s": view})
+    assert plan.skipped == [] and plan.universes == {"frozen_s": ["AAPL", "MSFT"]}
+    assert plan.min_rows == {"AAPL": 21, "MSFT": 21} and plan.held == {"frozen_s": []}
+
+
 def test_plan_isolates_a_strategy_with_no_gate_row(tmp_path):
     _register()  # registered, NO passing gate row -> resolve_operational_universe raises
     with closing(_conn()) as conn:

@@ -13,6 +13,7 @@ from algua.calendar.factory import get_calendar
 from algua.contracts.types import OrderIntent
 from algua.execution.alpaca_broker import _AlpacaBroker
 from algua.live import planner as decision_planner
+from algua.live.planner import PlannerPort, TickStrategy, in_process_planner
 from algua.live.planner_contract import (
     BOUNDARY_VERSION,
     CapturedStrategyState,
@@ -32,11 +33,9 @@ from algua.live.planner_contract import (
 )
 from algua.risk.limits import (
     MAX_STALE_SESSIONS,
-    WEIGHT_TOL,
     RiskBreach,
     check_mark_freshness,
 )
-from algua.strategies.base import LoadedStrategy
 
 _RECONCILE_TOL = 1e-6
 decide = decision_planner.decide
@@ -89,7 +88,7 @@ def assert_marks_usable(
     if unvaluable:
         raise RiskBreach(
             "unvaluable_marks",
-            f"held/consumed symbols have a non-positive / non-finite mark: {unvaluable} — "
+            f"held/consumed symbols have a non-positive / non-finite mark: {unvaluable} - "
             f"refusing to value/size the book off an unvaluable feed",
         )
     cal = get_calendar()
@@ -104,7 +103,7 @@ def assert_marks_usable(
         except Exception as exc:  # MinuteOutOfBounds / unmappable ts (finding 5)
             raise RiskBreach(
                 "stale_marks",
-                f"cannot map {s} mark {ts} to an exchange session ({exc!r}) — "
+                f"cannot map {s} mark {ts} to an exchange session ({exc!r}) - "
                 f"refusing to establish risk state off an unmappable timestamp",
             ) from exc
     check_mark_freshness(stale_by_symbol, MAX_STALE_SESSIONS)
@@ -204,19 +203,22 @@ class TickHooks:
     # intent, so the paper lane can retract that phantom intent row (#311). None -> skipped.
     on_noop: Callable[[OrderIntent, str | None], None] | None = None
     planner_context: PlannerContext | None = None
+    # The planner port every planner call goes through (Story 1.3c: a frozen deployment's
+    # dispatcher). None -> in_process_planner(strategy), today's in-process facade calls.
+    planner: PlannerPort | None = None
 
 
 class TickHalted(RuntimeError):
     """The kill-switch tripped between cancel and submit; the tick aborted before sending orders."""
 
 
-def _default_planner_context(strategy: LoadedStrategy) -> PlannerContext:
+def _default_planner_context(strategy: TickStrategy) -> PlannerContext:
     """Compatibility identity for direct/legacy callers without a deployment record."""
     if hasattr(strategy, "config"):
-        from algua.strategies.base import config_hash
+        from algua.strategies.base import strategy_config_hash
 
         resolved = strategy.config.model_dump(mode="json")
-        digest = config_hash(strategy)
+        digest = strategy_config_hash(strategy.config)
     else:
         resolved = {"name": strategy.name, "universe": list(strategy.universe)}
         encoded = json.dumps(resolved, sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -246,7 +248,7 @@ def _raise_planner_failure(result: object) -> None:
 
 
 def run_tick(
-    strategy: LoadedStrategy,
+    strategy: TickStrategy,
     broker: _AlpacaBroker,
     provider: Any,
     start: datetime,
@@ -269,6 +271,7 @@ def run_tick(
     if timeframe != "1d":
         raise ValueError(f"mark-freshness wall supports only 1d bars; got {timeframe!r}")
     now = now or datetime.now(UTC)
+    planner = hooks.planner if hooks.planner is not None else in_process_planner(strategy)
 
     held_qtys = _early_positions(hooks, broker)
     held = {s for s, q in held_qtys.items() if q != 0.0}
@@ -292,7 +295,7 @@ def run_tick(
         gate_universe=tuple(strategy.universe),
         max_drawdown=max_drawdown,
     )
-    first = decision_planner.phase_a(strategy, early)
+    first = planner.phase_a(early)
     _raise_planner_failure(first)
     if isinstance(first, EarlyNoDecision):
         return _tick_result(first.state)
@@ -300,11 +303,9 @@ def run_tick(
         raise RuntimeError("planner returned an unknown Phase A result")
 
     if hooks.live_snapshot is not None:
-        snap, drawdown_equity = hooks.live_snapshot(
-            decision_planner.phase_a_closed_bars(strategy, early)
-        )
+        snap, drawdown_equity = hooks.live_snapshot(planner.closed_bars(early))
     else:
-        snap = broker.snapshot(strategy.universe)
+        snap = broker.snapshot(list(strategy.universe))
         drawdown_equity = snap.equity
     captured = CapturedStrategyState(
         request_id=early.request_id,
@@ -316,7 +317,7 @@ def run_tick(
         venue_belief=VenueBeliefPending(),
     )
     late = LatePlannerInput(early, first.phase_a_binding, captured)
-    second = decision_planner.phase_b(strategy, late)
+    second = planner.phase_b(late)
     _raise_planner_failure(second)
     if not isinstance(second, VenueBeliefRequired):
         raise RuntimeError("planner did not request venue belief after late risk validation")
@@ -325,10 +326,7 @@ def run_tick(
         if hooks.venue_belief is None
         else VenueBeliefEnabled(dict(hooks.venue_belief()))
     )
-    second = decision_planner.phase_b(
-        strategy,
-        replace(late, captured=replace(captured, venue_belief=venue_belief)),
-    )
+    second = planner.phase_b(replace(late, captured=replace(captured, venue_belief=venue_belief)))
     _raise_planner_failure(second)
     if isinstance(second, LateNoDecision):
         return _tick_result(second.state)
@@ -399,14 +397,3 @@ def run_tick(
         reconcile_ok=second.state.reconcile_ok,
         realized_gross=second.state.realized_gross,
     )
-
-
-def check_gross_exposure_realized(gross: float, max_gross: float) -> None:
-    """Gross-exposure check on REALIZED (broker-held) weights rather than targets. Raises the same
-    RiskBreach kind family so the CLI trips the kill-switch + flattens exactly as for a target
-    breach; the detail names it as realized so the audit trail is unambiguous (#27)."""
-    if gross > max_gross + WEIGHT_TOL:
-        raise RiskBreach(
-            "gross_exposure_realized",
-            f"realized gross exposure {gross:.4f} exceeds max_gross_exposure {max_gross:.4f}",
-        )

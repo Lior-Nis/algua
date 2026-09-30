@@ -67,6 +67,30 @@ testpaths = ["tests"]
 root_package = "algua"
 
 [[tool.importlinter.contracts]]
+# Story 1.3c: the frozen planner child and the wire it speaks run inside a frozen bundle with no
+# authority. They may reach planner, strategy, config and model code, but never the registry, data
+# providers, brokers/ledgers, the CLI or the operator. The supervisor-side port obeys the same wall:
+# it receives plain values (FrozenTarget) from the CLI rather than reaching into the registry.
+name = "frozen planner child, wire and port stay off authority layers"
+type = "forbidden"
+source_modules = [
+    "algua.live.frozen_child",
+    "algua.live.frozen_wire",
+    "algua.live.frozen_wire_json",
+    "algua.live.frozen_wire_arrow",
+    "algua.live.frozen_wire_result",
+    "algua.live.frozen_dispatch",
+    "algua.live.frozen_invocation",
+]
+forbidden_modules = [
+    "algua.registry",
+    "algua.data",
+    "algua.cli",
+    "algua.execution",
+    "algua.operator",
+]
+
+[[tool.importlinter.contracts]]
 name = "contracts layer is pure (imports no other algua module)"
 type = "forbidden"
 source_modules = ["algua.contracts"]

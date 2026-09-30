@@ -196,6 +196,23 @@ def provision_environment(
         if is_locked_wheel_outage(synced.stdout, synced.stderr, owners):
             raise EnvironmentUnavailable("a compatible locked wheel is temporarily unavailable")
         raise EnvironmentIncompatible("locked environment provisioning failed")
+    _remove_activation_scripts(environment)
     inventory = inventory_environment(environment)
     verify_environment(environment, key.interpreter, inventory.digest)
     return inventory
+
+
+# Shell activation scripts embed the absolute path the environment was created at (the private
+# staging directory), so keeping them would give every provisioning a new digest. A frozen
+# environment is never activated: its interpreter is launched directly.
+_ACTIVATION_SCRIPTS = frozenset({
+    "activate", "activate.bat", "activate.csh", "activate.fish", "activate.nu", "activate.ps1",
+    "Activate.ps1", "activate_this.py", "deactivate.bat", "pydoc.bat",
+})
+
+
+def _remove_activation_scripts(environment: Path) -> None:
+    for name in _ACTIVATION_SCRIPTS:
+        script = environment / "bin" / name
+        if script.is_file() and not script.is_symlink():
+            script.unlink()

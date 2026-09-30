@@ -2,6 +2,10 @@
 
 This slice records a reproducible descriptor but does not materialize an executable artifact.
 The working tree is therefore re-verified before every deployment-aware paper tick.
+
+Since Story 1.3c every new paper admission is frozen (``registry/intake.py``); no path creates a
+working-tree deployment any more. The builder and verifier remain the format and the tick-time
+check for the working-tree deployments admitted before it.
 """
 from __future__ import annotations
 
@@ -47,12 +51,6 @@ class DeploymentManifest:
     source_kind: str
     source_ref: str
     asset_digests_json: str
-
-
-@dataclass(frozen=True)
-class PreparedDeployment:
-    manifest: DeploymentManifest
-    research_gate_id: int
 
 
 def _run_git(repo_root: Path, *args: str) -> str:
@@ -235,56 +233,3 @@ def verify_working_tree_manifest(manifest: DeploymentManifest, *, repo_root: Pat
         or manifest.source_kind != "working_tree"
     ):
         raise DeploymentError("deployment manifest drift detected")
-
-
-def prepare_working_tree_deployment(
-    conn,
-    name: str,
-    *,
-    repo_root: Path | None = None,
-) -> PreparedDeployment:
-    """Resolve the exact qualifying gate and capture the current executable read set."""
-    from algua.registry.approvals import compute_artifact_hashes
-    from algua.strategies.loader import load_tradable_strategy
-
-    row = conn.execute("SELECT id FROM strategies WHERE name=?", (name,)).fetchone()
-    if row is None:
-        raise DeploymentError(f"unknown strategy {name!r}")
-    strategy_id = int(row["id"])
-    identity = compute_artifact_hashes(name)
-    gate = conn.execute(
-        "SELECT id, actor, consumed, universe_name FROM gate_evaluations"
-        " WHERE strategy_id=? AND passed=1 AND code_hash=? AND config_hash=?"
-        " AND dependency_hash=? ORDER BY id DESC LIMIT 1",
-        (strategy_id, identity.code_hash, identity.config_hash, identity.dependency_hash),
-    ).fetchone()
-    if gate is None:
-        raise DeploymentError(
-            "candidate has no qualifying research gate for the current artifact identity")
-    eligible = (
-        (gate["actor"] == "agent" and int(gate["consumed"]) == 1)
-        or (gate["actor"] == "human" and int(gate["consumed"]) == 0)
-    )
-    if not eligible:
-        raise DeploymentError("qualifying research gate has invalid actor/consumption state")
-    if conn.execute(
-        "SELECT 1 FROM strategy_deployments WHERE research_gate_id=?", (int(gate["id"]),)
-    ).fetchone() is not None:
-        raise DeploymentError("qualifying research gate already anchored a committed deployment")
-
-    strategy = load_tradable_strategy(name)
-    asset_paths: tuple[Path, ...] = ()
-    if strategy.model_handle is not None:
-        path = strategy.model_handle.version.artifact_path
-        if path is None:
-            raise DeploymentError("model-backed strategy has no resolved artifact path")
-        asset_paths = (Path(path),)
-    root = repo_root or Path(__file__).resolve().parents[2]
-    manifest = build_working_tree_manifest(
-        identity=identity,
-        resolved_config=strategy.config.model_dump(mode="json"),
-        universe_name=gate["universe_name"],
-        repo_root=root,
-        asset_paths=asset_paths,
-    )
-    return PreparedDeployment(manifest=manifest, research_gate_id=int(gate["id"]))

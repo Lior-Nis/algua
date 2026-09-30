@@ -31,6 +31,7 @@
 # publication, environment verification, descriptor recording, offline recovery and bounded CLI
 # error policy. These files define what may later become executable capital-bearing content.
 /algua/registry/artifact_contract.py     @Lior-Nis
+/algua/contracts/canonical.py            @Lior-Nis   # the canonical JSON bytes every frozen digest is taken over (was artifact_contract.py, Story 1.3c)
 /algua/registry/environment_contract.py  @Lior-Nis
 /algua/registry/artifact_manifest.py     @Lior-Nis
 /algua/registry/frozen_manifest_contract.py @Lior-Nis
@@ -48,6 +49,9 @@
 /algua/registry/artifact_recording.py    @Lior-Nis
 /algua/registry/artifact_verification.py @Lior-Nis
 /algua/registry/artifact_errors.py       @Lior-Nis
+/algua/registry/frozen_runtime.py        @Lior-Nis   # Story 1.3c: paper tenant routing + the offline content-verification cache
+/algua/registry/frozen_view.py           @Lior-Nis   # Story 1.3c: strict recorded-config decoder (the #344 rails, dump-back, config_hash bind)
+/algua/registry/frozen_tenant_errors.py  @Lior-Nis   # Story 1.3c: stable frozen tenant refusal codes
 /algua/cli/deployment_cmd.py             @Lior-Nis
 /algua/cli/errors.py                     @Lior-Nis
 /algua/primitives/module_refresh.py      @Lior-Nis
@@ -56,6 +60,15 @@
 /algua/primitives/no_replace.py          @Lior-Nis
 /algua/primitives/bounded_walk.py        @Lior-Nis
 /algua/primitives/bounded_subprocess.py  @Lior-Nis
+/algua/primitives/contained_process.py   @Lior-Nis   # Story 1.3c: frozen child containment (group kill, reap, bounded output)
+/algua/live/frozen_wire.py               @Lior-Nis   # Story 1.3c: frozen-planner wire v1 (protected limits, entry, exit codes)
+/algua/live/frozen_wire_json.py          @Lior-Nis   # Story 1.3c: strict wire JSON codec
+/algua/live/frozen_wire_arrow.py         @Lior-Nis   # Story 1.3c: Arrow IPC bars codec
+/algua/live/frozen_wire_result.py        @Lior-Nis   # Story 1.3c: child result codec + vocabularies
+/algua/live/frozen_child.py              @Lior-Nis   # Story 1.3c: child entry (bundle-only algua, identity checks)
+/algua/live/frozen_dispatch.py           @Lior-Nis   # Story 1.3c: supervisor port, result cross-checks, tenant failure
+/algua/live/frozen_invocation.py         @Lior-Nis   # Story 1.3c: sealed invocation dir, launch, exit mapping
+/algua/cli/paper_venue.py                @Lior-Nis   # carved from paper_cmd.py (Story 1.3c): scoped cancel, stranded recovery, venue ingest
 
 # --- Modules carved OUT of the files above by the simplification program (stages 6a-6c).
 # The code did not become less integrity-critical by moving; without these lines the carve
