@@ -11,15 +11,20 @@ a new CLI invocation resolves the same stored artifact, and ``paper run`` refuse
 """
 from __future__ import annotations
 
+import errno
 import json
+import os
+import subprocess
 import sys
 from datetime import date, timedelta
+from pathlib import Path
 
 import pytest
 
 from algua.cli import paper_cmd
 from algua.cli.main import app
 from algua.live.frozen_dispatch import FrozenPlanner
+from algua.live.frozen_wire import BOOTSTRAP
 from algua.registry.frozen_view import FrozenStrategyView
 from algua.strategies.base import LoadedStrategy
 from tests._frozen_paper_world import (
@@ -184,6 +189,52 @@ def test_frozen_results_are_independent_of_the_mutable_checkout_across_restarts(
     assert world.prepared == [TENANT]
     assert len(world.launches) == 6 and set(world.launches) == {world.bundle_root}
     assert CHECKOUT_DOTTED not in sys.modules
+
+
+def test_a_frozen_tick_makes_no_git_or_uv_call_and_needs_no_git_checkout(
+    world, monkeypatch, tmp_path
+):
+    """AC5/AC10: a frozen tenant resolves, verifies and plans with no ``uv`` or Git call and no Git
+    checkout. Every process started through ``subprocess`` is observed where it executes, beneath
+    every helper: across a frozen ``trade-tick`` and a ``run-all`` the only ones are the frozen
+    children (the verified interpreter with the exact §5 bootstrap argv), and any other launch fails
+    as if its program were not installed. Git is out of reach as well: nothing on ``PATH``,
+    ``GIT_DIR`` naming no repository and the working directory outside any. The tenant still
+    ticks in both commands."""
+    interpreter = str(world.data_dir.resolve() / world.environment.locator / "bin" / "python")
+    launched: list[list[str]] = []
+    execute_child = subprocess.Popen._execute_child
+
+    def execute(self, args, executable, *rest):
+        argv = ([os.fsdecode(args)] if isinstance(args, (str, bytes, os.PathLike))
+                else [os.fsdecode(arg) for arg in args])
+        launched.append(argv)
+        if argv[0] != interpreter:
+            raise FileNotFoundError(errno.ENOENT, "not installed", argv[0])
+        return execute_child(self, args, executable, *rest)
+
+    empty_path, outside = tmp_path / "empty-path", tmp_path / "outside-any-repository"
+    empty_path.mkdir()
+    outside.mkdir()
+    monkeypatch.setattr(subprocess.Popen, "_execute_child", execute)
+    monkeypatch.setenv("PATH", str(empty_path))
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "no-repository"))
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    monkeypatch.chdir(outside)
+
+    code, tick = world.trade_tick()
+    cycle_code, cycle = world.run_all()
+
+    assert (code, cycle_code) == (0, 0), (tick, cycle)
+    assert tick["ok"] is True and tick["target_weights"]
+    frozen = next(entry for entry in cycle["strategies"] if entry["strategy"] == TENANT)
+    assert frozen["ok"] is True and frozen["target_weights"]
+    assert len(world.ticks(TENANT)) == 2
+    invocations = (world.data_dir / "frozen" / "invocations").resolve()
+    assert len(launched) == 4  # Phase A and Phase B, in each command
+    for argv in launched:
+        assert argv[:-1] == [interpreter, "-I", "-B", "-c", BOOTSTRAP, str(world.bundle_root)]
+        assert Path(argv[-1]).parent.resolve() == invocations
 
 
 def test_run_all_never_imports_the_frozen_tenants_checkout_module(world):

@@ -13,7 +13,9 @@ from algua.cli.errors import error_code, is_retryable, json_errors
 from algua.cli.main import main
 from algua.contracts.lifecycle import TransitionError
 from algua.data.store import SnapshotNotFound
+from algua.live.frozen_dispatch import FrozenTenantFailure
 from algua.live.live_loop import TickHalted
+from algua.registry.frozen_tenant_errors import FrozenContentUnavailable, FrozenLiveUnsupported
 from algua.risk.limits import RiskBreach
 
 # --- error_code: the type-keyed registry resolves the right code ------------------------------
@@ -119,6 +121,42 @@ def test_json_errors_stamps_specific_code(capsys):
         "code": "wrong_stage",
         "retryable": False,
     }
+
+
+@pytest.mark.parametrize("exc, code, message", [
+    # a registry-side refusal: its message names no deployment
+    (FrozenContentUnavailable(deployment_id=4), "frozen_content_unavailable",
+     "frozen content is missing or failed offline verification"),
+    # a dispatcher failure
+    (FrozenTenantFailure("frozen_timeout", 4, "killed"), "frozen_timeout",
+     "frozen_timeout (deployment 4): killed"),
+], ids=["registry-refusal", "dispatcher-failure"])
+def test_json_errors_binds_a_frozen_tenant_fault_to_its_deployment(capsys, exc, code, message):
+    """Story 1.3c AC8: every frozen tenant refusal's envelope names its deployment in one stable
+    field, whatever its message says; the standard keys are unchanged."""
+    @json_errors
+    def cmd():
+        raise exc
+
+    with pytest.raises(typer.Exit):
+        cmd()
+    assert json.loads(capsys.readouterr().out) == {
+        "ok": False, "error": message, "code": code, "retryable": False, "deployment_id": 4}
+
+
+def test_main_catch_all_binds_a_frozen_tenant_fault_to_its_deployment(monkeypatch, capsys):
+    """The last-resort net renders the same envelope as ``json_errors``."""
+    class Undecorated:
+        def main(self, **_kwargs):
+            raise FrozenLiveUnsupported(7)
+
+    monkeypatch.setattr("algua.cli.main.get_command", lambda _app: Undecorated())
+    with pytest.raises(SystemExit) as ei:
+        main([])
+    assert ei.value.code == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "ok": False, "error": "a frozen deployment cannot run on a working-tree or live path",
+        "code": "frozen_live_unsupported", "retryable": False, "deployment_id": 7}
 
 
 def test_json_errors_reraises_typer_exit_unchanged(capsys):

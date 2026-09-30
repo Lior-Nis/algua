@@ -56,6 +56,20 @@ non-retryable; `paper trade-tick` exits 1 with that `code`, and `paper run-all` 
 as `{"ok": false, "strategy": ..., "kind": "setup_error", "error": <code>, "deployment_id": ...}`
 and continues its siblings.
 
+**One additive field for frozen-tenant faults.** When the failure is a frozen-tenant fault (the
+exception types in the first four rows below), the standard envelope carries one more key,
+`deployment_id` — the integer id of the deployment the fault is bound to — on both `@json_errors`
+and the `main()` catch-all (`algua/cli/errors.py::error_envelope`):
+
+```json
+{ "ok": false, "error": "<message>", "code": "frozen_content_unavailable", "retryable": false, "deployment_id": 12 }
+```
+
+It is the one stable place to read the binding: a dispatcher failure's message also names its
+deployment, but a registry-side refusal's fixed message does not. The four standard keys are
+unchanged, and every other envelope keeps exactly those four. The value is `null` only for a fault
+raised before it was bound to a deployment; no `trade-tick` or `run-all` path emits one.
+
 | exception type | `code` |
 |---|---|
 | `FrozenTenantFailure` | its own `code`: `frozen_content_unavailable`, `frozen_content_unsupported`, `frozen_request_too_large`, `frozen_launch_failed`, `frozen_timeout`, `frozen_exit_abnormal`, `frozen_output_exceeded`, `frozen_result_invalid`, `frozen_planner_rejected` or `frozen_live_unsupported` |

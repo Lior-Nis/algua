@@ -103,16 +103,40 @@ def error_code(exc: BaseException) -> str:
     ``KeyError``, a pandas error, ``AttributeError``, ...) resolves to ``"internal"``. Total
     function: every exception is coded.
     """
+    frozen = _frozen_tenant_fault(exc)
+    if frozen is not None:
+        return frozen[0]
+    for typ, code in _registry():
+        if isinstance(exc, typ):
+            return code
+    return "internal"
+
+
+def _frozen_tenant_fault(exc: BaseException) -> tuple[str, int | None] | None:
+    """A frozen tenant fault's own ``(code, deployment_id)`` (Story 1.3c §8), else ``None``."""
     # Imported lazily, like _registry's types: only ever needed while rendering an error.
     from algua.live.frozen_dispatch import FrozenTenantFailure
     from algua.registry.frozen_tenant_errors import FrozenTenantError
 
     if isinstance(exc, (FrozenTenantFailure, FrozenTenantError)):
-        return exc.code
-    for typ, code in _registry():
-        if isinstance(exc, typ):
-            return code
-    return "internal"
+        return exc.code, exc.deployment_id
+    return None
+
+
+def error_envelope(exc: BaseException) -> dict[str, object]:
+    """The standard failure envelope ``{"ok": false, "error", "code", "retryable"}`` for ``exc``.
+
+    A frozen tenant fault also carries ``deployment_id``, the deployment it is bound to, so a
+    registry-side refusal (whose fixed message names no deployment) and a dispatcher failure are
+    bound the same way (Story 1.3c AC8). Every other envelope keeps exactly the four keys.
+    """
+    code = error_code(exc)
+    envelope: dict[str, object] = {
+        "ok": False, "error": str(exc), "code": code, "retryable": is_retryable(code)}
+    frozen = _frozen_tenant_fault(exc)
+    if frozen is not None:
+        envelope["deployment_id"] = frozen[1]
+    return envelope
 
 
 # The set of codes an operator (human or agent) MAY safely retry with backoff — the failure is a
@@ -142,7 +166,8 @@ def json_errors(fn: Callable[..., None]) -> Callable[..., None]:
 
     The ``error`` field carries ``str(exc)`` (the message, NEVER a traceback); ``code`` comes from
     :func:`error_code`; ``retryable`` is derived from that code via :func:`is_retryable` so an agent
-    can branch retry-with-backoff vs abort. See ``docs/contracts/cli-error-envelope.md``.
+    can branch retry-with-backoff vs abort; a frozen tenant fault adds its ``deployment_id``
+    (:func:`error_envelope`). See ``docs/contracts/cli-error-envelope.md``.
     """
 
     @functools.wraps(fn)
@@ -152,8 +177,7 @@ def json_errors(fn: Callable[..., None]) -> Callable[..., None]:
         except (typer.Exit, typer.Abort):
             raise
         except Exception as exc:
-            code = error_code(exc)
-            emit({"ok": False, "error": str(exc), "code": code, "retryable": is_retryable(code)})
+            emit(error_envelope(exc))
             raise typer.Exit(code=1) from exc
 
     return wrapper

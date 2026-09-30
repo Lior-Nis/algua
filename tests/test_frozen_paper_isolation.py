@@ -2,22 +2,26 @@
 
 Each failure class — content that is missing or corrupt, unsupported content, an oversized request,
 a failed launch, a timeout (the REAL child killed at a tiny timeout), an abnormal exit, oversized
-output and an invalid result — gives zero cancel/submit/offset/ledger/tick effects for the frozen
-tenant, a nonzero ``paper trade-tick`` carrying the stable code, and a ``run-all`` that records
-``{"ok": false, "strategy", "kind": "setup_error", "error": code, "deployment_id"}``, audits it and
-goes on to tick the sibling (the frozen tenant ticks FIRST, so the sibling ticking proves the cycle
-continued). Systemic faults (SQLite, a global halt, an interrupt) are never demoted to a tenant
-failure. The CLI error registry and ``StrategySetupError`` read the frozen exceptions' own codes.
+output, an invalid result and a planner refusal (the REAL child's, and the supervisor's own
+strategy-free check) — gives zero cancel/submit/offset/ledger/tick effects for the frozen tenant, a
+nonzero ``paper trade-tick`` carrying the stable code and the tenant's ``deployment_id``, and a
+``run-all`` that records ``{"ok": false, "strategy", "kind": "setup_error", "error": code,
+"deployment_id"}``, audits it and goes on to tick the sibling (the frozen tenant ticks FIRST, so the
+sibling ticking proves the cycle continued). Systemic faults (SQLite, a global halt, an interrupt)
+are never demoted to a tenant failure. The CLI error registry and ``StrategySetupError`` read the
+frozen exceptions' own codes.
 """
 from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from algua.cli import paper_cmd
 from algua.cli._common import StrategySetupError
 from algua.cli.errors import error_code, is_retryable
 from algua.cli.main import app
@@ -77,8 +81,26 @@ def _ended(returncode=0, *, stdout=b"", stdout_exceeded=False) -> ContainedResul
     return ContainedResult(returncode, None, False, stdout, stdout_exceeded, b"boom", False)
 
 
-# code -> (child launches expected, setup); ``setup(world, monkeypatch)`` injects the fault after
-# admission. Launches are counted at the dispatcher's launch seam (the spy or the fake answering).
+def _config_hash(value: str):
+    """The frozen tenant's planner requests carry ``value`` as its config hash (only the frozen
+    tenant's: the sibling's context is left alone)."""
+    def setup(world: World, monkeypatch) -> None:
+        frozen_id = world.deployment().id
+        real = paper_cmd.planner_context_for_deployment
+
+        def context(deployment, calendar_code):
+            built = real(deployment, calendar_code)
+            if deployment is None or deployment.id != frozen_id:
+                return built
+            return replace(built, config_hash=value)
+
+        monkeypatch.setattr(paper_cmd, "planner_context_for_deployment", context)
+    return setup
+
+
+# case -> (child launches expected, setup); a case is its code, or ``code/variant`` when one code
+# has two causes. ``setup(world, monkeypatch)`` injects the fault after admission. Launches are
+# counted at the dispatcher's launch seam (the spy or the fake answering).
 FAILURES = {
     "frozen_content_unavailable": (0, _corrupt_bundle),
     "frozen_content_unsupported": (0, None),  # the world is built on a wire-v2 bundle
@@ -96,13 +118,19 @@ FAILURES = {
     "frozen_result_invalid": (1, lambda world, mp: mp.setattr(
         "algua.live.frozen_dispatch.launch_child",
         _answer(_ended(stdout=b'{"not": "a result"}'))(world))),
+    # A well-formed config hash that is not the bundle strategy's passes the supervisor's
+    # strategy-free checks; the REAL child re-hashes its CONFIG and refuses the request
+    # (``strategy_identity_mismatch``), answering ``planner_rejected``.
+    "frozen_planner_rejected": (1, _config_hash("0" * 32)),
+    # A malformed one is refused by the supervisor's own run of those checks (§7), before any child.
+    "frozen_planner_rejected/supervisor": (0, _config_hash("not-a-config-hash")),
 }
 
 
 @pytest.fixture(params=sorted(FAILURES))
 def failing(request, monkeypatch, tmp_path):
-    code = request.param
-    launches, setup = FAILURES[code]
+    launches, setup = FAILURES[request.param]
+    code = request.param.partition("/")[0]
     try:
         world = build_world(monkeypatch, tmp_path,
                             protocol=WIRE_V2 if code == "frozen_content_unsupported" else STAMP)
@@ -130,6 +158,7 @@ def test_trade_tick_exits_nonzero_with_the_code_and_no_effect(failing):
 
     assert exit_code == 1, payload
     assert payload["ok"] is False and payload["code"] == code and payload["retryable"] is False
+    assert payload["deployment_id"] == world.deployment().id  # deployment-bound (AC8)
     assert len(world.launches) == launches
     assert world.broker.effects == []  # not even the account-wide cancel
     _assert_no_effects(world)
