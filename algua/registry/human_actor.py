@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from algua.contracts.lifecycle import Actor
 from algua.registry.challenges import ChallengeSpec, build_payload, consume, find_pending, issue
 from algua.registry.live_gate import ALLOWED_SIGNERS_PATH, verify_signature
+
+if TYPE_CHECKING:
+    from algua.registry.repository import ArtifactIdentity
 
 # Human-actor authentication (#329). A bare `--actor human` CLI string is forgeable: any agent
 # driving the identical CLI can pass it to unlock every human-only relaxation below the live wall
@@ -183,18 +188,23 @@ def resolve_effective_actor(
 def authenticate_actor(
     conn: sqlite3.Connection, *, command: str, name: str, rec: object, stage_to: str,
     declared_actor: Actor, actor_signature: str | None, run_context: str,
+    identity: Callable[[], ArtifactIdentity],
 ) -> Actor:
     """Turn a declared ``--actor`` + optional ``--actor-signature`` into the EFFECTIVE actor the
     downstream human-only guards may trust (#329). The single shared chokepoint for the gated
     promote paths (``research promote``'s ``promote_task`` and ``paper promote``'s command body),
     so the authentication is wired identically in one place.
 
+    ``identity`` is LAZY and only a declared human resolves it (Story 1.3d §5): the caller supplies
+    the artifact identity the challenge binds — the checkout's, recomputed at call time, or a frozen
+    deployment's verified descriptor hashes — and an agent is never hashed early.
+
     - declared agent/system -> returned unchanged (agents never sign).
     - declared human, NO signature -> a fresh single-use challenge is issued+persisted and PRINTED
       as JSON (mirrors the go-live challenge print), then the command EXITS 0 having run nothing.
     - declared human + signature -> the SSH signature is verified (namespace algua-human-actor) over
-      the REBUILT payload bound to this command + strategy + RECOMPUTED artifact identity + the full
-      ``run_context``; on success the effective actor is HUMAN, else a ValueError is raised
+      the REBUILT payload bound to this command + strategy + the resolved artifact identity + the
+      full ``run_context``; on success the effective actor is HUMAN, else a ValueError is raised
       (fail closed — a forged/replayed/expired/cross-run signature is refused).
 
     ``rec`` is the strategy record (used for ``rec.id`` + ``rec.stage``). Lives here (not
@@ -217,18 +227,17 @@ def authenticate_actor(
     import typer
 
     from algua.cli.app import emit
-    from algua.registry.approvals import compute_artifact_hashes
 
     if declared_actor is not Actor.HUMAN:
         return declared_actor
-    identity = compute_artifact_hashes(name)
+    bound = identity()
     signature = Path(actor_signature).read_bytes() if actor_signature else None
     try:
         return resolve_effective_actor(
             conn, command=command, strategy=name, strategy_id=rec.id,  # type: ignore[attr-defined]
             stage_from=rec.stage.value, stage_to=stage_to,  # type: ignore[attr-defined]
-            code_hash=identity.code_hash, config_hash=identity.config_hash,
-            dependency_hash=identity.dependency_hash, declared_actor=declared_actor,
+            code_hash=bound.code_hash, config_hash=bound.config_hash,
+            dependency_hash=bound.dependency_hash, declared_actor=declared_actor,
             run_context=run_context, signature=signature)
     except HumanActorChallengeRequired as exc:
         emit({"ok": True, "action": "human_actor_challenge", "strategy": name, "command": command,

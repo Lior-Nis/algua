@@ -196,25 +196,26 @@ def _validate_forward_gate(
 
 
 def refuse_frozen_deployment(repo: StrategyRepository, strategy_id: int, target: Stage) -> None:
-    """Story 1.3c §2/§9: the forward and go-live edges never judge a FROZEN deployment by the
-    checkout. Their identity hash imports the checkout strategy module and pins its code_hash,
-    which never stands in for the bundle the tenant runs, so a frozen deployment is refused first,
-    from the deployment ledger alone: ``-> live`` with ``frozen_live_unsupported``, the forward
-    edge with ``frozen_qualification_pending`` (as ``paper promote``). Working-tree and legacy
-    strategies pass untouched. A repository without a ledger connection fails closed."""
-    from algua.registry.forward_promotion import refuse_frozen_promotion
+    """Story 1.3c §2/§9, 1.3d §5: the raw forward and go-live edges never judge a FROZEN
+    deployment by the checkout. Their identity hash imports the checkout strategy module and pins
+    its code_hash, which never stands in for the bundle the tenant runs, so a frozen deployment is
+    refused first, from the deployment ledger alone: ``-> live`` with ``frozen_live_unsupported``
+    (until Epic 2), the forward edge as ``wrong_stage`` (``paper promote`` qualifies a frozen
+    deployment from its verified descriptor). Working-tree and legacy strategies pass untouched.
+    A repository without a ledger connection fails closed."""
     from algua.registry.frozen_tenant_errors import FrozenLiveUnsupported
     from algua.registry.store import SqliteStrategyRepository
 
     conn = getattr(repo, "connection", None)  # like the certificate verifier: sqlite store only
     if conn is None:
         raise TransitionError("the frozen-deployment check needs a sqlite-backed repository")
-    if target is not Stage.LIVE:
-        refuse_frozen_promotion(conn, strategy_id)
-        return
     deployment = SqliteStrategyRepository(conn).active_deployment(strategy_id)
-    if deployment is not None and deployment.source_kind == "frozen":
+    if deployment is None or deployment.source_kind != "frozen":
+        return
+    if target is Stage.LIVE:
         raise FrozenLiveUnsupported(deployment.id)
+    raise TransitionError(
+        f"frozen deployment {deployment.id}: reach forward_tested only through paper promote")
 
 
 def _compute_hashes(name: str) -> ArtifactIdentity:

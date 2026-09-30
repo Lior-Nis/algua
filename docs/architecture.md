@@ -26,12 +26,15 @@ evaluations carry its append-only deployment ID, and certificates cannot cross e
 paper tenant's planner runs each phase in a fresh child process launched from its verified bundle
 and environment (`algua/live/frozen_dispatch.py`); the current supervisor re-derives every
 strategy-free risk wall and owns all effects. Working-tree deployments still import the mutable
-working tree and refuse a deployment-aware tick when that tree or environment drifts. Frozen
-promotion stays refused (`frozen_qualification_pending`) until Story 1.3d binds invocation
-evidence; the live lane refuses frozen deployments. The approved Story 1.3 parent is decomposed into
-four reviewable increments: complete the full two-phase behavior boundary in-process (done),
-materialize and verify immutable content/environments (done), execute frozen planners in paper
-(done), then bind operational evidence and qualification. Existing migration-time tenants remain an
+working tree and refuse a deployment-aware tick when that tree or environment drifts. Every frozen
+planner attempt is recorded append-only and each frozen tick links its final invocation; forward
+evidence for a frozen deployment counts only linked ticks, and `paper promote` qualifies it from its
+recorded descriptor and freshly verified content, never the checkout (the raw `registry transition`
+edge refuses it). The live lane and go-live refuse frozen deployments (`frozen_live_unsupported`).
+The approved Story 1.3 parent is decomposed into four reviewable increments: complete the full
+two-phase behavior boundary in-process (done), materialize and verify immutable
+content/environments (done), execute frozen planners in paper (done), then bind operational
+evidence and qualification (Story 1.3d). Existing migration-time tenants remain an
 explicit unmigrated cohort. The supervisor retains broker access, reconciliation and account-wide
 risk controls. Development and deployed artifacts belong to one product/repository; no production
 fork is required.

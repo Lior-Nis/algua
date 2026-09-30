@@ -37,7 +37,7 @@ from algua.registry.gating import load_gated_strategy, require_paper_gates
 from algua.registry.repository import ArtifactIdentity, StrategyRecord
 from algua.registry.store import DeploymentRecord, SqliteStrategyRepository
 from algua.risk.global_halt import GlobalHaltActive
-from algua.strategies.base import LoadedStrategy
+from algua.strategies.base import LoadedStrategy, StrategyConfig
 
 Loader = Callable[[sqlite3.Connection, str, str], tuple[Any, Any]]
 _Content = BundleDescriptor | EnvironmentDescriptor
@@ -198,6 +198,25 @@ def resolve_paper_tenant(
         conn, name, command=command, verifier=verifier, data_dir=data_dir, logger=logger)
 
 
+def recorded_descriptor(
+    deployment: DeploymentRecord, name: str,
+) -> tuple[FrozenManifest, StrategyConfig]:
+    """A frozen deployment's RECORDED descriptor (its ``frozen_wire`` stamp is the supported
+    protocol) and its config, strictly decoded for ``name``: ``frozen_content_unavailable`` for a
+    corrupt descriptor, ``frozen_content_unsupported`` for a config this supervisor cannot run.
+    Shared by tenant resolution and forward promotion; touches no content and no checkout."""
+    try:
+        manifest = parse_frozen_deployment_manifest(deployment.manifest())
+    except DeploymentError as exc:
+        raise FrozenContentUnavailable(
+            "recorded descriptor", deployment_id=deployment.id) from exc
+    try:
+        return manifest, decode_tenant_config(manifest, name)
+    except FrozenTenantUnsupported as exc:
+        exc.deployment_id = deployment.id
+        raise
+
+
 def _resolve_frozen(
     conn: sqlite3.Connection, name: str, *, command: str, verifier: FrozenContentVerifier,
     data_dir: Path, logger: Any,
@@ -208,16 +227,7 @@ def _resolve_frozen(
         # The routing probe and this read are separate statements: an epoch change in between
         # isolates this tenant for the cycle rather than resolving a half-read deployment.
         raise DeploymentError(f"{name} active deployment changed during tenant resolution")
-    try:
-        manifest = parse_frozen_deployment_manifest(deployment.manifest())
-    except DeploymentError as exc:
-        raise FrozenContentUnavailable(
-            "recorded descriptor", deployment_id=deployment.id) from exc
-    try:
-        config = decode_tenant_config(manifest, name)
-    except FrozenTenantUnsupported as exc:
-        exc.deployment_id = deployment.id
-        raise
+    manifest, config = recorded_descriptor(deployment, name)
     universe = paper_runtime.paper_gate_universe(
         conn, name, list(config.universe), data_dir=data_dir,
         research_gate_id=deployment.research_gate_id, logger=logger)

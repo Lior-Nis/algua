@@ -31,6 +31,7 @@ from algua.evaluation.inputs import (
 from algua.knowledge.experience import write_experience_note
 from algua.observability.log import get_logger
 from algua.primitives.timeparse import now_iso
+from algua.registry import approvals
 from algua.registry.db import registry_conn
 from algua.registry.human_actor import authenticate_actor, canonical_run_context
 from algua.registry.kb_sync import sync_kb_doc
@@ -187,15 +188,14 @@ def promote_task(  # noqa: PLR0913, PLR0915
         repo = SqliteStrategyRepository(conn)
         rec0 = repo.get(name)  # StrategyNotFound -> JSON error before any work
         # AUTHENTICATE the human actor (#329) BEFORE any relaxation is honored or the holdout is
-        # touched. A bare `--actor human` is forgeable, so asserting a human actor here requires an
-        # SSH signature (namespace algua-human-actor) over a fresh single-use challenge that binds
-        # this command + strategy + RECOMPUTED artifact identity + the FULL canonical run_context
-        # (every gate-relevant input, incl. the exact relaxation set). No signature => a challenge
-        # is issued+printed and NOTHING runs. A declared agent/system is returned unchanged (the
-        # downstream guards refuse its relaxations exactly as before).
+        # touched: a bare `--actor human` is forgeable, so it needs an SSH signature over a fresh
+        # single-use challenge binding this command + strategy + the RECOMPUTED checkout identity +
+        # the FULL canonical run_context (every gate input, incl. the relaxation set); unsigned, a
+        # challenge is printed and NOTHING runs. An agent is returned unchanged, never hashed.
         actor_enum = authenticate_actor(
             conn, command="research promote", name=name, rec=rec0, stage_to=Stage.CANDIDATE.value,
             declared_actor=actor_enum, actor_signature=actor_signature,
+            identity=lambda: approvals.compute_artifact_hashes(name),
             run_context=canonical_run_context({
                 "start": start, "end": end, "demo": demo, "snapshot": snapshot,
                 "fundamentals_snapshot": fundamentals_snapshot, "news_snapshot": news_snapshot,

@@ -84,7 +84,6 @@ raised before it was bound to a deployment; no `trade-tick` or `run-all` path em
 | `FrozenEnvironmentIncompatible` | `frozen_environment_incompatible` |
 | `FrozenEnvironmentCorrupt` | `frozen_environment_corrupt` |
 | `FrozenDescriptorConflict` | `frozen_descriptor_conflict` |
-| `FrozenQualificationPending` | `frozen_qualification_pending` |
 | `ArtifactNotFound` | `artifact_not_found` |
 | `AllocationError` | `allocation_error` |
 | `TransitionError` | `wrong_stage` |

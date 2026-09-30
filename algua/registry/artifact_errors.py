@@ -40,14 +40,6 @@ class FrozenEnvironmentCorrupt(FrozenArtifactError):
     default_message = "frozen environment is missing, corrupt, or unsafe"
 
 
-class FrozenQualificationPending(FrozenArtifactError):
-    """Story 1.3c §9: frozen evidence cannot be forward-qualified until Story 1.3d binds it."""
-
-    default_message = (
-        "frozen deployment qualification is pending: paper promote refuses a frozen deployment "
-        "until its forward evidence can be bound")
-
-
 class FrozenDescriptorConflict(DeploymentError):
     def __init__(
         self, message: str = "frozen descriptor conflicts with immutable ledger bytes",

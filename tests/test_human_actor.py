@@ -311,3 +311,64 @@ def test_resolve_human_valid_signature_returns_human(tmp_path):
         conn, "research promote", "s", 1, "backtested", "candidate", ch, cfg, dep, Actor.HUMAN, rc,
         sig, anchor, now=now)
     assert result is Actor.HUMAN
+
+
+# ---- authenticate_actor: identity is a LAZY callable only a human resolves (Story 1.3d §5) -------
+
+def _authenticate(conn, declared, identity):
+    from algua.registry.store import SqliteStrategyRepository
+
+    return human_actor.authenticate_actor(
+        conn, command="paper promote", name="s", rec=SqliteStrategyRepository(conn).get("s"),
+        stage_to="forward_tested", declared_actor=declared, actor_signature=None,
+        run_context=canonical_run_context({"sharpe_floor": 0.3}), identity=identity)
+
+
+@pytest.mark.parametrize("declared", [Actor.AGENT, Actor.SYSTEM])
+def test_authenticate_actor_never_resolves_identity_for_a_non_human(tmp_path, declared):
+    """An agent is never hashed early: resolving identity is a human-only step, so the caller's
+    identity (a checkout hash, or a frozen deployment's verified descriptor) is never forced."""
+    conn = _conn(tmp_path)
+
+    def identity():
+        raise AssertionError("a non-human actor must not resolve the artifact identity")
+
+    assert _authenticate(conn, declared, identity) is declared
+    assert conn.execute("SELECT COUNT(*) FROM actor_challenges").fetchone()[0] == 0
+
+
+def test_authenticate_actor_binds_the_supplied_identity_into_a_human_challenge(
+    tmp_path, monkeypatch, capsys,
+):
+    """A human challenge binds exactly the identity the caller supplies (for a frozen deployment,
+    its descriptor hashes), resolved once, never the checkout's."""
+    import json
+
+    import typer
+
+    from algua.registry.repository import ArtifactIdentity
+
+    conn = _conn(tmp_path)
+    descriptor = ArtifactIdentity("b" * 32, "f" * 32, "a" * 64)
+    resolved: list[str] = []
+
+    def checkout(_name):
+        raise AssertionError("the checkout identity must not be computed")
+
+    monkeypatch.setattr("algua.registry.approvals.compute_artifact_hashes", checkout)
+
+    def identity():
+        resolved.append("descriptor")
+        return descriptor
+
+    with pytest.raises(typer.Exit):
+        _authenticate(conn, Actor.HUMAN, identity)
+
+    assert resolved == ["descriptor"]
+    row = conn.execute(
+        "SELECT code_hash, config_hash, dependency_hash FROM actor_challenges").fetchone()
+    assert tuple(row) == tuple(descriptor)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["action"] == "human_actor_challenge"
+    assert descriptor.code_hash in payload["challenge"]
+    assert descriptor.dependency_hash in payload["challenge"]

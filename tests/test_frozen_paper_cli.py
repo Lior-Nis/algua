@@ -427,9 +427,9 @@ def test_paper_run_refuses_a_frozen_deployment_before_replaying_anything(world):
 
 
 def test_raw_forward_and_go_live_transitions_never_import_the_checkout_module(world):
-    """``registry transition`` refuses the frozen tenant on the forward edge and the go-live
-    challenge before hashing the checkout (armed to raise): no module import, no pinned
-    checkout code_hash and no stage change."""
+    """``registry transition`` refuses the frozen tenant on the forward edge (``paper promote`` is
+    the only way in) and the go-live challenge before hashing the checkout (armed to raise): no
+    module import, no pinned checkout code_hash and no stage change."""
     CHECKOUT_MODULE.write_text(RAISING_MODULE)
     history = "SELECT from_stage, to_stage, code_hash FROM stage_transitions WHERE strategy_id=?"
     tenant_id = world.deployment().strategy_id
@@ -443,7 +443,8 @@ def test_raw_forward_and_go_live_transitions_never_import_the_checkout_module(wo
     live = runner.invoke(app, ["registry", "transition", TENANT, "--to", "live",
                                "--actor", "human"])
 
-    assert json.loads(forward.stdout)["code"] == "frozen_qualification_pending"
+    assert json.loads(forward.stdout)["code"] == "wrong_stage"
+    assert "reach forward_tested only through paper promote" in json.loads(forward.stdout)["error"]
     assert json.loads(live.stdout)["code"] == "frozen_live_unsupported"
     assert (forward.exit_code, live.exit_code) == (1, 1)
     assert world.rows(history, tenant_id) == before
