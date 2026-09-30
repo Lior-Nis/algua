@@ -262,6 +262,7 @@ INTEGRITY_CRITICAL_MODULES = frozenset(
         "algua/registry/live_certificate.py",
         "algua/registry/intake.py",
         "algua/registry/artifact_contract.py",
+        "algua/contracts/canonical.py",
         "algua/registry/environment_contract.py",
         "algua/registry/artifact_manifest.py",
         "algua/registry/frozen_manifest_contract.py",

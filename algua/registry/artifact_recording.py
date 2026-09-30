@@ -1,7 +1,7 @@
 """Typed bridge between frozen descriptors and the existing immutable deployment ledger."""
 from __future__ import annotations
 
-from algua.registry.artifact_contract import canonical_json
+from algua.contracts.canonical import canonical_json
 from algua.registry.artifact_manifest import parse_frozen_manifest
 from algua.registry.deployment import DeploymentError, DeploymentManifest
 from algua.registry.frozen_manifest_contract import FrozenManifest

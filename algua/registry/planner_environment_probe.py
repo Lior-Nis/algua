@@ -10,8 +10,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from algua.contracts.canonical import canonical_json
 from algua.primitives.bounded_subprocess import OutputLimitExceeded, run_bounded
-from algua.registry.artifact_contract import canonical_json
 from algua.registry.environment_contract import InterpreterIdentity
 from algua.registry.planner_environment_errors import EnvironmentIncompatible
 from algua.registry.planner_environment_inventory import (

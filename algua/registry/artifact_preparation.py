@@ -7,14 +7,13 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from algua.contracts.canonical import FROZEN_WIRE, canonical_json
 from algua.contracts.planner import PLANNER_PROTOCOL_VERSION
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.artifact_contract import (
     DESCRIPTOR_VERSION,
-    FROZEN_WIRE,
     PLANNER_BOUNDARY_VERSION,
     BundleDescriptor,
-    canonical_json,
 )
 from algua.registry.artifact_errors import (
     FrozenAssetsUnsupported,
