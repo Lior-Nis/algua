@@ -14,11 +14,13 @@ from algua.contracts.net import require_https_allowlisted_host
 from algua.contracts.types import LiveAuthorization, OrderIntent
 from algua.execution.alpaca_rejections import (
     DEAD_ORDER_SKIP,
+    available_qty,
     is_duplicate_client_order_id,
+    multistatus_failures,
     recover_duplicate_order_id,
 )
 from algua.execution.errors import BrokerError
-from algua.execution.sizing import MIN_NOTIONAL, size_order
+from algua.execution.sizing import MIN_NOTIONAL, order_qty, size_order
 from algua.primitives.retry import RetriesExhausted, call_with_backoff
 
 _TIMEOUT = 30  # seconds: per-request connect+read timeout for every Alpaca HTTP call
@@ -46,25 +48,6 @@ def posted_notional(grant: float) -> float:
     return 0.0 if floored < MIN_NOTIONAL else floored
 
 
-def _coerce_status(value: Any) -> int:
-    """Best-effort int from a 207 item's `status` field. A missing/non-int value is treated as a
-    failure status (500) rather than raising — a malformed item must count as a failure, not crash
-    the whole cancel with an uncaught ValueError (#22)."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 500
-
-
-def _multistatus_failures(results: list[Any]) -> list[Any]:
-    """Per-item failures in an Alpaca 207 multi-status list. A non-dict item or a non-2xx
-    `status` counts as a failure (a malformed item must not pass silently)."""
-    return [
-        r for r in results
-        if not isinstance(r, dict) or _coerce_status(r.get("status", 500)) not in (200, 204)
-    ]
-
-
 @dataclass(frozen=True)
 class AccountState:
     equity: float
@@ -89,6 +72,18 @@ class TickSnapshot:
     equity: float
     market_values: dict[str, float]  # symbol -> current position market value (0.0 => flat)
     qtys: dict[str, float]  # symbol -> current position shares (0.0 => flat)
+
+
+def _qty_order(symbol: str, signed_qty: float, coid: str | None) -> dict[str, Any] | None:
+    """A market order for exactly |signed_qty| shares (sell a long, buy back a short), or None."""
+    qty = order_qty(signed_qty)
+    if qty == 0:
+        return None
+    body: dict[str, Any] = {"symbol": symbol, "qty": format(qty.normalize(), "f"), "type": "market",
+                            "side": "sell" if signed_qty > 0 else "buy", "time_in_force": "day"}
+    if coid is not None:
+        body["client_order_id"] = coid
+    return body
 
 
 class _AlpacaBroker:
@@ -171,9 +166,10 @@ class _AlpacaBroker:
             raise BrokerError(f"alpaca malformed JSON on {path}: {exc}") from exc
 
     def _post_order(
-        self, body: dict[str, Any], path: str, coid: str | None
+        self, body: dict[str, Any], path: str, coid: str | None, *, sell_available: bool = False,
     ) -> tuple[str, bool]:
-        """POST an order; return (outcome, posted_new).
+        """POST an order; return (outcome, posted_new). With `sell_available`, a sell refused for
+        insufficient qty is re-posted once for what the account holds (#677).
 
         A duplicate-id rejection is proof the order ALREADY LANDED, so it resolves to that order's
         id (#560) after verifying the order is ours -- see `recover_duplicate_order_id`.
@@ -183,6 +179,9 @@ class _AlpacaBroker:
         The caller needs that distinction because only a genuinely new order consumes buying power
         this cycle."""
         resp = self._post("/v2/orders", body)
+        if sell_available and (left := available_qty(resp.status_code, resp.text)):
+            body = {**body, "qty": format(min(left, Decimal(body["qty"])).normalize(), "f")}
+            resp = self._post("/v2/orders", body)
         if coid is not None and is_duplicate_client_order_id(resp.status_code, resp.text):
             return recover_duplicate_order_id(
                 self.get_order_by_client_order_id, coid,
@@ -243,7 +242,7 @@ class _AlpacaBroker:
             # orders survive and the next submit over-order (#22).
             if not isinstance(results, list):
                 raise BrokerError(f"alpaca 207 on /v2/orders with non-list body: {results!r}")
-            if _multistatus_failures(results):
+            if multistatus_failures(results):
                 raise BrokerError(f"alpaca failed to cancel some orders: {results}")
 
     def close_positions(self, symbols: list[str]) -> None:
@@ -271,7 +270,7 @@ class _AlpacaBroker:
             # A panic flatten must not call an unexpected (non-list) body a success and let the
             # operator believe the account is flat.
             raise BrokerError(f"alpaca /v2/positions: expected a list, got {results!r}")
-        if _multistatus_failures(results):
+        if multistatus_failures(results):
             raise BrokerError(f"alpaca failed to close some positions: {results}")
 
     def snapshot(self, universe: list[str]) -> TickSnapshot:
@@ -327,6 +326,12 @@ class _AlpacaBroker:
             return "noop"
         side = "buy" if sized.delta_notional > 0 else "sell"
         amount = abs(sized.delta_notional)
+        # #677: a long's full exit sells its exact shares; a notional one oversells below the mark.
+        held = snap.qtys.get(intent.symbol, 0.0)
+        if intent.target_weight == 0.0 and held > 0.0 and (
+                exit_body := _qty_order(intent.symbol, held, client_order_id)) is not None:
+            return self._post_order(exit_body, "/v2/orders", client_order_id,
+                                    sell_available=True)[0]  # a sell is never reserved
         reserved = False
         if side == "buy" and reserve is not None:
             reserved = True
@@ -369,14 +374,9 @@ class _AlpacaBroker:
         # believed qty (#269). believed qty is summed from broker fills as a float, so quantize to
         # Alpaca's max fractional precision (9 dp) to shed float noise; a residual that rounds to
         # zero (already flat) is a noop, not a malformed zero-qty order.
-        qty = Decimal(str(abs(signed_qty))).quantize(Decimal("1e-9"))
-        if qty == 0:
+        body = _qty_order(symbol, signed_qty, client_order_id)
+        if body is None:
             return "noop"
-        body: dict[str, Any] = {
-            "symbol": symbol, "qty": format(qty.normalize(), "f"),
-            "side": "sell" if signed_qty > 0 else "buy",
-            "type": "market", "time_in_force": "day", "client_order_id": client_order_id,
-        }
         outcome, _posted_new = self._post_order(body, "/v2/orders (offset)", client_order_id)
         if outcome == DEAD_ORDER_SKIP:
             # An ordinary rebalance leg may be skipped; an EMERGENCY LIQUIDATION may not. `flatten`

@@ -21,8 +21,10 @@ into two in the live lane. The duplicate id is the safety mechanism, not the bug
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from algua.execution.errors import BrokerError
@@ -129,3 +131,36 @@ def recover_duplicate_order_id(
         # liquidation must fail loudly (see `submit_offset`).
         return DEAD_ORDER_SKIP
     return order_id
+
+
+def _coerce_status(value: Any) -> int:
+    """Best-effort int from a 207 item's `status` field. A missing/non-int value is treated as a
+    failure status (500) rather than raising — a malformed item must count as a failure, not crash
+    the whole cancel with an uncaught ValueError (#22)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 500
+
+
+def multistatus_failures(results: list[Any]) -> list[Any]:
+    """Per-item failures in an Alpaca 207 multi-status list. A non-dict item or a non-2xx
+    `status` counts as a failure (a malformed item must not pass silently)."""
+    return [
+        r for r in results
+        if not isinstance(r, dict) or _coerce_status(r.get("status", 500)) not in (200, 204)
+    ]
+
+
+def available_qty(status_code: int, text: str) -> Decimal | None:
+    """The venue's available share count when it refused an order for insufficient qty, else
+    None. Only Alpaca's structured 403 (code 40310000 carrying `available`) qualifies; a wash-trade
+    refusal shares the code but carries no `available`, so it stays an error."""
+    if status_code != 403:
+        return None
+    try:
+        data = json.loads(text)
+        available = Decimal(str(data["available"])) if data.get("code") == 40310000 else None
+    except (ValueError, TypeError, KeyError, AttributeError, InvalidOperation):
+        return None
+    return available if available is not None and available.is_finite() and available > 0 else None

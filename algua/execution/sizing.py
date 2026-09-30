@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from decimal import Decimal
 
 # A signed notional delta whose magnitude is below this is treated as "already on target":
 # no order is emitted. Keeps both brokers from churning sub-dollar rebalances.
@@ -65,3 +66,8 @@ def size_order(
         delta_shares=delta_shares,
         is_noop=is_noop,
     )
+
+
+def order_qty(signed_qty: float) -> Decimal:
+    """An order's share count: Alpaca's 9-dp fractional precision, shedding float-sum noise."""
+    return Decimal(str(abs(signed_qty))).quantize(Decimal("1e-9"))
