@@ -66,16 +66,20 @@ strategy with an active deployment; *content* is a Story 1.3b bundle plus enviro
   legacy and live ticks are unchanged. `run_tick` keeps its three-step venue-belief handshake; it is
   refactored only enough to call the port, without raising its size pin.
 - The frozen port (supervisor side of the dispatcher) implements the same three methods:
-  - `phase_a` launches one child for Phase A.
+  - `phase_a` computes the supervisor's own Phase A verdict (§7); unless that is a breach, it
+    launches one child for Phase A.
   - `closed_bars` computes closed bars on the supervisor with the pure helper extracted from
     `prepare_early` (behavior unchanged) and checks that their decision timestamp equals the
     child's `snapshot_required.decision_ts`; a mismatch is `frozen_result_invalid`.
-  - `phase_b` answers a *pending* venue belief with `VenueBeliefRequired` **without launching a
-    child** (Phase B would return it anyway after the same drawdown check that the next call
-    repeats), and launches one child for a resolved belief.
+  - `phase_b` answers a *pending* venue belief **without launching a child**, exactly as the
+    in-process Phase B answers it: the supervisor runs Phase B's pre-belief verdict itself (the
+    late-state derivation, non-positive equity, drawdown) and returns that breach, else
+    `VenueBeliefRequired`. For a resolved belief it computes the rest of the late verdict (§7) and,
+    unless that is a breach, launches one child.
 - So a decision tick launches at most two children, never concurrently, and none is alive while the
-  supervisor acquires late values. Phase A and Phase B share the tick's `request_id` (the Phase A
-  binding includes it).
+  supervisor acquires late values; the effect trace (including the venue-belief read) is the
+  in-process one. Phase A and Phase B share the tick's `request_id` (the Phase A binding includes
+  it).
 
 ## 4. Invocation directory and wire files
 
@@ -110,12 +114,15 @@ late                null for phase "a"; for phase "b": {phase_a_binding, capture
   symbol with unique symbols; `gate_universe` keeps its given order; `captured` carries every
   `CapturedStrategyState` field, with `venue_belief` as `{"kind": "disabled"}` or
   `{"kind": "enabled", "quantities": [...]}` (a pending belief never crosses the wire).
-- `bars.arrow` is an uncompressed Arrow IPC file with exactly the columns `timestamp`
-  (`timestamp[ns, tz=UTC]`), `symbol` (`string`), `open`, `high`, `low`, `close`, `adj_close`,
-  `volume` (`float64`), in that order, no nulls, rows in the frame's order. Float arrays are built
-  directly from NumPy values, never through `Table.from_pandas`, which turns NaN into null. The
-  decoder rebuilds the `timestamp`-named UTC index and must reproduce the request's `bars_digest`
-  (the Story 1.3a logical digest). Pickle and object payloads are never produced or accepted.
+- `bars.arrow` is an uncompressed Arrow IPC file of at most one record batch with exactly the
+  columns `timestamp` (`timestamp[ns, tz=UTC]`), `symbol` (`string`), `open`, `high`, `low`,
+  `close`, `adj_close`, `volume` (`float64`), in that order, no nulls, rows in the frame's order.
+  Float arrays are built directly from NumPy values, never through `Table.from_pandas`, which turns
+  NaN into null. The decoder rebuilds the `timestamp`-named UTC index and must reproduce the
+  request's `bars_digest` (the Story 1.3a logical digest). That digest binds the logical frame, not
+  the file's bytes (it folds `-0.0` into `0.0`, every NaN payload into one NaN and symbols into
+  NFC); the bytes are exact because the supervisor writes them itself. Pickle and object payloads
+  are never produced or accepted.
 - The canonical JSON encoder and the frozen-wire name/version constants move from
   `algua/registry/artifact_contract.py` to one pure `algua/contracts` module that both the registry
   and the child import; there are no copies. Existing importers are updated, and the canonical bytes
@@ -197,11 +204,29 @@ data, no non-finite number, no boolean where a number is expected. It must echo 
   execution contract; a violation there is a real risk breach and is returned as
   `PlannerRiskFailure` with the existing breach semantics, exactly as the in-process planner
   reports it.
-- The supervisor also re-derives, with the planner's own helpers, the Phase A decision timestamp
-  from its closed bars, the state of an early or late no-decision, and the late state from its
-  captured values (including the persisted peak), and requires the child's to match; a decision
-  requires a non-warming Phase A and a late no-decision a warming one. Any mismatch is
-  `frozen_result_invalid`.
+- **Strategy-free risk walls are re-derived by the current supervisor and are authoritative.** The
+  planner's strategy-free parts are shared functions that the in-process planner and the supervisor
+  both call, so each wall has one implementation and a platform fix to it reaches frozen tenants:
+  `validate_early` (the strategy-free input checks), `early_verdict` (held-name marks, no bars, a
+  flat warm-up, else the snapshot with its warming flag and binding), `verified_phase_a` (Phase B's
+  binding and request checks) and `late_verdict` (late state, non-positive equity, drawdown, venue
+  reconcile, realized gross, the marks re-check over holdings and the gate universe, warm-up).
+  Before any child the supervisor validates its own input with them (a refusal is
+  `frozen_planner_rejected`, as the child's would be) and computes the verdict from its own early
+  input, captured values, and the target's execution contract and gate universe. A breach it finds
+  is returned as that `PlannerRiskFailure`, with breach semantics, and no child is launched for the
+  phase. Otherwise the child's result must be the verdict: canonically identical to an early or
+  late no-decision or a snapshot (decision timestamp, warming flag and binding included), and a
+  `decision` or a decision-level `risk_failure` where the verdict is to plan. Decision-level kinds
+  are `DECISION_BREACH_KINDS` (`gross_exposure`, `long_only`, `max_weight_per_symbol`,
+  `non_finite_weight`, `out_of_universe`), the only kinds `validate_decision_weights` raises; they
+  cannot be re-derived without the weights and keep the treatment above. A child claiming any other
+  (strategy-free) kind the supervisor did not find, or answering another kind or warming flag, is
+  `frozen_result_invalid` and never a halt. The decision's state must equal the late state the
+  supervisor derives from the captured values exactly as sent (including the persisted peak).
+- `plan` validates and emits the strategy's weights as float64 in symbol order, the form the
+  supervisor re-validates them in, so both sides judge identical data (a float32 weight at a cap
+  cannot pass the child and breach the supervisor).
 - `check_mark_freshness` lists offenders in sorted order, the reconcile breach lists belief and
   positions sorted, realized gross is summed in symbol order, and every `RiskBreach` message is
   plain ASCII, so frozen and in-process breach text and states are identical across fresh
@@ -212,14 +237,14 @@ data, no non-finite number, no boolean where a number is expected. It must echo 
 | Code | Cause |
 |---|---|
 | `frozen_content_unavailable` | descriptor/bundle/environment missing or failing offline verification |
-| `frozen_content_unsupported` | protocol/wire/boundary version, missing entry point, child exit `3`, config the strict decoder rejects |
+| `frozen_content_unsupported` | protocol/wire/boundary version, missing or unreadable entry point, child exit `3`, config the strict decoder rejects |
 | `frozen_request_too_large` | request metadata or bars over their bound |
-| `frozen_launch_failed` | the interpreter could not be started |
+| `frozen_launch_failed` | the interpreter could not be started: `subprocess` reports a failed exec (or chdir into the bundle) with that path as the error's `filename` |
 | `frozen_timeout` | the phase exceeded 60 s |
 | `frozen_exit_abnormal` | any other nonzero exit, or termination by signal |
 | `frozen_output_exceeded` | stdout over 1 MiB |
 | `frozen_result_invalid` | any §7 violation, or a closed-bar timestamp mismatch |
-| `frozen_planner_rejected` | the child's planner refused its input or binding |
+| `frozen_planner_rejected` | the planner refused its input or binding: the child's, or the supervisor running the planner's strategy-free checks (§7) |
 | `frozen_live_unsupported` | a frozen deployment reached the live lane or `paper run` |
 
 - All are raised as one exception type, `FrozenTenantFailure(code, deployment_id, diagnostic)`,
@@ -233,11 +258,14 @@ data, no non-finite number, no boolean where a number is expected. It must echo 
   `{"ok": false, "strategy": <name>, "kind": "setup_error", "error": <code>, "deployment_id": <id>}`
   (today's shape plus `deployment_id`; Story 1.3d relies on it), audits it as today, and continues
   valid siblings.
-- `KeyboardInterrupt`, `SystemExit`, SQLite errors, global halt and account-wide reconciliation or
-  book-risk failures remain systemic and are never caught as tenant failures.
-- A child `risk_failure` keeps today's `RiskBreach` semantics (kill switch, dark-feed global halt,
-  scoped flatten), so breach effect traces match the in-process planner. As in process, a defective
-  immutable artifact that keeps reporting stale marks re-halts the book each cycle until retired.
+- `KeyboardInterrupt`, `SystemExit`, SQLite errors, global halt, account-wide reconciliation or
+  book-risk failures, and any other `OSError` on the supervisor's side (creating or writing the
+  invocation directory under the data volume, running out of descriptors, reaping) remain systemic
+  and are never caught as tenant failures: they would affect every tenant.
+- A breach keeps today's `RiskBreach` semantics (kill switch, dark-feed global halt, scoped
+  flatten), so breach effect traces match the in-process planner. A strategy-free breach is the
+  supervisor's own finding (§7), so only the current supervisor's walls can halt the book; a child
+  can report only a decision-level breach.
 
 ## 9. Promotion and live refusal (CAP-5)
 

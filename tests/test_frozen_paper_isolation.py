@@ -22,6 +22,7 @@ from algua.cli._common import StrategySetupError
 from algua.cli.errors import error_code, is_retryable
 from algua.cli.main import app
 from algua.live.frozen_dispatch import FROZEN_FAILURE_CODES, FrozenTenantFailure
+from algua.live.frozen_invocation import LaunchFailure
 from algua.live.live_loop import run_tick
 from algua.primitives.contained_process import ContainedResult
 from algua.registry.frozen_tenant_errors import (
@@ -84,7 +85,7 @@ FAILURES = {
     "frozen_request_too_large": (0, lambda world, mp: mp.setattr(
         "algua.live.frozen_wire.MAX_REQUEST_BYTES", 16)),
     "frozen_launch_failed": (1, lambda world, mp: mp.setattr(
-        "algua.live.frozen_dispatch.launch_child", _raise(OSError("no interpreter"))(world))),
+        "algua.live.frozen_dispatch.launch_child", _raise(LaunchFailure("no interpreter"))(world))),
     "frozen_timeout": (1, lambda world, mp: mp.setattr(
         "algua.live.frozen_invocation.TIMEOUT_SECONDS", 0.05)),
     "frozen_exit_abnormal": (1, lambda world, mp: mp.setattr(
@@ -164,6 +165,8 @@ def world(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("exc, code", [
     (sqlite3.OperationalError("database is locked"), "db_unavailable"),
+    # the data volume failing under the invocation directory affects every tenant
+    (OSError(28, "No space left on device"), "internal"),
     (global_halt.GlobalHaltActive("global halt active"), "invalid_input"),
 ])
 def test_a_systemic_fault_inside_a_frozen_tick_aborts_the_cycle(world, monkeypatch, exc, code):

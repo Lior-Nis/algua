@@ -65,6 +65,14 @@ RISK_BREACH_KINDS = frozenset(
     }
 )
 
+#: The kinds `validate_decision_weights` raises: the only breaches a strategy's target weights can
+#: cause. Every other kind is a strategy-free wall (marks, equity, drawdown, reconcile, realized
+#: gross) that a frozen tick's supervisor re-derives itself and never takes from a child (Story
+#: 1.3c contract §7); `tests/test_frozen_dispatch.py` pins it to the validator's behaviour.
+DECISION_BREACH_KINDS = frozenset(
+    {"gross_exposure", "long_only", "max_weight_per_symbol", "non_finite_weight", "out_of_universe"}
+)
+
 
 class RiskBreach(ValueError):
     """A hard risk-limit breach. Subclasses ValueError so existing CLI error handling

@@ -221,6 +221,33 @@ BUNDLES: dict[str, tuple[dict[str, str], dict[str, Any], bytes | None]] = {
 }
 
 
+# --- a strategy that writes to stdout, the child's only result channel ---------------------------
+
+NOISE_ON_LOAD = "noise: print on load"
+#: What the noisy fixture writes while it scores (Phase B), in this order.
+NOISE_WHILE_SCORING = ("noise: print", "noise: stderr", "noise: sys.__stdout__", "noise: fd 1")
+
+
+def noisy_source(name: str = STRATEGY) -> str:
+    """The fixture strategy, writing to stdout on load and while it scores, as chatty library or C
+    code would: ``print``, then a stderr write, then the original ``sys.__stdout__``, then fd 1."""
+    printed, errored, dunder, raw = NOISE_WHILE_SCORING
+    return strategy_source(name).replace(
+        "def signal(", f"import os, sys\nprint({NOISE_ON_LOAD!r})\ndef signal("
+    ).replace(
+        "    return view.groupby",
+        f"    print({printed!r})\n"
+        f"    sys.stderr.write({errored + chr(10)!r})\n"
+        f"    sys.__stdout__.write({dunder + chr(10)!r})\n"
+        "    sys.__stdout__.flush()\n"
+        f"    os.write(1, {(raw + chr(10)).encode()!r})\n"
+        "    return view.groupby",
+    )
+
+
+BUNDLES["noisy"] = ({STRATEGY: noisy_source()}, recorded(in_process()), STAMP)
+
+
 def seal(root: Path) -> None:
     for directory, _, files in os.walk(root, topdown=False):
         for name in files:

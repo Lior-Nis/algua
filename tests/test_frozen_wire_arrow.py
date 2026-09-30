@@ -8,6 +8,7 @@ same logical digest and the same row order.
 from __future__ import annotations
 
 import math
+import struct
 from datetime import UTC, datetime
 
 import numpy as np
@@ -147,6 +148,71 @@ def test_decode_refuses_schema_drift_and_nulls(build, reason):
     with pytest.raises(WireError) as caught:
         decode_bars(arrow_bytes(build(_table())))
     assert caught.value.reason == reason
+
+
+ZSTD_FRAME_MAGIC = b"\x28\xb5\x2f\xfd"
+
+
+def _written(compression: str | None = None, max_chunksize: int | None = None) -> bytes:
+    sink = pa.BufferOutputStream()
+    options = ipc.IpcWriteOptions(compression=compression)
+    with ipc.new_file(sink, BARS_SCHEMA, options=options) as writer:
+        writer.write_table(_table(), max_chunksize=max_chunksize)
+    return sink.getvalue().to_pybytes()
+
+
+def _undecompressable_zstd() -> bytes:
+    """A zstd file whose compressed buffers no codec can decompress (their frame magic is gone)."""
+    data = _written("zstd")
+    assert ZSTD_FRAME_MAGIC in data
+    broken = data.replace(ZSTD_FRAME_MAGIC, b"\0\0\0\0")
+    with pytest.raises(OSError, match="ZSTD decompression failed"):
+        ipc.open_file(pa.BufferReader(broken)).read_all()
+    return broken
+
+
+def test_a_plainly_written_single_batch_file_still_decodes():
+    frame = decode_bars(_written())
+    assert bars_digest(frame) == bars_digest(make_bars())
+
+
+@pytest.mark.parametrize(
+    ("build", "reason"),
+    [
+        (lambda: _written("zstd"), "arrow_compressed"),
+        (lambda: _written("lz4"), "arrow_compressed"),
+        # Refused from the batch metadata BEFORE any decompression: were the body decompressed
+        # first, this file would fail as `invalid_arrow` instead.
+        (_undecompressable_zstd, "arrow_compressed"),
+        (lambda: _written(max_chunksize=3), "arrow_batches"),
+        (lambda: _written("zstd", max_chunksize=3), "arrow_batches"),
+    ],
+    ids=["zstd", "lz4", "undecompressable_zstd", "two_batches", "two_zstd_batches"],
+)
+def test_decode_refuses_compressed_and_multi_batch_files(build, reason):
+    # The contract's file is uncompressed and in one batch, so the 256 MiB byte bound is also a
+    # memory bound; a compressed body could decompress to far more than its file size.
+    with pytest.raises(WireError) as caught:
+        decode_bars(build())
+    assert caught.value.reason == reason
+
+
+def test_decode_refuses_a_footer_block_that_points_at_no_message():
+    data = _written()
+    source = pa.BufferReader(data)
+    source.seek(8)  # past the "ARROW1" magic and padding: the schema message, then the batch
+    ipc.read_message(source)
+    offset = source.tell()
+    body = ipc.read_message(source).body.size
+    metadata = source.tell() - offset - body
+    # The footer's Block struct for the batch: offset, metaDataLength (+4 padding), bodyLength.
+    block = struct.pack("<qiiq", offset, metadata, 0, body)
+    eos = struct.pack("<qiiq", data.rindex(b"\xff\xff\xff\xff\0\0\0\0"), metadata, 0, body)
+    assert data.count(block) == 1
+
+    with pytest.raises(WireError) as caught:
+        decode_bars(data.replace(block, eos))
+    assert caught.value.reason == "invalid_arrow"
 
 
 def test_decode_refuses_stream_format_and_garbage():

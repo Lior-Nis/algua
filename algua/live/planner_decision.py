@@ -10,7 +10,7 @@ import pandas as pd
 
 from algua.contracts.planner import PLANNER_PROTOCOL_VERSION
 from algua.contracts.types import OrderIntent, Side
-from algua.risk.limits import WEIGHT_TOL, validate_decision_weights
+from algua.risk.limits import WEIGHT_TOL, check_finite_weights, validate_decision_weights
 
 if TYPE_CHECKING:
     from algua.strategies.base import LoadedStrategy
@@ -45,13 +45,22 @@ def build_intents(
     return intents
 
 
+def canonical_weights(weights: pd.Series, strategy_name: str) -> pd.Series:
+    """The strategy's weights as float64 in symbol order: the form a frozen tick's supervisor
+    re-validates them in (Story 1.3c §7), so a float32 weight at a cap, or a gross summed in
+    another order, cannot pass one side and breach the other. The dtype guards run on the
+    strategy's own Series first, so a bool or string weight still breaches instead of coercing."""
+    check_finite_weights(weights, strategy_name)
+    return weights.astype("float64").sort_index(key=lambda index: index.map(str))
+
+
 def plan(strategy: LoadedStrategy, inputs: PlannerInput) -> PlannerResult:
     if (
         type(inputs.protocol_version) is not int
         or inputs.protocol_version != PLANNER_PROTOCOL_VERSION
     ):
         raise ValueError(f"unsupported planner protocol: {inputs.protocol_version!r}")
-    weights = strategy.target_weights(inputs.view)
+    weights = canonical_weights(strategy.target_weights(inputs.view), strategy.name)
     validate_decision_weights(
         weights, strategy.execution, strategy.name, allowed_symbols=strategy.universe
     )

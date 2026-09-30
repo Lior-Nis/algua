@@ -4,11 +4,16 @@ A frozen planner child reports a risk breach by `risk_kind` and a planner refusa
 supervisor accepts only members of `RISK_BREACH_KINDS` / `PLANNER_FAILURE_CODES`. Those constants
 are only safe if they are EXHAUSTIVE: a kind the in-process planner can raise but the constant
 omits would turn a real breach into a `frozen_result_invalid` tenant failure (no kill switch, no
-dark-feed halt), and a stale entry would widen what a child may claim.
+dark-feed halt).
+
+They are also APPEND-ONLY per wire version: a later supervisor still runs older wire-v1 bundles,
+which report the kinds and codes THEIR code constructs, so a kind renamed or retired here stays a
+member (refusing it would turn such a bundle's real breach into `frozen_result_invalid`). A member
+nothing under `algua/` constructs any more is therefore expected, never stale; the exact pins
+below make every append a reviewed change.
 
 So these scans read every construction site under `algua/` and require:
-  * every literal kind/code is in its constant, and every constant member is still constructed
-    somewhere (equality, so the constant cannot rot in either direction);
+  * every literal kind/code is in its constant (containment, not equality: see append-only);
   * every site whose kind/code the scan cannot read (a forwarded variable, `*args`, `**kwargs`,
     an f-string) is one of the reviewed forwarding sites below;
   * no class subclasses a carrier (a subclass could hard-code a kind the call scan never sees).
@@ -34,7 +39,7 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 
 #: carrier name -> the parameter holding its kind.
 RISK_CARRIERS = {"RiskBreach": "kind", "PlannerRiskFailure": "kind"}
-#: carrier name -> the parameter holding its code (`input_failure` is planner_early's helper).
+#: carrier name -> the parameter holding its code (`input_failure` is the planner's helper).
 FAILURE_CARRIERS = {"PlannerInputFailure": "code", "PhaseBindingFailure": "code",
                     "input_failure": "code"}
 
@@ -53,7 +58,7 @@ RISK_FORWARDING_SITES = {
 }
 FAILURE_FORWARDING_SITES = {
     # The helper itself: every caller passes a literal, which the scan checks at the call.
-    ("algua/live/planner_early.py", "input_failure", "code"),
+    ("algua/live/planner_validation.py", "input_failure", "code"),
 }
 
 
@@ -128,18 +133,22 @@ def _algua_sources() -> dict[str, str]:
 
 
 def _assert_closed(scan: Scan, constant: frozenset[str], sites: set, label: str) -> None:
+    # Containment only: the constant is append-only per wire version, so a member no site
+    # constructs any more (a renamed or retired kind an older frozen bundle still reports) stays.
     unknown = {value: where for value, where in scan.literals.items() if value not in constant}
     assert not unknown, (
         f"literal {label}(s) not in the named constant: {unknown}. Add them to the constant in "
         "the same change — a frozen child reporting one would otherwise be rejected as invalid."
     )
-    stale = sorted(constant - set(scan.literals))
-    assert not stale, f"constant names {label}(s) nothing constructs any more: {stale}"
     assert scan.dynamic == sites, (
         f"unreviewed dynamic {label} site(s): {sorted(scan.dynamic - sites)}; "
         f"vanished reviewed site(s): {sorted(sites - scan.dynamic)}"
     )
     assert not scan.subclasses, f"carrier subclasses hide their {label}: {scan.subclasses}"
+
+
+# The two pins below are wire version 1's vocabularies. APPEND-ONLY: add a member here and to its
+# constant in the same change; never remove one while wire-v1 bundles can still report it.
 
 
 def test_risk_breach_kinds_is_exactly_the_contract_vocabulary():

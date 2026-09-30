@@ -7,9 +7,12 @@ launched. Each launch gets a private ``0700`` directory under the invocations ro
 child runs through :func:`~algua.primitives.contained_process.run_contained` with the exact §5
 argv, a replacement environment and the §6 bounds; afterwards the directory is removed on every
 path, including an exception or interrupt, best effort — a directory that cannot be removed is
-inert bounded input, as after a crash. A launch or setup failure raises ``OSError``; how the child
-ended is the returned ``ContainedResult``, which :func:`process_failure` maps to its §8 code and
-:func:`process_diagnostic` renders as the bounded, sanitized diagnostic (§6, §8).
+inert bounded input, as after a crash. A child whose interpreter cannot be started raises
+:class:`LaunchFailure` (the tenant's ``frozen_launch_failed``); any other ``OSError`` — setting up
+the invocation directory on the data volume, or the supervisor's own pipes and reaping — is the
+supervisor's and propagates as systemic. How the child ended is the returned ``ContainedResult``,
+which :func:`process_failure` maps to its §8 code and :func:`process_diagnostic` renders as the
+bounded, sanitized diagnostic (§6, §8).
 """
 
 from __future__ import annotations
@@ -46,6 +49,10 @@ CHILD_FILE: Final = CHILD_MODULE.replace(".", "/") + ".py"
 type Runner = Callable[..., ContainedResult]
 
 
+class LaunchFailure(Exception):
+    """The child's interpreter could not be started in the bundle (§8 ``frozen_launch_failed``)."""
+
+
 def unsupported_content(bundle_root: Path) -> str | None:
     """Why this supervisor cannot launch the bundle's child (§5), or ``None`` when it can."""
     try:
@@ -65,7 +72,11 @@ def unsupported_content(bundle_root: Path) -> str | None:
             raise WireError("unsupported_boundary_version", repr(boundary))
     except WireError as exc:
         return f"{PROTOCOL_FILE} is not frozen-planner wire 1, planner boundary 1: {exc}"
-    if not (bundle_root / CHILD_FILE).is_file():
+    try:
+        present = (bundle_root / CHILD_FILE).is_file()
+    except OSError as exc:  # e.g. EACCES on a directory: is_file() only swallows "not found"
+        return f"{CHILD_FILE} is unreadable: {exc.strerror}"
+    if not present:
         return f"the bundle holds no {CHILD_FILE}"
     return None
 
@@ -162,14 +173,23 @@ def launch_child(
             _write_durable(directory / name, data)
             (directory / name).chmod(0o444)
         directory.chmod(0o555)
-        return run(
-            child_argv(interpreter, bundle_root, directory),
-            cwd=bundle_root,
-            env=child_env(environment_root),
-            timeout=TIMEOUT_SECONDS,
-            max_stdout=MAX_STDOUT_BYTES,
-            stderr_capture=STDERR_CAPTURE_BYTES,
-            grace=KILL_GRACE_SECONDS,
-        )
+        try:
+            return run(
+                child_argv(interpreter, bundle_root, directory),
+                cwd=bundle_root,
+                env=child_env(environment_root),
+                timeout=TIMEOUT_SECONDS,
+                max_stdout=MAX_STDOUT_BYTES,
+                stderr_capture=STDERR_CAPTURE_BYTES,
+                grace=KILL_GRACE_SECONDS,
+            )
+        except OSError as exc:
+            # `subprocess.Popen` re-raises a failed exec (or chdir into the bundle) in the child as
+            # the child's errno with that path as `filename`; out of descriptors, fork or reaping
+            # failures carry none, and are the supervisor's.
+            started_at = (str(interpreter), str(bundle_root))
+            if exc.filename is None or str(exc.filename) not in started_at:
+                raise
+            raise LaunchFailure(str(exc)) from exc
     finally:
         _remove(directory)

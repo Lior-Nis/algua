@@ -9,8 +9,10 @@ digests), and both the bundle's recorded config and its strategy's ``CONFIG`` ar
 request's recorded config. It decodes the invocation's read-only ``request.json`` and
 ``bars.arrow`` (``EXIT_BAD_REQUEST`` when the wire codec refuses them), overlays the gate universe
 as the paper runtime does, runs the phase, checks that every loaded ``algua`` module came from the
-bundle, and writes the single result document to stdout. It writes no file and catches nothing
-else: an unexpected exception exits 1 with a traceback on stderr (``frozen_exit_abnormal``).
+bundle, and writes the single result document to stdout. Before it loads any strategy code it
+diverts everything else written to stdout into stderr, so stdout carries only that document. It
+writes no file and catches nothing else: an unexpected exception exits 1 with a traceback on
+stderr (``frozen_exit_abnormal``).
 
 Its import surface — the wire codec, the planner, the strategy loader and what they reach — never
 includes the registry, data, CLI, execution or operator layers.
@@ -175,20 +177,36 @@ def _run(bundle_root: Path, request: DecodedRequest) -> bytes:
     return payload
 
 
+def _divert_stdout() -> int:
+    """Make stderr this process's stdout for good; return a private descriptor for the result.
+
+    Stdout is the only result channel, yet strategy and library code may write to it through
+    ``print``, the original ``sys.__stdout__`` or descriptor 1 from C. Descriptor 1 becomes a copy
+    of stderr and ``sys.stdout`` becomes ``sys.stderr``, so all of that lands in stderr as it is
+    written; the result goes only to the returned duplicate of the original descriptor 1, which
+    ``os.dup`` makes non-inheritable, so no process the strategy starts can write to it either.
+    """
+    result_fd = os.dup(1)
+    os.dup2(2, 1)
+    sys.stdout = sys.stderr
+    return result_fd
+
+
 def main(invocation_dir: str) -> int:
     """Run one planner phase; the wire-v1 entry point ``BOOTSTRAP`` calls."""
-    try:
-        bundle_root = _bundle_root()
-        _check_protocol(bundle_root)
+    with os.fdopen(_divert_stdout(), "wb") as result_channel:
         try:
-            request = _read_request(Path(invocation_dir))
-        except WireError as exc:
-            sys.stderr.write(f"frozen_child: bad request: {exc}\n")
-            return EXIT_BAD_REQUEST
-        payload = _run(bundle_root, request)
-    except _Refused as exc:
-        sys.stderr.write(f"frozen_child: refused: {exc}\n")
-        return EXIT_UNSUPPORTED
-    sys.stdout.buffer.write(payload)
-    sys.stdout.buffer.flush()
+            bundle_root = _bundle_root()
+            _check_protocol(bundle_root)
+            try:
+                request = _read_request(Path(invocation_dir))
+            except WireError as exc:
+                sys.stderr.write(f"frozen_child: bad request: {exc}\n")
+                return EXIT_BAD_REQUEST
+            payload = _run(bundle_root, request)
+        except _Refused as exc:
+            sys.stderr.write(f"frozen_child: refused: {exc}\n")
+            return EXIT_UNSUPPORTED
+        result_channel.write(payload)
+        result_channel.flush()
     return EXIT_OK

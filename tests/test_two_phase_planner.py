@@ -545,3 +545,149 @@ def test_a_reconcile_breach_reads_the_same_whatever_the_mapping_order():
         return result.detail
 
     assert breach({"ZZZ": 1.0, "OLD": 5.0}) == breach({"OLD": 5.0, "ZZZ": 1.0})
+
+
+# --- golden master: every strategy-free verdict, pinned before it was shared (Story 1.3c) --------
+#
+# The early and late strategy-free verdicts were carved out of `phase_a`/`phase_b` so the frozen
+# supervisor computes them with the same code. These digests were pinned against the planner BEFORE
+# that carve, over each outcome's exact canonical form (types, field order, tuple order, float.hex
+# numbers, ISO timestamps), so the carve is proven behaviour-identical, text included.
+
+
+def _canon(value: object) -> object:
+    from dataclasses import is_dataclass
+    from enum import Enum
+
+    if is_dataclass(value) and not isinstance(value, type):
+        fields_ = {field.name: _canon(getattr(value, field.name)) for field in fields(value)}
+        return [type(value).__name__, fields_]
+    if isinstance(value, datetime):
+        return pd.Timestamp(value).isoformat()
+    if isinstance(value, float):
+        return value.hex()
+    if isinstance(value, (tuple, list)):
+        return [_canon(item) for item in value]
+    if isinstance(value, Enum):
+        return value.value
+    return value
+
+
+def _golden_digest(result: object) -> tuple[str, str]:
+    import hashlib
+
+    text = json.dumps(_canon(result), sort_keys=True)
+    return hashlib.sha256(text.encode()).hexdigest()[:16], text
+
+
+def _shifted(symbol: str, days: int) -> pd.DataFrame:
+    bars = _bars()
+    bars.index = pd.DatetimeIndex(
+        [ts - timedelta(days=days) if sym == symbol else ts
+         for ts, sym in zip(bars.index, bars.symbol, strict=True)],
+        name="timestamp",
+    )
+    return bars
+
+
+def _nan_close(symbol: str) -> pd.DataFrame:
+    bars = _bars()
+    bars.loc[(bars.symbol == symbol) & (bars.index == datetime(2023, 1, 4, tzinfo=UTC)),
+             "close"] = float("nan")
+    return bars
+
+
+def _golden_early(case: str) -> tuple[LoadedStrategy, EarlyPlannerInput]:
+    ready, warm = _strategy(), _strategy(warmup=3)
+    held = {"OLD": 2.0}
+    return {
+        "a_snapshot": (ready, _early(ready, positions=held)),
+        "a_snapshot_flat": (ready, _early(ready)),
+        "a_no_bars_held": (ready, _early(ready, bars=_bars().iloc[0:0], positions=held)),
+        "a_no_bars_flat": (ready, _early(ready, bars=_bars().iloc[0:0])),
+        "a_warming_flat": (warm, _early(warm, positions={"ZERO": 0.0})),
+        "a_warming_held": (warm, _early(warm, positions=held)),
+        "a_stale_held": (ready, _early(ready, bars=_shifted("OLD", 21), positions=held)),
+        "a_unvaluable_held": (ready, _early(ready, bars=_nan_close("OLD"), positions=held)),
+        "a_no_mark_held": (ready, _early(ready, positions={"ZZZ": 1.0})),
+        "a_input_failure": (ready, replace(_early(ready), request_id="xyz")),
+    }[case]
+
+
+def _golden_late(case: str) -> tuple[LoadedStrategy, LatePlannerInput]:
+    ready, warm = _strategy(), _strategy(warmup=3)
+    heavy = replace(ready, construct_fn=lambda scores, view, params: scores * 3.0)
+    pending = VenueBeliefPending()
+    captured = _captured()
+    strategy, early, late_captured, binding = {
+        "b_pending": (ready, None, replace(captured, venue_belief=pending), None),
+        "b_decision_disabled": (ready, None, captured, None),
+        "b_decision_enabled": (ready, None, _captured(belief={"OLD": 2.0}), None),
+        "b_reconcile": (ready, None, _captured(belief={"OLD": 3.0, "ZZZ": 1.0}), None),
+        "b_drawdown": (ready, None, replace(captured, persisted_peak_equity=200.0), None),
+        "b_drawdown_pending": (
+            ready, None, replace(captured, persisted_peak_equity=200.0, venue_belief=pending),
+            None,
+        ),
+        "b_non_positive": (ready, None, _captured(sizing=0.0), None),
+        "b_realized_gross": (ready, None, replace(captured, market_values={"OLD": 200.0}), None),
+        "b_invalid_captured": (ready, None, replace(captured, drawdown_equity=float("nan")), None),
+        "b_bad_belief_tag": (
+            ready, None, replace(captured, venue_belief=VenueBeliefEnabled({}, tag="x")), None,
+        ),
+        "b_binding_mismatch": (ready, None, captured, "0" * 64),
+        "b_universe_stale": (
+            ready, _early(ready, bars=_shifted("AAA", 21), positions={"OLD": 2.0}), captured, None,
+        ),
+        "b_weights_breach": (heavy, None, captured, None),
+        "b_warming_held": (warm, None, captured, None),
+        "b_warming_held_drawdown": (
+            warm, None, replace(captured, persisted_peak_equity=200.0), None,
+        ),
+    }[case]
+    early = _early(strategy, positions={"OLD": 2.0}) if early is None else early
+    first = phase_a(strategy, early)
+    assert isinstance(first, SnapshotRequired)
+    return strategy, LatePlannerInput(
+        early, first.phase_a_binding if binding is None else binding, late_captured
+    )
+
+
+#: scenario -> (outcome type, sha256[:16] of its canonical form), pinned pre-carve.
+GOLDEN = {
+    "a_snapshot": ("SnapshotRequired", "1f1d20ad591d2992"),
+    "a_snapshot_flat": ("SnapshotRequired", "631b7e2483de0510"),
+    "a_no_bars_held": ("PlannerRiskFailure", "858bb5064e82c01c"),
+    "a_no_bars_flat": ("EarlyNoDecision", "b1771f868b9c6cec"),
+    "a_warming_flat": ("EarlyNoDecision", "bb0dcb30ba14651b"),
+    "a_warming_held": ("SnapshotRequired", "978d7c24486ad0d6"),
+    "a_stale_held": ("PlannerRiskFailure", "80f82a7811e04630"),
+    "a_unvaluable_held": ("PlannerRiskFailure", "fb16aa86875ac800"),
+    "a_no_mark_held": ("PlannerRiskFailure", "474c55468f396b87"),
+    "a_input_failure": ("PlannerInputFailure", "08831f79d01bd999"),
+    "b_pending": ("VenueBeliefRequired", "ad2382c95cea9cde"),
+    "b_decision_disabled": ("Decision", "0e90f3a129edb111"),
+    "b_decision_enabled": ("Decision", "0e90f3a129edb111"),
+    "b_reconcile": ("PlannerRiskFailure", "7e86ce38ea231d97"),
+    "b_drawdown": ("PlannerRiskFailure", "bb61415480eea80c"),
+    "b_drawdown_pending": ("PlannerRiskFailure", "bb61415480eea80c"),
+    "b_non_positive": ("PlannerRiskFailure", "ad3cedd9f9c6b5e5"),
+    "b_realized_gross": ("PlannerRiskFailure", "b626e5a71ad4b101"),
+    "b_invalid_captured": ("PlannerInputFailure", "5604a0fb550ab0c9"),
+    "b_bad_belief_tag": ("PlannerInputFailure", "3d2bd1fed1f25ee3"),
+    "b_binding_mismatch": ("PhaseBindingFailure", "15d9b6631dffa427"),
+    "b_universe_stale": ("PlannerRiskFailure", "539599bdcd17dfc0"),
+    "b_weights_breach": ("PlannerRiskFailure", "3da69b86839fc1ad"),
+    "b_warming_held": ("LateNoDecision", "c7ccb16f106f6c48"),
+    "b_warming_held_drawdown": ("PlannerRiskFailure", "bb61415480eea80c"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(GOLDEN))
+def test_every_planner_outcome_matches_its_pre_carve_golden(case):
+    if case.startswith("a_"):
+        result: object = phase_a(*_golden_early(case))
+    else:
+        result = phase_b(*_golden_late(case))
+    digest, text = _golden_digest(result)
+    assert (type(result).__name__, digest) == GOLDEN[case], text

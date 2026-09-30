@@ -58,6 +58,8 @@ from tests._frozen_harness import (
     LEAKED_MODULE,
     LEAKY,
     MANIFEST,
+    NOISE_ON_LOAD,
+    NOISE_WHILE_SCORING,
     REQUEST_ID,
     STRATEGY,
     Store,
@@ -175,6 +177,30 @@ def test_phase_b_equals_the_in_process_planner(store, tmp_path, case):
     decode_result(done.stdout, phase="b", request_id=REQUEST_ID)
 
 
+@pytest.mark.parametrize("phase", ["a", "b"])
+def test_what_strategy_code_writes_to_stdout_lands_in_stderr(store, tmp_path, phase):
+    # Stdout is the only result channel: a strategy printing on load or while it scores — through
+    # print, sys.__stdout__ or fd 1 — must neither corrupt the result nor be lost. It reaches
+    # stderr as it is written (so a child killed at the timeout still shows it), in order.
+    strategy = _in_process()
+    early = _early(strategy)
+    late = None if phase == "a" else _late(strategy, early, "enabled")
+    expected = (
+        phase_a(_overlaid(strategy), early) if late is None else phase_b(_overlaid(strategy), late)
+    )
+    assert isinstance(expected, SnapshotRequired if late is None else Decision)
+
+    done = _launch(store, "noisy", tmp_path, *_wire(early, late, bundle="noisy"))
+
+    assert done.returncode == EXIT_OK, done.stderr.decode()
+    assert done.stdout == encode_result(phase, REQUEST_ID, expected)
+    decode_result(done.stdout, phase=phase, request_id=REQUEST_ID)
+    noise = [NOISE_ON_LOAD, *(NOISE_WHILE_SCORING if late is not None else ())]
+    stderr = done.stderr.decode()
+    where = [stderr.find(text) for text in noise]
+    assert -1 not in where and where == sorted(where), stderr
+
+
 # --- refusals: EXIT_UNSUPPORTED -----------------------------------------------------------------
 
 
@@ -219,7 +245,20 @@ def test_the_child_refuses_what_is_not_its_bundle(store, tmp_path, case, reason)
     assert reason in done.stderr.decode()
 
 
-def test_main_refuses_unless_its_package_is_the_one_bootstrap_put_first(monkeypatch, capsys,
+@pytest.fixture
+def restored_stdout():
+    """``main`` makes stderr its process's stdout for good; undo that in this pytest process."""
+    saved, stdout = os.dup(1), sys.stdout
+    try:
+        yield
+    finally:
+        os.dup2(saved, 1)
+        os.close(saved)
+        sys.stdout = stdout
+
+
+def test_main_refuses_unless_its_package_is_the_one_bootstrap_put_first(restored_stdout,
+                                                                        monkeypatch, capsys,
                                                                         tmp_path):
     monkeypatch.setattr(sys, "path", [str(tmp_path), *sys.path])
 
