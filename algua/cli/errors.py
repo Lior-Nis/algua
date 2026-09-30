@@ -44,6 +44,7 @@ def _registry() -> list[tuple[type[BaseException], str]]:
         FrozenEnvironmentCorrupt,
         FrozenEnvironmentIncompatible,
         FrozenEnvironmentUnavailable,
+        FrozenQualificationPending,
         FrozenSourceDrift,
         FrozenSourceInvalid,
     )
@@ -62,6 +63,7 @@ def _registry() -> list[tuple[type[BaseException], str]]:
         (FrozenEnvironmentIncompatible, "frozen_environment_incompatible"),
         (FrozenEnvironmentCorrupt, "frozen_environment_corrupt"),
         (FrozenDescriptorConflict, "frozen_descriptor_conflict"),
+        (FrozenQualificationPending, "frozen_qualification_pending"),
         (AllocationError, "allocation_error"),
         (ClaimTokenMismatch, "claim_token_mismatch"),
         (TransitionError, "wrong_stage"),

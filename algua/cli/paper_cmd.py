@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib
 import json
-import sqlite3
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,16 +21,16 @@ from algua.cli._common import (
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.cli.lane_refresh import build_cycle_plan, lane_symbols, refresh_lane_snapshot
+from algua.cli.paper_venue import (
+    ingest_paper_venue,
+    live_strategy_flat,
+    paper_broker_net,
+    paper_scoped_cancel,
+    recover_stranded,
+)
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
-from algua.contracts.types import (
-    ActivityWindowBroker,
-    LiveReconcileBroker,
-    OrderIntent,
-    OrderLookupBroker,
-    PositionsBroker,
-    ScopedCancelBroker,
-)
+from algua.contracts.types import OrderIntent
 from algua.evaluation.backtest_run import run_backtest_task
 from algua.evaluation.inputs import select_provider as _select_provider
 from algua.evaluation.sweep_run import sweep_task
@@ -52,13 +51,9 @@ from algua.execution.live_ledger import (
     delete_paper_venue_order,
     fill_cursor,
     ingest_activities,
-    owned_open_order_ids,
     paper_believed_positions,
     record_paper_venue_order,
-    recover_stranded_broker_order_ids,
-    strategy_live_symbols,
 )
-from algua.execution.live_reconcile import attributed_live_net
 from algua.execution.live_sizing import LiveSizingError, build_paper_sizing_snapshot
 from algua.execution.order_state import (
     client_order_id,
@@ -73,7 +68,6 @@ from algua.execution.peaks import rebase_all_peaks, rebase_strategy_peak
 from algua.execution.sim_broker import SimBroker
 from algua.execution.tick_clock import tick_clock
 from algua.live.live_loop import (
-    _RECONCILE_TOL,
     SubmittedOrder,
     TickHalted,
     TickHooks,
@@ -94,7 +88,11 @@ from algua.registry import allocations
 from algua.registry.allocations import active_allocation
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.db import registry_conn
-from algua.registry.forward_promotion import forward_promotion_preflight, run_forward_gate
+from algua.registry.forward_promotion import (
+    forward_promotion_preflight,
+    refuse_frozen_promotion,
+    run_forward_gate,
+)
 from algua.registry.gating import load_gated_strategy
 from algua.registry.human_actor import authenticate_actor, canonical_run_context
 from algua.registry.intake import run_intake
@@ -130,53 +128,6 @@ def _alpaca_broker_from_settings() -> AlpacaPaperBroker:
     return build_broker(BrokerKind.ALPACA_PAPER)
 
 
-def _paper_broker_net(broker: PositionsBroker) -> dict[str, float]:
-    """Paper broker's net positions per symbol (nonzero only) for account reconcile.
-
-    Local to paper_cmd because the live analog (_broker_net_positions) can't be imported (cli->cli).
-    """
-    pos = broker.get_positions()  # pandas Series symbol -> qty
-    return {sym: float(q) for sym, q in pos.items() if float(q) != 0.0}
-
-
-_PAPER_CURSOR_FAR_PAST = "1970-01-01T00:00:00Z"
-
-
-def _recover_stranded(
-    conn: sqlite3.Connection, broker: OrderLookupBroker, kind: LedgerKind
-) -> None:
-    """#312: backfill broker_order_id onto any crash-stranded NULL order row (asks the venue for the
-    order carrying its client_order_id; never submits). ACCOUNT-WIDE, so the audit is too
-    (strategy=None) — a per-strategy label would misattribute a sibling's order."""
-    outcome = recover_stranded_broker_order_ids(conn, broker, kind=kind)
-    if outcome.recovered:
-        audit_append(conn, actor="system", action="stranded_order_recovered",
-                     reason=f"{len(outcome.recovered)} backfilled: {outcome.recovered}",
-                     strategy=None)
-    if outcome.mismatched:
-        audit_append(conn, actor="system", action="stranded_recovery_mismatch",
-                     reason=f"{len(outcome.mismatched)} broker mismatch: {outcome.mismatched}",
-                     strategy=None)
-
-
-def _paper_scoped_cancel(conn, broker: ScopedCancelBroker, name: str) -> None:
-    """Cancel only THIS strategy's open PAPER orders (never a sibling's)."""
-    for oid in owned_open_order_ids(conn, broker, name, kind=LedgerKind.PAPER):
-        broker.cancel_order(oid)
-
-
-def _ingest_paper_venue(
-    conn: sqlite3.Connection, broker: ActivityWindowBroker, until: str
-) -> None:
-    """Exhaustively ingest the paper venue's activities into paper_venue_fills, fail-closed.
-    Cursor is a broker-time high-water: fetch (cursor, until] (raises on a partial page), dedup by
-    activity_id, persist `until` as the new cursor in the SAME transaction. The caller resolves
-    `until` itself (never calls broker.clock() here), so a clock failure stays in its hands."""
-    after = fill_cursor(conn, LedgerKind.PAPER) or _PAPER_CURSOR_FAR_PAST
-    acts = broker.account_activities_window(after, until)
-    ingest_activities(conn, acts, LedgerKind.PAPER, cursor_value=until)
-
-
 def _alpaca_live_readonly_from_settings() -> AlpacaLiveReadOnlyBroker:
     return build_broker(BrokerKind.ALPACA_LIVE_READONLY)
 
@@ -185,33 +136,6 @@ def _maybe_live_readonly() -> AlpacaLiveReadOnlyBroker | None:
     """A read-only live client if live creds are configured, else None (resume-all stays lenient:
     with no creds it just computes not_flat from the current belief)."""
     return maybe_broker(BrokerKind.ALPACA_LIVE_READONLY)
-
-
-def _live_strategy_flat(
-    conn: sqlite3.Connection, name: str, universe: list[str], broker: LiveReconcileBroker,
-) -> tuple[bool, dict]:
-    """Ingest pending broker activities, then ACCOUNT-WIDE reconcile: the strategy is flat iff its
-    own believed_positions is empty AND the broker holds no UNEXPLAINED qty (broker net minus the
-    books' LIVE-attributed net) in any symbol it is responsible for. A sibling LIVE strategy that
-    legitimately holds the same symbol explains the broker qty and does not block resume; an orphan
-    (unattributed/manual) or non-live holding does NOT explain it, so it fails closed (refuse)."""
-    cursor = fill_cursor(conn, LedgerKind.LIVE)
-    ingest_activities(conn, broker.account_activities(after=cursor), LedgerKind.LIVE)
-    # #312: recover any crash-stranded NULL-broker_order_id live row before the flatness check, so a
-    # stranded (accepted-but-not-backfilled) fill does not block resume as an unexplained residual.
-    _recover_stranded(conn, broker, LedgerKind.LIVE)
-    own = believed_positions(conn, name, LedgerKind.LIVE)
-    broker_net = {s: float(q) for s, q in broker.get_positions().items()
-                  if float(q) != 0.0}
-    expected = attributed_live_net(conn)
-    syms = set(universe) | strategy_live_symbols(conn, name)
-    unexplained = {
-        s: broker_net.get(s, 0.0) - expected.get(s, 0.0)
-        for s in syms
-        if abs(broker_net.get(s, 0.0) - expected.get(s, 0.0)) > _RECONCILE_TOL
-    }
-    is_flat = (not own) and (not unexplained)
-    return is_flat, {"believed": own, "broker_unexplained": unexplained}
 
 
 @paper_app.command("run")
@@ -319,7 +243,7 @@ def resume(name: str) -> None:
         if rec.stage is Stage.LIVE:
             strategy = load_strategy(name)
             broker = _alpaca_live_readonly_from_settings()
-            is_flat, residual = _live_strategy_flat(conn, name, strategy.universe, broker)
+            is_flat, residual = live_strategy_flat(conn, name, strategy.universe, broker)
             if not is_flat:
                 raise ValueError(
                     f"{name} is not flat after reconcile: {residual}; offset fills pending or "
@@ -776,7 +700,7 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
         res = flatten_strategy(
             conn, broker, name, LedgerKind.PAPER, lane="paper", strategy_id=rec.id,
             cancel=cancel if cancel is not None else broker.cancel_open_orders,
-            ingest=lambda: _ingest_paper_venue(conn, broker, tick_clock(broker.clock)[0]),
+            ingest=lambda: ingest_paper_venue(conn, broker, tick_clock(broker.clock)[0]),
         )
         payload = breach_payload(exc.detail, kind=exc.kind,
                                  liquidation_submitted=res.n_offsets > 0,
@@ -856,10 +780,10 @@ def trade_tick(
                 acct = broker.account()
                 tick_ts, clock_source = tick_clock(broker.clock)
                 try:
-                    _ingest_paper_venue(conn, broker, tick_ts)
+                    ingest_paper_venue(conn, broker, tick_ts)
                     # #312: resolve any crash-stranded NULL-broker_order_id row BEFORE reconcile,
                     # so its now-attributed fill no longer reads as drift.
-                    _recover_stranded(conn, broker, LedgerKind.PAPER)
+                    recover_stranded(conn, broker, LedgerKind.PAPER)
                 except Exception as exc:   # fail closed on ANY ingest/transport error
                     audit_append(conn, actor="system", action="venue_ingest_failed",
                                  reason=str(exc), strategy=name)
@@ -871,7 +795,7 @@ def trade_tick(
                 # Account-wide reconcile (multi-tenant): attributed_paper_net vs the broker book,
                 # grace window. halt -> global halt; not clean -> defer (no trade); clean -> tick.
                 cycle = paper_reconcile.next_cycle(conn)
-                recon = paper_reconcile.reconcile(conn, _paper_broker_net(broker), cycle)
+                recon = paper_reconcile.reconcile(conn, paper_broker_net(broker), cycle)
                 if recon.halt:
                     counters.reconcile_halted += 1
                     log.error("reconcile_halt",
@@ -1012,8 +936,8 @@ def run_all(
                 # ingest fills + recover crash-stranded rows BEFORE reconcile; fail closed on any
                 # transport/venue error so a partial ingest can never read as reconcile drift.
                 try:
-                    _ingest_paper_venue(conn, broker, tick_ts)
-                    _recover_stranded(conn, broker, LedgerKind.PAPER)
+                    ingest_paper_venue(conn, broker, tick_ts)
+                    recover_stranded(conn, broker, LedgerKind.PAPER)
                 except Exception as exc:  # fail closed on ANY ingest/transport error
                     audit_append(conn, actor="system", action="venue_ingest_failed",
                                  reason=str(exc), strategy=None)
@@ -1054,7 +978,7 @@ def run_all(
                     if tickable:
                         try:
                             snapshot_info = refresh_lane_snapshot(
-                                lane_symbols(plan, _paper_broker_net(broker)), end=end,
+                                lane_symbols(plan, paper_broker_net(broker)), end=end,
                                 min_rows=plan.min_rows, kind=LedgerKind.PAPER)
                         except Exception as exc:  # noqa: BLE001 — any refresh fault fails closed
                             audit_append(conn, actor="system", action="bars_refresh_failed",
@@ -1074,7 +998,7 @@ def run_all(
                 # Account-wide reconcile (multi-tenant): attributed_paper_net vs the broker book.
                 # halt -> global halt; not clean -> defer the whole cycle (no trade); clean -> tick.
                 cycle = paper_reconcile.next_cycle(conn)
-                recon = paper_reconcile.reconcile(conn, _paper_broker_net(broker), cycle)
+                recon = paper_reconcile.reconcile(conn, paper_broker_net(broker), cycle)
                 recon_payload = {
                     "cycle": cycle,
                     "clean": recon.clean,
@@ -1148,7 +1072,7 @@ def run_all(
                             conn, name, strategy, rec, broker, provider, max_drawdown,
                             tick_ts, clock_source, acct,
                             reserve_buy=_paper_reserve_for(name),
-                            cancel=lambda n=name: _paper_scoped_cancel(conn, broker, n),
+                            cancel=lambda n=name: paper_scoped_cancel(conn, broker, n),
                             start=start, end=end, snapshot_id=snapshot,
                             prepared=prepared_runtimes[name])
                     except StrategySetupError as exc:
@@ -1251,6 +1175,9 @@ def promote(
     with registry_conn() as conn:
         repo = SqliteStrategyRepository(conn)
         rec = repo.get(name)  # StrategyNotFound -> JSON error before any work
+        # Story 1.3c §9: a frozen deployment is refused FIRST — before authentication or any
+        # checkout identity hashing — with frozen_qualification_pending (no gate, token or stage).
+        refuse_frozen_promotion(conn, rec.id)
         # AUTHENTICATE the human actor (#329) BEFORE the relaxation guard is even consulted. A bare
         # `--actor human` is forgeable, so asserting a human actor here requires an SSH signature
         # (namespace algua-human-actor) over a fresh single-use challenge binding this command +
@@ -1327,7 +1254,7 @@ def flatten(
         res = flatten_strategy(
             conn, broker, name, LedgerKind.PAPER, lane="paper", strategy_id=rec.id,
             cancel=broker.cancel_open_orders,
-            ingest=lambda: _ingest_paper_venue(conn, broker, tick_clock(broker.clock)[0]),
+            ingest=lambda: ingest_paper_venue(conn, broker, tick_clock(broker.clock)[0]),
         )
         if res.flatten_error is not None:
             emit(breach_payload(res.flatten_error, strategy=name, liquidation_submitted=False,
