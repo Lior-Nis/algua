@@ -65,6 +65,15 @@ MAX_DIAGNOSTIC_BYTES: Final = 8 * 1024
 KILL_GRACE_SECONDS: Final = 2.0
 REQUEST_FILE: Final = "request.json"
 TIMEFRAME: Final = "1d"
+# Wire-v1 child entry (§5), fixed so that later supervisors can still launch older bundles.
+CHILD_MODULE: Final = "algua.live.frozen_child"
+EXIT_OK: Final = 0  # one result document on stdout
+EXIT_BAD_REQUEST: Final = 2  # the codec refused request.json/bars.arrow (frozen_exit_abnormal)
+EXIT_UNSUPPORTED: Final = 3  # bundle/protocol/identity/module-origin refusal
+BOOTSTRAP: Final = (  # python -I -B -c BOOTSTRAP <bundle_root> <invocation_dir>
+    "import sys; sys.path.insert(0, sys.argv[1]); "
+    f"from {CHILD_MODULE} import main; sys.exit(main(sys.argv[2]))"
+)
 
 _ROOT_KEYS = frozenset(
     {"wire", "phase", "request_id", "strategy_name", "deployment_id", "artifact_id",
