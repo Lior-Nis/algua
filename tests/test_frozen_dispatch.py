@@ -639,7 +639,9 @@ def test_the_decision_level_breach_kinds_are_exactly_the_weight_rules():
             validate_decision_weights(pd.Series(weights), contract, "s", ["AAA", "BBB", "CCC"])
         raised.add(breach.value.kind)
 
-    assert raised == DECISION_BREACH_KINDS == DECISION_KINDS
+    # Append-only per wire version: every kind the validator raises today must be accepted, and a
+    # retired kind stays accepted so older bundles still decode (Story 1.3c §7).
+    assert raised <= DECISION_BREACH_KINDS and DECISION_KINDS <= DECISION_BREACH_KINDS
     assert DECISION_BREACH_KINDS < RISK_BREACH_KINDS
     assert not DECISION_BREACH_KINDS & DARK_FEED_KINDS
 

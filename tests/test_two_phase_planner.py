@@ -691,3 +691,24 @@ def test_every_planner_outcome_matches_its_pre_carve_golden(case):
         result = phase_b(*_golden_late(case))
     digest, text = _golden_digest(result)
     assert (type(result).__name__, digest) == GOLDEN[case], text
+
+
+def test_realized_gross_is_summed_in_symbol_order_whatever_the_broker_order():
+    # A frozen child receives captured values sorted by symbol while the in-process planner sees
+    # broker order; the state (and the realized-gross wall) must be the same either way (Story 1.3c
+    # parity). The sum runs in symbol order; Python's compensated sum() also keeps it exact here.
+    from algua.live.planner_late import _late_state
+
+    def gross(order: list[str]) -> float:
+        values = {"A": 10.0, "B": 20.0, "C": 30.0}
+        captured = CapturedStrategyState(
+            request_id="0123456789abcdef0123456789abcdef", sizing_equity=100.0,
+            drawdown_equity=100.0, quantities={symbol: 1.0 for symbol in order},
+            market_values={symbol: values[symbol] for symbol in order},
+            persisted_peak_equity=100.0, venue_belief=VenueBeliefDisabled())
+        return _late_state(captured, None)[0].realized_gross
+
+    import math
+
+    assert gross(["C", "B", "A"]) == gross(["A", "B", "C"]) == gross(["B", "C", "A"])
+    assert gross(["A", "B", "C"]) == math.fsum([0.1, 0.2, 0.3])
