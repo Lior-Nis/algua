@@ -13,7 +13,9 @@ tests/test_frozen_runtime.py fabricates a corrupt descriptor.
 """
 from __future__ import annotations
 
+import sqlite3
 import uuid
+from dataclasses import asdict
 from datetime import UTC, date, datetime
 
 import pytest
@@ -150,9 +152,9 @@ def test_a_1_3c_era_unlinked_frozen_tick_never_counts(conn, frozen):
     assert res.evidence.realized_max_drawdown == pytest.approx(0.0)
 
 
-def _phase_a_only(conn, deployment_id: int, **overrides) -> int:
+def _phase_a_only(conn, deployment_id: int) -> int:
     return record_frozen_invocation(conn, attempt(
-        deployment_id=deployment_id, request_id=uuid.uuid4().hex, snapshot_id=SNAP, **overrides))
+        deployment_id=deployment_id, request_id=uuid.uuid4().hex, snapshot_id=SNAP))
 
 
 def _phase_b(conn, deployment_id: int, *, failed: bool = False, **overrides) -> int:
@@ -170,8 +172,7 @@ def _phase_b(conn, deployment_id: int, *, failed: bool = False, **overrides) -> 
 
 
 @pytest.mark.parametrize("shape", [
-    "phase_a", "phase_a_claiming_decision", "failed_phase_b", "risk_failure_phase_b",
-    "other_snapshot", "other_deployment",
+    "phase_a", "failed_phase_b", "risk_failure_phase_b", "other_snapshot", "other_deployment",
 ])
 def test_a_tick_linking_anything_but_its_successful_final_invocation_is_unlinked(
     conn, frozen, shape,
@@ -183,9 +184,6 @@ def test_a_tick_linking_anything_but_its_successful_final_invocation_is_unlinked
     else:
         link = {
             "phase_a": lambda: _phase_a_only(conn, deployment_id),
-            # Schema-legal but never produced: only a phase b row is a FINAL invocation.
-            "phase_a_claiming_decision": lambda: _phase_a_only(
-                conn, deployment_id, result_kind="decision"),
             "failed_phase_b": lambda: _phase_b(conn, deployment_id, failed=True),
             "risk_failure_phase_b": lambda: _phase_b(
                 conn, deployment_id, result_kind="risk_failure"),
@@ -198,6 +196,23 @@ def test_a_tick_linking_anything_but_its_successful_final_invocation_is_unlinked
 
     assert res.excluded["invocation_unlinked"] == 1
     assert res.evidence.n_return_observations == 1
+
+
+def test_a_phase_a_row_claiming_a_final_result_cannot_be_recorded(conn, frozen):
+    """The shape the filter's ``phase = 'b'`` clause also guards (defence in depth): a phase a
+    row claiming a decision. Neither the recorder's value nor the schema admits it."""
+    _strategy_id, deployment_id = frozen
+    legal = attempt(deployment_id=deployment_id, request_id=uuid.uuid4().hex, snapshot_id=SNAP)
+    with pytest.raises(ValueError, match="phase a attempt cannot succeed"):
+        attempt(deployment_id=deployment_id, request_id=legal.request_id, snapshot_id=SNAP,
+                result_kind="decision")
+    row = {**asdict(legal), "result_kind": "decision"}
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        conn.execute(
+            f"INSERT INTO frozen_invocations({', '.join(row)})"
+            f" VALUES ({', '.join('?' for _ in row)})", tuple(row.values()))
+    conn.rollback()
+    assert conn.execute("SELECT count(*) FROM frozen_invocations").fetchone()[0] == 0
 
 
 def test_a_linked_late_no_decision_counts_exactly_like_a_decision(conn, frozen):

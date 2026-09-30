@@ -22,7 +22,8 @@ def test_a_well_formed_success_and_failure_are_accepted():
                       failure_code="frozen_timeout", returncode=None, signal=15, timed_out=True,
                       diagnostic="exit_status=None signal=15")
     assert failure.failure_code == "frozen_timeout"
-    assert replace(SUCCESS_A, phase="b", phase_a_invocation_id=7).phase == "b"
+    success_b = replace(SUCCESS_A, phase="b", phase_a_invocation_id=7, result_kind="decision")
+    assert success_b.phase == "b"
 
 
 @pytest.mark.parametrize("change", [
@@ -30,6 +31,8 @@ def test_a_well_formed_success_and_failure_are_accepted():
     {"result_sha256": None, "result_kind": None},                # neither
     {"result_kind": None},                                       # success without a kind
     {"result_kind": "planner_rejected"},                         # a refusal is not a success kind
+    {"result_kind": "decision"},                                 # a phase a child never decides
+    {"phase": "b", "phase_a_invocation_id": 3},                  # a phase b child never snapshots
     {"phase": "b"},                                              # phase b without its phase a
     {"phase_a_invocation_id": 3},                                # phase a naming a phase a
     {"request_sha256": None},                                    # bytes without their digest

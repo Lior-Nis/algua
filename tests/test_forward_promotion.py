@@ -32,6 +32,7 @@ from algua.registry.forward_promotion import (
     forward_promotion_preflight,
     guard_forward_relaxations,
     promotion_identity,
+    promotion_slot,
     run_forward_gate,
 )
 from algua.registry.repository import ArtifactIdentity
@@ -893,11 +894,11 @@ def _seed_passing_window(conn):
 
 def _run(repo, conn, *, actor=Actor.AGENT, criteria=None):
     # The working-tree identity through the same chokepoint `paper promote` resolves it with.
-    deployment, identity = promotion_identity(conn, repo.get("s"), data_dir=Path("unused"))
+    rec = repo.get("s")
+    promotion = promotion_identity(conn, rec, promotion_slot(conn, rec, data_dir=Path("unused")))
     return run_forward_gate(
         repo, conn, name="s", actor=actor, criteria=criteria or ForwardGateCriteria(),
-        calendar=CAL, now=NOW, activities_fetch=lambda a, u: [],
-        deployment=deployment, identity=identity)
+        calendar=CAL, now=NOW, activities_fetch=lambda a, u: [], promotion=promotion)
 
 
 def test_run_forward_gate_pass_from_paper_promotes_and_consumes(conn, repo, monkeypatch):

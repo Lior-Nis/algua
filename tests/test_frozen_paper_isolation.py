@@ -14,7 +14,9 @@ frozen exceptions' own codes.
 Story 1.3d (CAP-1): every attempt the port decided to run a child for leaves exactly one failure
 row carrying its code (a pre-launch refusal records no request bytes); a fault the supervisor
 settles itself before any attempt, and every systemic fault, records nothing. A failed attempt
-never yields a tick row.
+never yields a tick row. A SQLite error raised by the recorder itself is systemic too (contract
+§7): it aborts ``trade-tick`` and the whole ``run-all`` cycle with ``db_unavailable``, never a
+setup error.
 """
 from __future__ import annotations
 
@@ -277,6 +279,40 @@ def test_a_systemic_fault_inside_a_frozen_tick_aborts_the_cycle(world, monkeypat
     assert "setup_error" not in json.dumps(payload)
     assert world.ticks(SIBLING) == [] and world.broker.effects == []  # the cycle stopped there
     assert _invocations(world) == []  # a systemic fault inside an attempt records nothing
+
+
+@pytest.mark.parametrize("command", ["trade-tick", "run-all"])
+@pytest.mark.parametrize("failing_phase", ["a", "b"])
+def test_a_recorder_sqlite_error_is_systemic_at_the_cli(world, monkeypatch, command, failing_phase):
+    """Contract §7: a SQLite error while recording an attempt is systemic. Raised at the recorder
+    binding the CLI hands the port (``paper_cmd.record_frozen_invocation``) as the frozen tenant's
+    Phase A (or Phase B) attempt is recorded, it is never demoted to that tenant's failure: both
+    commands exit nonzero with the retryable ``db_unavailable`` envelope, ``run-all`` stops before
+    the sibling (the frozen tenant ticks first), and the tenant gets no tick, order, audit entry or
+    venue effect. Only an attempt recorded before the fault remains (Phase A, when B's fails)."""
+    recording: list[str] = []
+    real_record = paper_cmd.record_frozen_invocation
+
+    def record(conn, attempt):
+        recording.append(attempt.phase)
+        if attempt.phase == failing_phase:
+            raise sqlite3.OperationalError("database is locked")
+        return real_record(conn, attempt)
+
+    monkeypatch.setattr(paper_cmd, "record_frozen_invocation", record)
+
+    exit_code, payload = world.trade_tick() if command == "trade-tick" else world.run_all()
+
+    assert exit_code == 1
+    assert payload == {"ok": False, "error": "database is locked", "code": "db_unavailable",
+                       "retryable": True}
+    attempted = ["a", "b"][:["a", "b"].index(failing_phase) + 1]
+    assert recording == attempted  # the CLI's binding was the recorder, and nothing followed
+    assert len(world.launches) == len(attempted)  # every child ran: the recorder failed, not it
+    assert [row["phase"] for row in _invocations(world)] == attempted[:-1]
+    assert world.ticks(SIBLING) == [] and world.broker.effects == []  # the cycle stopped there
+    assert all(action != "strategy_setup_error" for action, _ in world.audit(TENANT))
+    _assert_no_effects(world)
 
 
 def test_an_interrupt_inside_a_frozen_tick_is_never_a_tenant_failure(world, monkeypatch):

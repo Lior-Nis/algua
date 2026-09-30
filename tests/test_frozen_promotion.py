@@ -15,6 +15,7 @@ replacement refusals the world's injected locator check cannot see.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shutil
@@ -29,6 +30,10 @@ import pytest
 from algua.cli.main import app
 from algua.config.settings import get_settings
 from algua.execution.tick_snapshots import record_tick_snapshot
+from algua.registry.artifact_recording import (
+    frozen_deployment_manifest,
+    parse_frozen_deployment_manifest,
+)
 from algua.registry.db import connect, migrate
 from algua.registry.db.frozen_evidence import TICK_FROZEN_LINK_TRIGGER
 from algua.registry.store import SqliteStrategyRepository
@@ -46,6 +51,7 @@ from tests._frozen_paper_world import (
     runner,
     teardown_world,
 )
+from tests._human_actor_helpers import _sign as sign_challenge
 from tests._human_actor_helpers import install_human_actor_anchor, promote_signed
 from tests._venv_fixture import SITE_PACKAGES
 from tests.test_forward_promotion import FakeCalendar
@@ -251,6 +257,10 @@ def test_a_human_challenge_binds_the_descriptor_hashes(world, monkeypatch, tmp_p
     issued = json.loads(challenge.stdout)
     assert issued["action"] == "human_actor_challenge"
     assert all(value in issued["challenge"] for value in DESCRIPTOR)
+    # A frozen challenge names the exact epoch and the content its descriptor verified.
+    deployment = world.deployment()
+    assert f'"deployment_id":{deployment.id}' in issued["challenge"]
+    assert f'"manifest_digest":"{deployment.manifest_digest}"' in issued["challenge"]
     [pending] = world.rows("SELECT * FROM actor_challenges")
     assert (pending["code_hash"], pending["config_hash"], pending["dependency_hash"]) == DESCRIPTOR
     assert world.rows("SELECT * FROM forward_gate_evaluations") == []
@@ -265,6 +275,69 @@ def test_a_human_challenge_binds_the_descriptor_hashes(world, monkeypatch, tmp_p
     assert row == {"actor": "human", "code_hash": CODE_HASH, "config_hash": CONFIG_HASH,
                    "dependency_hash": DEP}
     assert tripwires.calls == [] and CHECKOUT_DOTTED not in sys.modules
+
+
+def _successor_epoch(world, *, same_artifact: bool) -> int:
+    """Retire the frozen epoch and activate a successor with IDENTICAL hashes and verifying
+    content: on the same artifact, or on a new descriptor (another source ref, so another manifest
+    digest) of the same bundle and environment. Returns the successor's id."""
+    old = world.deployment()
+    with world.conn() as conn:
+        artifact_id = old.artifact_id
+        if not same_artifact:
+            frozen = dataclasses.replace(
+                parse_frozen_deployment_manifest(old.manifest()), source_ref="c" * 40)
+            fields = dataclasses.asdict(frozen_deployment_manifest(frozen))
+            artifact_id = conn.execute(
+                f"INSERT INTO deployment_artifacts({', '.join(fields)}, created_at)"
+                f" VALUES ({', '.join('?' * len(fields))}, 't')",
+                tuple(fields.values())).lastrowid
+        gate_id = SqliteStrategyRepository(conn).record_gate_evaluation(
+            old.strategy_id, passed=True, n_funnel=1, own_lifetime_combos=1,
+            windowed_total_combos=1, funnel_window_days=90, breadth_provenance="measured",
+            pit_ok=True, pit_override=False, holdout_n_bars=63, min_holdout_observations=63,
+            code_hash=CODE_HASH, config_hash=CONFIG_HASH, dependency_hash=DEP,
+            data_source="test", snapshot_id="snap-2", period_start="2024-01-01",
+            period_end="2024-12-31", holdout_frac=0.2, actor="human", decision_json="{}",
+            universe_name=GATE_NAME)
+        now = datetime.now(UTC).isoformat()
+        conn.execute("UPDATE strategy_deployments SET retired_at=? WHERE id=?", (now, old.id))
+        successor = conn.execute(
+            "INSERT INTO strategy_deployments(strategy_id, artifact_id, research_gate_id,"
+            " activated_at) VALUES (?,?,?,?)",
+            (old.strategy_id, artifact_id, gate_id, now)).lastrowid
+        conn.commit()
+    assert successor is not None
+    return int(successor)
+
+
+@pytest.mark.parametrize("same_artifact", [True, False])
+def test_a_human_signature_for_one_frozen_epoch_is_refused_on_another(
+    world, monkeypatch, tmp_path, same_artifact,
+):
+    """Two frozen epochs can share the three hashes yet be different evidence epochs or run
+    different content, so a frozen challenge also binds the deployment id and manifest digest: a
+    signature over epoch F1 never authenticates a promotion of F2."""
+    key = install_human_actor_anchor(monkeypatch, tmp_path)
+    first = world.deployment()
+    issued = json.loads(promote("--actor", "human").stdout)
+    assert issued["action"] == "human_actor_challenge"
+    signature = sign_challenge(key, issued["challenge"], tmp_path)
+    second = _successor_epoch(world, same_artifact=same_artifact)
+    successor = world.deployment()
+    assert successor.id == second != first.id
+    assert (successor.code_hash, successor.config_hash, successor.dependency_hash) == DESCRIPTOR
+    assert (successor.manifest_digest == first.manifest_digest) is same_artifact
+
+    result = promote("--actor", "human", "--actor-signature", str(signature))
+
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["code"] == "invalid_input"
+    assert "human actor authentication failed" in payload["error"]
+    assert world.rows("SELECT * FROM forward_gate_evaluations") == []
+    assert [row["consumed_at"] for row in world.rows("SELECT * FROM actor_challenges")] == [None]
+    assert _state(world)["stage"] == "paper"
 
 
 def test_a_promoted_frozen_deployment_keeps_ticking_and_refreshes_its_certificate(

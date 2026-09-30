@@ -8,13 +8,22 @@ copied.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal
+from types import MappingProxyType
+from typing import Final, Literal
 
-#: Result kinds a successful attempt may carry (the Story 1.3c result vocabulary, minus refusals).
-ATTEMPT_RESULT_KINDS = frozenset({
-    "early_no_decision", "snapshot_required", "risk_failure", "late_no_decision", "decision",
+#: The result kinds a successful attempt of each phase can carry (Story 1.3c §7). The supervisor
+#: returns a breach it finds itself without a child, so a Phase A child succeeds only by matching
+#: the no-decision or snapshot verdict. A Phase B child succeeds with the late no-decision, a
+#: cross-checked decision, or a breach only the strategy's weights can cause.
+PHASE_RESULT_KINDS: Final[Mapping[str, frozenset[str]]] = MappingProxyType({
+    "a": frozenset({"early_no_decision", "snapshot_required"}),
+    "b": frozenset({"risk_failure", "late_no_decision", "decision"}),
 })
+#: Every result kind a successful attempt may carry (the Story 1.3c result vocabulary, minus
+#: refusals).
+ATTEMPT_RESULT_KINDS: Final = PHASE_RESULT_KINDS["a"] | PHASE_RESULT_KINDS["b"]
 
 
 @dataclass(frozen=True)
@@ -24,7 +33,8 @@ class FrozenAttempt:
     Exactly one of ``result_sha256`` (a success) and ``failure_code`` (the stable Story 1.3c tenant
     failure the supervisor raised) is set. ``request_json`` / ``request_sha256`` / ``bars_sha256``
     are ``None`` only for an attempt refused before its request could be encoded. A phase ``"b"``
-    attempt names the successful phase ``"a"`` attempt of the same tick.
+    attempt names the successful phase ``"a"`` attempt of the same tick. A success's result kind is
+    one its phase can produce (:data:`PHASE_RESULT_KINDS`).
     """
 
     deployment_id: int
@@ -57,6 +67,10 @@ class FrozenAttempt:
             raise ValueError("a successful attempt names its result kind")
         if self.result_kind is not None and self.result_kind not in ATTEMPT_RESULT_KINDS:
             raise ValueError(f"unknown attempt result kind {self.result_kind!r}")
+        if self.result_kind is not None and self.result_kind not in PHASE_RESULT_KINDS.get(
+                self.phase, frozenset()):
+            raise ValueError(f"a phase {self.phase} attempt cannot succeed with result kind"
+                             f" {self.result_kind!r}")
         if (self.phase == "b") != (self.phase_a_invocation_id is not None):
             raise ValueError("a phase b attempt, and only it, names its phase a attempt")
         if (self.request_json is None) != (self.request_sha256 is None):

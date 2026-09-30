@@ -94,8 +94,8 @@ from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.db import registry_conn
 from algua.registry.forward_promotion import (
     forward_promotion_preflight,
-    frozen_promotion_identity,
     promotion_identity,
+    promotion_slot,
     run_forward_gate,
 )
 from algua.registry.frozen_runtime import (
@@ -1214,41 +1214,41 @@ def promote(
     with registry_conn() as conn:
         repo = SqliteStrategyRepository(conn)
         rec = repo.get(name)  # StrategyNotFound -> JSON error before any work
-        # Story 1.3d §5: a FROZEN deployment's identity is its recorded descriptor, whose content
-        # is verified fresh HERE, before authentication (a human signs the descriptor hashes) and
-        # before any row, look, token or stage change. Working-tree and legacy strategies get None
-        # from this ledger read and keep today's order and identity sites.
-        frozen = frozen_promotion_identity(conn, rec, data_dir=get_settings().data_dir)
+        # Story 1.3d §5: this ledger read is the ONE slot. A FROZEN deployment's identity is its
+        # recorded descriptor, whose content is verified fresh HERE, before authentication (a human
+        # signs it) and before any row, look, token or stage change. Working-tree and legacy
+        # strategies only record the epoch read and keep today's order and identity sites.
+        slot = promotion_slot(conn, rec, data_dir=get_settings().data_dir)
         # AUTHENTICATE the human actor (#329) BEFORE the relaxation guard is even consulted. A bare
         # `--actor human` is forgeable, so asserting a human actor here requires an SSH signature
         # (namespace algua-human-actor) over a fresh single-use challenge binding this command +
-        # strategy + artifact identity + the FULL ForwardGateCriteria (all 8 thresholds). No
-        # signature => a challenge is issued+printed and NOTHING runs. A declared agent is
-        # returned unchanged, never hashed (its relaxations are refused exactly as before).
+        # strategy + artifact identity + the FULL ForwardGateCriteria (all 8 thresholds), and for a
+        # frozen epoch its deployment id and manifest digest. No signature => a challenge is
+        # issued+printed and NOTHING runs. A declared agent is returned unchanged, never hashed
+        # (its relaxations are refused exactly as before).
         actor_enum = authenticate_actor(
             conn, command="paper promote", name=name, rec=rec,
             stage_to=Stage.FORWARD_TESTED.value, declared_actor=actor_enum,
             actor_signature=actor_signature,
-            identity=lambda: (
-                approvals.compute_artifact_hashes(name) if frozen is None else frozen[1]),
+            identity=lambda: (approvals.compute_artifact_hashes(name) if slot.frozen is None
+                              else slot.frozen.identity),
             run_context=canonical_run_context({
                 "min_observations": min_observations, "min_coverage": min_coverage,
                 "degradation_factor": degradation_factor, "sharpe_floor": sharpe_floor,
                 "min_vol": min_vol, "max_drawdown": max_drawdown, "max_staleness": max_staleness,
                 "forward_sharpe_confidence": forward_sharpe_confidence,
+                **slot.challenge_binding(),
             }),
         )
         # PREFLIGHT: actor legality + relaxations-need-human + stage legality. Refuses here,
         # before the broker is even constructed (TransitionError is a ValueError -> JSON error).
         forward_promotion_preflight(repo, name, actor=actor_enum, criteria=criteria)
         broker = _alpaca_broker_from_settings()
-        deployment, identity = frozen or promotion_identity(
-            conn, rec, data_dir=get_settings().data_dir)
         outcome = run_forward_gate(
             repo, conn, name=name, actor=actor_enum, criteria=criteria,
             calendar=get_calendar(), now=datetime.now(UTC),
             activities_fetch=broker.account_activities_window,
-            deployment=deployment, identity=identity)
+            promotion=promotion_identity(conn, rec, slot))
         audit_append(conn, actor=actor, action="paper_promote",
                      reason="pass" if outcome.decision.passed else "fail", strategy=name)
     payload = {

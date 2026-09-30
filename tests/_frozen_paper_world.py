@@ -12,6 +12,12 @@ exactly as a real admission would, so a test can edit or delete it afterwards.
 The sibling is a legacy (fixed-cohort) working-tree tenant with a legacy gate row, so it ticks on
 its CONFIG universe through today's in-process path. Both tenants tick through the real
 ``run_tick`` over one recording fake broker and the deterministic ``SyntheticProvider``.
+
+Two observers let a test compare the recorded evidence with what really happened: the provider the
+CLI selects remembers the snapshot id it was built for and logs that id with every bar fetch it
+serves (``World.served``), and the child launch spy keeps the exact bytes of every file each child
+was given, read from its sealed invocation directory just before it runs (``World.sent``). The
+world's broker credentials and account id are distinctive, so stored rows can be searched for them.
 """
 from __future__ import annotations
 
@@ -67,6 +73,9 @@ FAMILY = "frozen_paper_family"
 GATE_NAME = "frozen-gate"
 GATE = ["AAA", "BBB"]  # the frozen tenant's gate universe; its CONFIG universe adds CCC
 SNAP = "snap1"
+API_KEY = "PKFROZENWORLD7Q3ZKEY"  # distinctive, so evidence can be searched for them
+API_SECRET = "frozen-world-secret-9d41c7e2"
+ACCOUNT_ID = "frozen-acct-5b8e"
 DEP = hashlib.sha256(b"frozen-paper-dependencies").hexdigest()
 CODE_HASH = hashlib.sha256(b"frozen-paper-code").hexdigest()[:32]
 RECORDED = recorded(in_process(TENANT))
@@ -133,7 +142,7 @@ class RecordingBroker:
 
     def account(self) -> AccountState:
         return AccountState(equity=self.equity, cash=self.equity, buying_power=self.equity,
-                            account_id="frozen-acct")
+                            account_id=ACCOUNT_ID)
 
     def clock(self) -> str:
         return "2026-01-02T14:00:00+00:00"
@@ -165,6 +174,25 @@ class RecordingBroker:
         return [e for e in self.effects if e[0] == "submit" and str(e[3]).startswith(f"{name}-")]
 
 
+# --- the provider ------------------------------------------------------------------------------
+
+
+class ServingProvider(SyntheticProvider):
+    """The deterministic synthetic bars, standing in for the snapshot-backed provider the CLI
+    selects: it remembers the snapshot id it was built for and logs ``(snapshot_id, symbols)`` for
+    every fetch it serves, so the evidence can be checked against the snapshot the bars came from
+    rather than against the command's argument."""
+
+    def __init__(self, snapshot_id: str | None, served: list[tuple[str | None, tuple[str, ...]]]):
+        super().__init__()
+        self.snapshot_id = snapshot_id
+        self._served = served
+
+    def get_bars(self, symbols, start, end, timeframe):
+        self._served.append((self.snapshot_id, tuple(symbols)))
+        return super().get_bars(symbols, start, end, timeframe)
+
+
 # --- the world ---------------------------------------------------------------------------------
 
 
@@ -176,6 +204,17 @@ class World:
     environment: EnvironmentDescriptor
     launches: list[Path] = field(default_factory=list)
     prepared: list[str] = field(default_factory=list)
+    #: The snapshot id of every provider the CLI selected, in order.
+    provided: list[str | None] = field(default_factory=list)
+    #: ``(snapshot_id, symbols)`` of every bar fetch a selected provider served, in order.
+    served: list[tuple[str | None, tuple[str, ...]]] = field(default_factory=list)
+    #: The exact ``{file name: bytes}`` each launched child was given, in launch order.
+    sent: list[dict[str, bytes]] = field(default_factory=list)
+
+    def select_provider(self, demo: bool, snapshot: str | None) -> ServingProvider:
+        """The CLI's ``_select_provider``: a provider built for exactly this snapshot id."""
+        self.provided.append(snapshot)
+        return ServingProvider(snapshot, self.served)
 
     @property
     def bundle_root(self) -> Path:
@@ -205,15 +244,15 @@ class World:
         return [(row["action"], row["reason"]) for row in self.rows(
             "SELECT action, reason FROM audit_log WHERE strategy=? ORDER BY id", name)]
 
-    def trade_tick(self, name: str = TENANT) -> tuple[int, dict[str, Any]]:
+    def trade_tick(self, name: str = TENANT, *, snapshot: str = SNAP) -> tuple[int, dict[str, Any]]:
         start, end = window()
-        result = runner.invoke(app, ["paper", "trade-tick", name, "--snapshot", SNAP,
+        result = runner.invoke(app, ["paper", "trade-tick", name, "--snapshot", snapshot,
                                      "--start", start, "--end", end])
         return result.exit_code, json.loads(result.stdout)
 
-    def run_all(self) -> tuple[int, dict[str, Any]]:
+    def run_all(self, *, snapshot: str = SNAP) -> tuple[int, dict[str, Any]]:
         start, end = window()
-        result = runner.invoke(app, ["paper", "run-all", "--snapshot", SNAP,
+        result = runner.invoke(app, ["paper", "run-all", "--snapshot", snapshot,
                                      "--start", start, "--end", end])
         return result.exit_code, json.loads(result.stdout)
 
@@ -264,8 +303,8 @@ def build_world(monkeypatch, tmp_path: Path, *, protocol: bytes | None = STAMP) 
     data_dir.mkdir()
     monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "registry.db"))
     monkeypatch.setenv("ALGUA_DATA_DIR", str(data_dir))
-    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
-    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", API_KEY)
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", API_SECRET)
     DataStore(data_dir).ingest_universe(
         universe=GATE_NAME, symbols=GATE, effective_date="2020-01-01",
         as_of="2020-01-01T00:00:00Z", source="test")
@@ -302,7 +341,15 @@ def build_world(monkeypatch, tmp_path: Path, *, protocol: bytes | None = STAMP) 
 
     def spy_launch(**kwargs):
         world.launches.append(Path(kwargs["bundle_root"]))
-        return real_launch(**kwargs)
+        run = kwargs["run"]
+
+        def reading_run(argv, **run_kwargs):
+            # The files the child is about to read, from its sealed invocation directory.
+            directory = Path(argv[-1])
+            world.sent.append({path.name: path.read_bytes() for path in directory.iterdir()})
+            return run(argv, **run_kwargs)
+
+        return real_launch(**{**kwargs, "run": reading_run})
 
     monkeypatch.setattr("algua.registry.intake.prepare_frozen_artifact", prepare)
     monkeypatch.setattr("algua.registry.intake.verify_frozen_artifact", verify)
@@ -310,8 +357,7 @@ def build_world(monkeypatch, tmp_path: Path, *, protocol: bytes | None = STAMP) 
                         verify_environment_locator)
     monkeypatch.setattr("algua.live.frozen_dispatch.launch_child", spy_launch)
     monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: world.broker)
-    monkeypatch.setattr("algua.cli.paper_cmd._select_provider",
-                        lambda demo, snapshot: SyntheticProvider())
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", world.select_provider)
     with world.conn() as conn:
         # The frozen tenant registers first (lower id), so run-all ticks it BEFORE the sibling:
         # an isolated frozen failure must let the cycle continue on to the sibling.

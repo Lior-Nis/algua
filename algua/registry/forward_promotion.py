@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -70,53 +70,95 @@ def guard_forward_relaxations(actor: Actor, criteria: ForwardGateCriteria) -> No
             "forward-gate relaxation requires --actor human: " + ", ".join(sorted(relaxed)))
 
 
-PromotionIdentity = tuple[DeploymentRecord, ArtifactIdentity]
+_MINT = object()  # held by this module alone: nothing else can mint a PromotionIdentity
 
 
-def frozen_promotion_identity(
+@dataclass(frozen=True)
+class PromotionIdentity:
+    """The epoch and identity ONE forward promotion is judged against, minted only by this
+    module's chokepoints once verified: a working-tree epoch whose manifest verified and whose
+    hashes match the checkout, or a frozen epoch whose bundle and environment verified fresh
+    (``content_digest``: that descriptor's manifest digest; ``None`` for working-tree). Built
+    anywhere else, directly or via ``dataclasses.replace``, it raises."""
+
+    deployment: DeploymentRecord
+    identity: ArtifactIdentity
+    content_digest: str | None
+    mint: InitVar[object]
+
+    def __post_init__(self, mint: object) -> None:
+        if mint is not _MINT:
+            raise TypeError("a PromotionIdentity is minted only by the promotion chokepoint")
+
+
+@dataclass(frozen=True)
+class PromotionSlot:
+    """What ``paper promote``'s ledger-only slot read, once, before authentication: the active
+    epoch's id (``None``: none, the legacy cohort) and a FROZEN epoch's verified identity."""
+
+    deployment_id: int | None
+    frozen: PromotionIdentity | None
+
+    def challenge_binding(self) -> dict[str, object]:
+        """Run context a human also signs for a frozen epoch: epochs can share the three hashes
+        yet differ in epoch and content. Empty otherwise: today's challenge bytes, exactly."""
+        if self.frozen is None:
+            return {}
+        return {"deployment_id": self.frozen.deployment.id,
+                "manifest_digest": self.frozen.content_digest}
+
+
+def promotion_slot(
     conn: sqlite3.Connection, rec: StrategyRecord, *, data_dir: Path,
-) -> PromotionIdentity | None:
-    """The frozen branch of :func:`promotion_identity`; ``None`` for any other strategy.
-
-    Reads the deployment ledger first, so ``paper promote`` calls it in the slot Story 1.3c's
-    refusal held: a working-tree or legacy strategy passes untouched, with no hashing. A FROZEN
-    deployment's identity is its recorded descriptor, never the checkout: the descriptor is parsed
-    and its config strictly decoded (as the tick path does), then its bundle and environment are
-    verified offline by a FRESH verifier (no verdict cached from another promotion). Any failure
-    refuses with ``frozen_content_unavailable``/``frozen_content_unsupported`` before any
-    evaluation row, look count, token or stage change."""
+) -> PromotionSlot:
+    """Read the deployment ledger in the slot Story 1.3c's refusal held: a working-tree or legacy
+    strategy only records the epoch it saw, with no hashing. A FROZEN deployment's identity is its
+    recorded descriptor, never the checkout: the descriptor is parsed and its config strictly
+    decoded (as the tick path does), then its bundle and environment are verified offline by a
+    FRESH verifier (no verdict cached from another promotion). Any failure refuses with
+    ``frozen_content_unavailable``/``frozen_content_unsupported`` before any evaluation row, look
+    count, token or stage change."""
     deployment = SqliteStrategyRepository(conn).active_deployment(rec.id)
     if deployment is None or deployment.source_kind != "frozen":
-        return None
+        return PromotionSlot(None if deployment is None else deployment.id, None)
     manifest, _config = recorded_descriptor(deployment, rec.name)
     verifier = FrozenContentVerifier(data_dir)
     verifier.bundle(manifest.bundle, deployment_id=deployment.id)
     verifier.environment(manifest.environment, deployment_id=deployment.id)
-    return deployment, ArtifactIdentity(
-        manifest.code_hash, manifest.config_hash, manifest.dependency_hash)
+    identity = ArtifactIdentity(manifest.code_hash, manifest.config_hash, manifest.dependency_hash)
+    return PromotionSlot(
+        deployment.id, PromotionIdentity(deployment, identity, manifest.digest, _MINT))
 
 
 def promotion_identity(
-    conn: sqlite3.Connection, rec: StrategyRecord, *, data_dir: Path,
+    conn: sqlite3.Connection, rec: StrategyRecord, slot: PromotionSlot,
 ) -> PromotionIdentity:
-    """The ONE identity chokepoint of forward promotion (Story 1.3d §5): the active deployment
-    epoch and the identity the evidence, the evaluation row and the promotion are judged against.
-    Frozen: :func:`frozen_promotion_identity`. Working-tree: exactly the pre-1.3d checkout hash
-    and deployment-hash match; a legacy strategy has no epoch to evaluate."""
-    frozen = frozen_promotion_identity(conn, rec, data_dir=data_dir)
-    if frozen is not None:
-        return frozen
+    """The ONE identity chokepoint of forward promotion (Story 1.3d §5). Frozen: the slot's
+    verified identity, never re-read. Working-tree: exactly the pre-1.3d checkout hash and
+    deployment-hash match, but only for the epoch the slot read: an epoch that changed since (a
+    frozen epoch is always a new row) is refused before hashing and after the verified read, so
+    this never takes a frozen branch nobody authenticated. A legacy strategy has no epoch."""
+    if slot.frozen is not None:
+        return slot.frozen
+    repo = SqliteStrategyRepository(conn)
+    _require_slot_epoch(repo.active_deployment(rec.id), slot)
     identity = compute_artifact_hashes(rec.name)
-    deployment = SqliteStrategyRepository(conn).require_tick_deployment(rec.id)
+    deployment = repo.require_tick_deployment(rec.id)
     if deployment is None:
         raise DeploymentError("forward promotion requires one active deployment epoch")
+    _require_slot_epoch(deployment, slot)
     if (
         deployment.code_hash != identity.code_hash
         or deployment.config_hash != identity.config_hash
         or deployment.dependency_hash != identity.dependency_hash
     ):
         raise DeploymentError("active deployment identity does not match the working tree")
-    return deployment, identity
+    return PromotionIdentity(deployment, identity, None, _MINT)
+
+
+def _require_slot_epoch(deployment: DeploymentRecord | None, slot: PromotionSlot) -> None:
+    if (None if deployment is None else deployment.id) != slot.deployment_id:
+        raise DeploymentError("active deployment changed during forward promotion")
 
 
 def forward_promotion_preflight(
@@ -155,24 +197,22 @@ def run_forward_gate(
     calendar: SessionCalendar,
     now: datetime,
     activities_fetch: ActivitiesFetch,
-    deployment: DeploymentRecord,
-    identity: ArtifactIdentity,
+    promotion: PromotionIdentity,
 ) -> ForwardPromotionOutcome:
     """Assemble evidence -> evaluate -> record (pass AND fail) -> on pass from PAPER record AND
     promote in one transaction. At FORWARD_TESTED a passing run is the certificate refresh: a
     new row, no stage change.
 
-    ``(deployment, identity)`` come from :func:`promotion_identity`, resolved ONCE per promotion
-    (a frozen deployment's content is not re-verified here), and feed the evidence admissibility
-    filter, the evaluation row AND the transition's pinned hashes — they can never disagree. The
-    cheap re-check below binds them to this strategy's deployment row, so a direct caller can never
-    pair a frozen deployment with a checkout identity; the epoch must still be active."""
+    ``promotion`` can only come from :func:`promotion_identity`, which verified it once for this
+    promotion (nothing is re-verified here); its epoch and identity feed the evidence admissibility
+    filter, the evaluation row AND the transition's pinned hashes, so they can never disagree. A
+    value for another strategy is refused; evidence assembly refuses a no-longer-active epoch."""
+    if not isinstance(promotion, PromotionIdentity):
+        raise TypeError("run_forward_gate needs a PromotionIdentity from promotion_identity")
     rec = repo.get(name)
-    if deployment.strategy_id != rec.id or tuple(identity) != (
-        deployment.code_hash, deployment.config_hash, deployment.dependency_hash
-    ):
-        raise DeploymentError("promotion identity does not match the strategy's deployment")
-    deployment_id = deployment.id
+    if promotion.deployment.strategy_id != rec.id:
+        raise DeploymentError("promotion identity belongs to another strategy")
+    deployment_id, identity = promotion.deployment.id, promotion.identity
     asm = assemble_forward_evidence(
         conn, strategy_id=rec.id, name=name, deployment_id=deployment_id,
         identity=identity, calendar=calendar, now=now,

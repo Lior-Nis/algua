@@ -12,7 +12,11 @@ a new CLI invocation resolves the same stored artifact, and ``paper run`` refuse
 Story 1.3d (CAP-1, CAP-2): every frozen tick records exactly one successful Phase A and one
 successful Phase B ``frozen_invocations`` row, naming the tick's snapshot and the exact bars window
 ``run_tick`` fetched, each committed on a connection with no open transaction, and the tick row
-links the Phase B row. A working-tree tick links nothing.
+links the Phase B row. A working-tree tick links nothing. The tick and both rows name the snapshot
+the provider actually served the tick's bars from, on ``--snapshot`` and on ``--refresh``. The rows
+hold no authority-bearing copy (AC2): no broker credential, account id, bar row or filesystem path;
+``request_json`` is exactly the ``request.json`` the child read, and bars appear only as its
+``{file, rows, bars_digest}`` reference to the ``bars.arrow`` the child read.
 """
 from __future__ import annotations
 
@@ -31,12 +35,18 @@ import pytest
 from algua.backtest._sample import SyntheticProvider
 from algua.cli import paper_cmd
 from algua.cli.main import app
+from algua.config.settings import get_settings
 from algua.live.frozen_dispatch import FrozenPlanner
-from algua.live.frozen_wire import BOOTSTRAP
+from algua.live.frozen_wire import BARS_FILE, BOOTSTRAP, REQUEST_FILE
+from algua.live.frozen_wire_arrow import FLOAT_COLUMNS, decode_bars
+from algua.live.planner_binding import bars_digest
 from algua.primitives.timeparse import utc
 from algua.registry.frozen_view import FrozenStrategyView
 from algua.strategies.base import LoadedStrategy
 from tests._frozen_paper_world import (
+    ACCOUNT_ID,
+    API_KEY,
+    API_SECRET,
     CHECKOUT_MODULE,
     CODE_HASH,
     CONFIG_HASH,
@@ -206,6 +216,115 @@ def test_the_evidence_names_the_exact_bars_window_the_tick_fetched(world, monkey
     assert start.utcoffset() == end.utcoffset() == timedelta(0)
     for row in _invocations(world):
         assert (row["bars_start"], row["bars_end"]) == (start.isoformat(), end.isoformat())
+
+
+def _frozen_fetches(world) -> list[str | None]:
+    """The snapshot each frozen tick's bars were served from, in order: the frozen tenant fetches
+    its gate universe (the sibling fetches its own, disjoint one)."""
+    return [snapshot for snapshot, symbols in world.served if list(symbols) == GATE]
+
+
+def _assert_evidence_names_the_served_snapshots(world, resolved: list[str]) -> None:
+    """Tick by tick, the frozen tick row, its linked Phase B row and that request's Phase A row all
+    name the snapshot the provider actually served the tick's bars from; and that snapshot is the
+    one each command resolved (``resolved``, in tick order)."""
+    ticks, served = world.ticks(TENANT), _frozen_fetches(world)
+    assert len(ticks) == len(served)  # one bar fetch per frozen tick
+    for tick, snapshot in zip(ticks, served, strict=True):
+        [final] = world.rows("SELECT * FROM frozen_invocations WHERE id=?",
+                             tick["frozen_invocation_id"])
+        attempts = world.rows("SELECT * FROM frozen_invocations WHERE request_id=? ORDER BY id",
+                              final["request_id"])
+        assert [row["phase"] for row in attempts] == ["a", "b"]
+        assert tick["snapshot_id"] == snapshot
+        assert [row["snapshot_id"] for row in attempts] == [snapshot, snapshot]
+    assert len(_invocations(world)) == 2 * len(ticks)  # no attempt beyond the ticks' own
+    assert served == resolved
+
+
+def test_the_evidence_names_the_snapshot_the_provider_served_on_the_snapshot_path(world):
+    """``--snapshot``: ``trade-tick`` and ``run-all`` each select their provider for the snapshot
+    they are given, and the frozen tick and both of its invocation rows name the snapshot that
+    provider served the tick's bars from. Two distinct ids match each tick to its own."""
+    code, tick = world.trade_tick(snapshot="snap-trade")
+    cycle_code, cycle = world.run_all(snapshot="snap-cycle")
+
+    assert (code, cycle_code) == (0, 0), (tick, cycle)
+    assert world.provided == ["snap-trade", "snap-cycle"]
+    _assert_evidence_names_the_served_snapshots(world, ["snap-trade", "snap-cycle"])
+
+
+def test_the_evidence_names_the_refreshed_snapshot_the_provider_served(world, monkeypatch):
+    """``--refresh``: the cycle's snapshot is the one the refresh resolved (no command argument
+    names it); the provider is selected for it, and the frozen tick and both of its invocation rows
+    name the snapshot that provider served the tick's bars from."""
+    def refresh(symbols, *, end, min_rows, kind):
+        start = (date.fromisoformat(end) - timedelta(days=200)).isoformat()
+        return {"id": "snap-refreshed", "refreshed": True, "start": start, "end": end}
+
+    monkeypatch.setattr(paper_cmd, "refresh_lane_snapshot", refresh)
+
+    result = runner.invoke(app, ["paper", "run-all", "--refresh"])
+
+    assert result.exit_code == 0, result.stdout
+    assert json.loads(result.stdout)["snapshot"]["id"] == "snap-refreshed"
+    assert world.provided == ["snap-refreshed"]
+    _assert_evidence_names_the_served_snapshots(world, ["snap-refreshed"])
+
+
+def _shape(value: Any) -> tuple[set[str], int]:
+    """Every object key anywhere in a decoded JSON value, and its longest array's length."""
+    if isinstance(value, dict):
+        keys, longest = set(value), 0
+        children = list(value.values())
+    elif isinstance(value, list):
+        keys, longest = set(), len(value)
+        children = value
+    else:
+        return set(), 0
+    for child in children:
+        child_keys, child_longest = _shape(child)
+        keys |= child_keys
+        longest = max(longest, child_longest)
+    return keys, longest
+
+
+def test_the_evidence_holds_no_authority_bearing_copy(world):
+    """AC2 through the CLI and the real store: each stored row holds the request by its exact
+    bytes and everything else by reference or digest. No column contains the broker key or secret
+    (both set for the command), the account id (in hand while the tick ran) or a filesystem path;
+    every column but ``request_json`` is an id, flag, digest or timestamp. ``request_json`` is the
+    ``request.json`` the child read, byte for byte, and names the bars only by the ``{file, rows,
+    bars_digest}`` reference to the ``bars.arrow`` the child read: no bar column is a key anywhere
+    in it and no array in it is as long as the bar rows. (The port-level twin, over an in-memory
+    recorder, is ``_assert_sent`` in tests/test_frozen_attempt.py.)"""
+    settings = get_settings()
+    assert (settings.alpaca_api_key, settings.alpaca_api_secret) == (API_KEY, API_SECRET)
+
+    code, payload = world.trade_tick()
+
+    assert code == 0, payload
+    [tick] = world.ticks(TENANT)
+    assert tick["account_id"] == ACCOUNT_ID
+    rows = _invocations(world)
+    assert [row["phase"] for row in rows] == ["a", "b"] and len(world.sent) == 2
+    forbidden = (API_KEY, API_SECRET, ACCOUNT_ID, str(world.data_dir), str(world.bundle_root))
+    for row, sent in zip(rows, world.sent, strict=True):
+        assert set(sent) == {REQUEST_FILE, BARS_FILE}
+        assert row["request_json"] == sent[REQUEST_FILE].decode("utf-8")
+        assert row["request_sha256"] == hashlib.sha256(sent[REQUEST_FILE]).hexdigest()
+        assert row["bars_sha256"] == hashlib.sha256(sent[BARS_FILE]).hexdigest()
+        for column, value in row.items():
+            assert [text for text in forbidden if text in str(value)] == [], column
+            if column != "request_json":
+                assert value is None or isinstance(value, int) or len(value) <= 64, column
+        bars = decode_bars(sent[BARS_FILE])
+        request = json.loads(row["request_json"])
+        assert len(bars) > 0 and request["early"]["bars"] == {
+            "file": BARS_FILE, "rows": len(bars), "bars_digest": bars_digest(bars)}
+        keys, longest = _shape(request)
+        assert keys.isdisjoint({"timestamp", "symbol", *FLOAT_COLUMNS}), keys
+        assert longest < len(bars)
 
 
 def test_a_frozen_tick_without_a_snapshot_id_fails_before_dispatch(world):

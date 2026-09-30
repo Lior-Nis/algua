@@ -15,6 +15,11 @@ Recording evidence with a raw ``sqlite3.connect()`` is covered too: ``INSERT OR 
 resolve a conflict by deleting the old row without firing the delete trigger when
 ``recursive_triggers`` is OFF, so ``frozen_invocations_no_replace`` refuses any colliding insert
 before conflict resolution runs.
+
+Rows are permanent, so a recorder bug must not be able to write an impossible one: a success's
+``result_kind`` is checked against its phase, with the per-phase sets that
+``algua.contracts.frozen_evidence.PHASE_RESULT_KINDS`` names (tests tie the two, and the failure
+codes to ``FROZEN_FAILURE_CODES``).
 """
 from __future__ import annotations
 
@@ -32,9 +37,7 @@ CREATE TABLE IF NOT EXISTS frozen_invocations (
     request_sha256        TEXT CHECK (request_sha256 IS NULL OR length(request_sha256) = 64),
     bars_sha256           TEXT CHECK (bars_sha256 IS NULL OR length(bars_sha256) = 64),
     phase_a_binding       TEXT,
-    result_kind           TEXT CHECK (result_kind IS NULL OR result_kind IN (
-                              'early_no_decision', 'snapshot_required', 'risk_failure',
-                              'late_no_decision', 'decision')),
+    result_kind           TEXT,
     result_sha256         TEXT CHECK (result_sha256 IS NULL OR length(result_sha256) = 64),
     failure_code          TEXT CHECK (failure_code IS NULL OR failure_code IN (
                               'frozen_content_unavailable', 'frozen_content_unsupported',
@@ -52,6 +55,9 @@ CREATE TABLE IF NOT EXISTS frozen_invocations (
     ended_at              TEXT NOT NULL,
     CHECK ((result_sha256 IS NULL) <> (failure_code IS NULL)),
     CHECK ((result_sha256 IS NULL) = (result_kind IS NULL)),
+    CHECK (result_kind IS NULL
+           OR (phase = 'a' AND result_kind IN ('early_no_decision', 'snapshot_required'))
+           OR (phase = 'b' AND result_kind IN ('risk_failure', 'late_no_decision', 'decision'))),
     CHECK ((request_json IS NULL) = (request_sha256 IS NULL)),
     CHECK ((phase = 'b') = (phase_a_invocation_id IS NOT NULL)),
     CHECK (diagnostic IS NULL OR failure_code IS NOT NULL),

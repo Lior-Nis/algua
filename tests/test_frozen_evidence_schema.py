@@ -4,27 +4,38 @@ Every constraint is exercised against a database built by the repository's real 
 the ``frozen_invocations`` CHECKs, its append-only triggers (including both ``INSERT OR REPLACE``
 forms on a raw connection with ``recursive_triggers`` OFF), the Phase B trigger, the tick link
 triggers and index, link immutability, and the forward-only migration from a genuine v47 database.
+The CHECK vocabularies are tied to the code's: the failure codes to ``FROZEN_FAILURE_CODES`` and
+the per-phase result kinds to ``PHASE_RESULT_KINDS`` (and through it to the recorder's kinds), so
+a value added on one side only fails here.
 """
 from __future__ import annotations
 
 import hashlib
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from algua.contracts.frozen_evidence import ATTEMPT_RESULT_KINDS, PHASE_RESULT_KINDS
+from algua.live.frozen_attempt import _RESULT_KINDS as RECORDED_KINDS
+from algua.live.frozen_dispatch import FROZEN_FAILURE_CODES
+from algua.live.frozen_wire_result import _PHASE_KINDS as WIRE_PHASE_KINDS
 from algua.registry.db import SCHEMA_VERSION, connect, migrate
-from tests._frozen_evidence_helpers import seed_deployment
+from algua.registry.db.frozen_evidence import (
+    SCHEMA,
+    TICK_FROZEN_LINK_TRIGGER,
+    TICK_LINK_IMMUTABLE_TRIGGER,
+    TICK_LINK_INDEX,
+)
+from tests._frozen_evidence_helpers import attempt, seed_deployment
 
-FAILURE_CODES = (
-    "frozen_content_unavailable", "frozen_content_unsupported", "frozen_request_too_large",
-    "frozen_launch_failed", "frozen_timeout", "frozen_exit_abnormal", "frozen_output_exceeded",
-    "frozen_result_invalid", "frozen_planner_rejected", "frozen_live_unsupported",
-)
-RESULT_KINDS = (
-    "early_no_decision", "snapshot_required", "risk_failure", "late_no_decision", "decision",
-)
+PHASE_KIND_PAIRS = [(p, k) for p in ("a", "b") for k in sorted(PHASE_RESULT_KINDS[p])]
+FOREIGN_KIND_PAIRS = [
+    (p, k) for p in ("a", "b")
+    for k in [*sorted(ATTEMPT_RESULT_KINDS - PHASE_RESULT_KINDS[p]), "refused"]
+]
 APPEND_ONLY = "frozen invocation evidence is append-only"
 PHASE_B = "phase b must follow a successful phase a of the same tick"
 MUST_LINK = "a frozen tick must link its successful final invocation"
@@ -79,6 +90,15 @@ class World:
     def request_id(self) -> str:
         self._requests += 1
         return f"{self._requests:032x}"
+
+    def success(self, phase: str, result_kind: str) -> int:
+        """A successful ``phase`` row of ``result_kind``; a phase b row follows its phase a."""
+        rid = self.request_id()
+        if phase == "a":
+            return self.insert(request_id=rid, result_kind=result_kind)
+        a = self.insert(request_id=rid)
+        return self.insert(request_id=rid, phase="b", phase_a_invocation_id=a,
+                           result_kind=result_kind)
 
     def phase_a(self, **overrides: Any) -> int:
         return self.insert(**{"request_id": overrides.pop("request_id", None)
@@ -169,22 +189,71 @@ def test_request_json_is_bounded_in_bytes_not_characters(world):
              request_json="x" * 262145)
 
 
-@pytest.mark.parametrize("kind", RESULT_KINDS)
-def test_every_result_kind_in_the_vocabulary_is_accepted(world, kind):
-    world.phase_a(result_kind=kind)
+@pytest.mark.parametrize(("phase", "kind"), PHASE_KIND_PAIRS)
+def test_every_result_kind_is_accepted_for_its_phase(world, phase, kind):
+    world.success(phase, kind)
 
 
-def test_an_unknown_result_kind_is_refused(world):
-    _refused(world, "CHECK constraint failed", result_kind="refused")
+@pytest.mark.parametrize(("phase", "kind"), FOREIGN_KIND_PAIRS)
+def test_a_result_kind_its_phase_cannot_produce_is_refused(world, phase, kind):
+    """Rows are permanent, so neither the recorder's value nor the schema admits the shape."""
+    with pytest.raises(ValueError, match="result kind"):
+        attempt(phase=phase, phase_a_invocation_id=1 if phase == "b" else None,
+                result_kind=kind)
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        world.success(phase, kind)
+    world.conn.rollback()
 
 
-@pytest.mark.parametrize("code", FAILURE_CODES)
+@pytest.mark.parametrize("code", sorted(FROZEN_FAILURE_CODES))
 def test_every_failure_code_in_the_vocabulary_is_accepted(world, code):
     world.phase_a(**{**_FAILURE, "failure_code": code})
 
 
 def test_an_unknown_failure_code_is_refused(world):
     _refused(world, "CHECK constraint failed", **{**_FAILURE, "failure_code": "frozen_crashed"})
+
+
+# --- the code vocabularies are the schema's --------------------------------------------------
+
+
+def _in_list(prefix: str, ddl: str = SCHEMA) -> frozenset[str]:
+    """The quoted values of the one ``<prefix> IN (...)`` list in ``ddl``."""
+    lists = re.findall(prefix + r" IN \(([^)]*)\)", ddl)
+    assert len(lists) == 1, f"expected exactly one {prefix!r} IN list"
+    return frozenset(re.findall(r"'([^']*)'", lists[0]))
+
+
+def test_the_failure_code_check_is_frozen_failure_codes():
+    assert _in_list("failure_code IS NULL OR failure_code") == FROZEN_FAILURE_CODES
+
+
+@pytest.mark.parametrize("phase", ["a", "b"])
+def test_the_result_kind_check_is_the_contracts_kinds_for_each_phase(phase):
+    assert _in_list(f"phase = '{phase}' AND result_kind") == PHASE_RESULT_KINDS[phase]
+
+
+def test_the_result_kind_vocabularies_agree():
+    assert set(PHASE_RESULT_KINDS) == {"a", "b"}
+    assert ATTEMPT_RESULT_KINDS == PHASE_RESULT_KINDS["a"] | PHASE_RESULT_KINDS["b"]
+    assert frozenset(RECORDED_KINDS.values()) == ATTEMPT_RESULT_KINDS
+    for phase, kinds in PHASE_RESULT_KINDS.items():  # a success is a result its child may send
+        assert kinds <= WIRE_PHASE_KINDS[phase] - {"planner_rejected"}
+    # The triggers name kinds of the phase they check.
+    assert "a.result_kind = 'snapshot_required'" in SCHEMA
+    assert "snapshot_required" in PHASE_RESULT_KINDS["a"]
+    assert _in_list(r"i\.result_kind", TICK_FROZEN_LINK_TRIGGER) <= PHASE_RESULT_KINDS["b"]
+
+
+def test_the_contract_reproduces_the_ddl_verbatim():
+    """Contract §2 is the protected schema review; the code's DDL is its text exactly."""
+    contract = Path(__file__).resolve().parents[1] / (
+        "docs/development/specs/spec-story-1-3d-frozen-evidence-and-qualification/"
+        "frozen-evidence-contract.md")
+    table, tick_link = re.findall(r"```sql\n(.*?)```", contract.read_text(), re.S)[:2]
+    assert "\n" + table == SCHEMA
+    for statement in (TICK_LINK_INDEX, TICK_FROZEN_LINK_TRIGGER, TICK_LINK_IMMUTABLE_TRIGGER):
+        assert statement.strip() in tick_link
 
 
 @pytest.mark.parametrize("column", ["timed_out", "stdout_exceeded", "stderr_truncated"])
@@ -245,7 +314,7 @@ def test_only_a_phase_b_row_names_a_phase_a_row(world):
     _refused(world, "CHECK constraint failed", request_id=world.request_id(),
              phase_a_invocation_id=a)
     # A phase b row without its phase a id: the BEFORE INSERT trigger refuses it before the CHECK.
-    _refused(world, PHASE_B, request_id=world.request_id(), phase="b")
+    _refused(world, PHASE_B, request_id=world.request_id(), phase="b", result_kind="decision")
 
 
 def test_only_a_failure_carries_a_diagnostic(world):
@@ -335,7 +404,6 @@ def test_phase_b_without_its_phase_a_is_refused(world):
 @pytest.mark.parametrize("phase_a", [
     pytest.param(_FAILURE, id="failed"),
     pytest.param({"result_kind": "early_no_decision"}, id="settled-early"),
-    pytest.param({"result_kind": "risk_failure"}, id="risk-failure"),
 ])
 def test_phase_b_after_a_phase_a_that_did_not_require_a_snapshot_is_refused(world, phase_a):
     rid = world.request_id()
@@ -393,11 +461,11 @@ def test_a_frozen_tick_linking_a_failed_final_invocation_is_refused(world):
         world.tick(deployment_id=world.frozen, link=failed)
 
 
-@pytest.mark.parametrize("kind", ["early_no_decision", "risk_failure", "snapshot_required"])
-def test_a_frozen_tick_linking_a_non_decision_final_invocation_is_refused(world, kind):
+def test_a_frozen_tick_linking_a_risk_failure_final_invocation_is_refused(world):
+    """A breach is the only other success of a phase b attempt; it never writes a tick."""
     rid = world.request_id()
     a = world.phase_a(request_id=rid)
-    b = _phase_b(world, a, rid, result_kind=kind)
+    b = _phase_b(world, a, rid, result_kind="risk_failure")
     with pytest.raises(sqlite3.IntegrityError, match=MUST_LINK):
         world.tick(deployment_id=world.frozen, link=b)
 
