@@ -177,13 +177,21 @@ normative operations are equivalent to:
 uv venv --relocatable --python <exact-current-interpreter> --no-python-downloads <env>
 uv sync --project <private-build-input-root> --active --locked --no-dev --no-default-groups
   --no-editable --no-install-project --no-install-workspace --no-install-local --no-build
-  --no-python-downloads --link-mode copy --no-env-file --no-config --no-progress
+  --no-python-downloads --link-mode copy --no-config --no-progress
 ```
 
-The implementation must pin and test the exact argv supported by the repository's uv version; the
-semantic flags above may be reordered only if the environment key and golden contract vector change
-together. It supplies a scrubbed environment, sets `PYTHONDONTWRITEBYTECODE=1`, and does not expose
-operational credentials or the repository as an import root.
+`uv sync` has no env-file options and never reads `.env` files (only `uv run` does); the
+repository's uv 0.9.26 rejects `--no-env-file` for `sync`, so the sync argv omits it.
+
+The implementation must pin and test the exact argv supported by the repository's uv version. The
+keyed create and sync argv equal the block above token for token
+(`test_the_keyed_argv_is_exactly_the_normative_argv`), and a real offline dry run of the exact
+sync argv under the provisioning environment against the committed lock is part of the root gate
+(`test_the_installed_uv_runs_the_exact_keyed_argv_against_the_committed_lock`). Any change to the
+argv, including reordering, changes this block and the environment key together.
+
+Provisioning supplies a scrubbed environment, sets `PYTHONDONTWRITEBYTECODE=1`, and does not
+expose operational credentials or the repository as an import root.
 
 The committed lock is authoritative. Path, directory, workspace, editable, local archive, VCS or
 source-distribution-only dependencies are unsupported in this cycle. A compatible locked wheel may

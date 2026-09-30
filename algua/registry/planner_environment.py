@@ -45,7 +45,7 @@ SYNC_FLAGS = (
     "uv", "sync", "--project", "<private-build-input-root>", "--active", "--locked",
     "--no-dev", "--no-default-groups", "--no-editable", "--no-install-project",
     "--no-install-workspace", "--no-install-local", "--no-build", "--no-python-downloads",
-    "--link-mode", "copy", "--no-env-file", "--no-config", "--no-progress",
+    "--link-mode", "copy", "--no-config", "--no-progress",
 )
 _UV_VERSION_TIMEOUT_SECONDS = 30
 _UV_VERSION_OUTPUT_BYTES = 4096

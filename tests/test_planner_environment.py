@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -15,6 +17,7 @@ from algua.registry.planner_environment import (
     build_environment_key,
     current_interpreter_identity,
     inventory_environment,
+    materialize_argv,
     provision_environment,
     scrubbed_environment,
     validate_lock,
@@ -55,10 +58,51 @@ def test_normative_flags_exclude_project_resolution_and_links() -> None:
     for flag in (
         "--locked", "--no-dev", "--no-default-groups", "--no-editable",
         "--no-install-project", "--no-install-workspace", "--no-install-local",
-        "--no-build", "--no-python-downloads", "--no-env-file", "--no-config",
+        "--no-build", "--no-python-downloads", "--no-config",
     ):
         assert flag in SYNC_FLAGS
     assert SYNC_FLAGS[SYNC_FLAGS.index("--link-mode") + 1] == "copy"
+
+
+REPO = Path(__file__).resolve().parents[1]
+SPEC = REPO / (
+    "docs/development/specs/spec-story-1-3b-artifact-environment-contract/"
+    "artifact-environment-contract.md")
+
+
+def test_the_keyed_argv_is_exactly_the_normative_argv() -> None:
+    section = SPEC.read_text(encoding="utf-8").split("## Environment construction", 1)[1]
+    block = section.split("```text\n", 1)[1].split("```", 1)[0]
+    create, sync = block.split("\nuv sync ", 1)
+    assert tuple(create.replace("<env>", "<environment>").split()) == CREATE_FLAGS
+    assert ("uv", "sync", *sync.split()) == SYNC_FLAGS
+
+
+def test_the_installed_uv_runs_the_exact_keyed_argv_against_the_committed_lock(
+    tmp_path: Path,
+) -> None:
+    # A real offline dry run of the production argv under the production environment: uv parses
+    # every flag (conflicts included), checks the committed lock and plans the install, without
+    # network or installing anything. An argv uv refuses can never provision an environment.
+    uv = shutil.which("uv")
+    assert uv is not None, "frozen environment construction requires uv"
+    build_root, environment = tmp_path / "build", tmp_path / "environment"
+    (build_root / ".home").mkdir(parents=True)
+    for name in ("pyproject.toml", "uv.lock", ".python-version"):
+        (build_root / name).write_bytes((REPO / name).read_bytes())
+    env = scrubbed_environment(Path(uv).parent, home=build_root / ".home")
+    places = {"<exact-current-interpreter>": Path(sys.executable), "<environment>": environment,
+              "<private-build-input-root>": build_root}
+
+    for argv, extra_env in (
+        (CREATE_FLAGS, {}),
+        ((*SYNC_FLAGS, "--dry-run", "--offline"), {"VIRTUAL_ENV": str(environment)}),
+    ):
+        ran = subprocess.run(
+            [uv, *materialize_argv(argv, places)[1:]], cwd=build_root, env={**env, **extra_env},
+            capture_output=True, text=True, timeout=120, check=False)
+        assert ran.returncode == 0, ran.stderr
+    assert not list(environment.glob("lib/python*/site-packages/*.dist-info"))
 
 
 def test_scrubbed_environment_has_no_inherited_authority(monkeypatch: pytest.MonkeyPatch) -> None:
