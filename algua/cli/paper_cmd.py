@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import importlib
 import json
+import sqlite3
 import subprocess
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 
 import typer
@@ -86,13 +88,14 @@ from algua.observability import (
 from algua.operator.journal import JsonlJournal
 from algua.operator.mergeback import RealGitOps, merge_back_lock, run_merge_back
 from algua.primitives.timeparse import utc
-from algua.registry import allocations
+from algua.registry import allocations, approvals
 from algua.registry.allocations import active_allocation
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.db import registry_conn
 from algua.registry.forward_promotion import (
     forward_promotion_preflight,
-    refuse_frozen_promotion,
+    promotion_identity,
+    promotion_slot,
     run_forward_gate,
 )
 from algua.registry.frozen_runtime import (
@@ -112,6 +115,7 @@ from algua.registry.paper_runtime import still_paper_allocated as _still_paper_a
 from algua.registry.promote_run import promote_task
 from algua.registry.repository import StrategyNotFound
 from algua.registry.store import SqliteStrategyRepository
+from algua.registry.store.frozen_evidence import record_frozen_invocation
 from algua.research.forward_gates import (
     DEGRADATION_FACTOR,
     FORWARD_SHARPE_CONFIDENCE,
@@ -606,18 +610,28 @@ def merge_back(
     }))
 
 
-def _frozen_planner(tenant: PaperTenant) -> FrozenPlanner | None:
+def _frozen_planner(
+    conn: sqlite3.Connection, tenant: PaperTenant, snapshot_id: str | None,
+    bounds: tuple[datetime, datetime],
+) -> FrozenPlanner | None:
     """A FRESH frozen port for ONE tick of a frozen tenant, built from plain values (the port
-    never reaches the registry); ``None`` keeps a working-tree tenant on the in-process planner."""
+    never reaches the registry; its ``record`` is bound here to this tick's connection, Story 1.3d
+    §3); ``None`` keeps a working-tree tenant on the in-process planner. ``bounds`` are the exact
+    ones ``run_tick`` passes to ``get_bars``; the evidence names them and the snapshot."""
     if not isinstance(tenant, FrozenTenant):
         return None
+    if not snapshot_id:  # frozen_invocations.snapshot_id is NOT NULL: refuse before any dispatch
+        raise ValueError(f"{tenant.name}: a frozen tick needs a bars snapshot id")
     manifest, view = tenant.manifest, tenant.view
     identity = WireIdentity(tenant.name, tenant.deployment_id, tenant.artifact_id,
                             tenant.deployment.manifest_digest, manifest.bundle.digest,
                             manifest.environment.digest)
     target = FrozenTarget(identity, tenant.bundle_root, tenant.environment_root,
                           tenant.interpreter, view.execution, tuple(view.universe))
-    return FrozenPlanner(target, invocations_root=get_settings().data_dir / "frozen/invocations")
+    return FrozenPlanner(
+        target, invocations_root=get_settings().data_dir / "frozen/invocations",
+        record=partial(record_frozen_invocation, conn), snapshot_id=snapshot_id,
+        bars_start=bounds[0].isoformat(), bars_end=bounds[1].isoformat())
 
 
 def _run_paper_strategy_tick(  # noqa: PLR0913
@@ -638,6 +652,7 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
     phase dispatch, before any cancel, submit or downstream hook, is that tenant's setup error."""
     name, rec = tenant.name, tenant.rec
     strategy, deployment, identity = tenant.runtime
+    bounds = utc(start), utc(end)  # the exact get_bars bounds: run_tick's, and the evidence's
     try:
         alloc = active_allocation(conn, rec.id)
         if alloc is None:
@@ -665,6 +680,7 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
                 delete_paper_venue_order(conn, coid)
                 freshly_recorded.discard(coid)
 
+        port = _frozen_planner(conn, tenant, snapshot_id, bounds)
         hooks = TickHooks(
             client_order_id_for=client_order_id,
             before_submit=_before_submit,
@@ -680,7 +696,7 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
                 conn, name, allocation, bars, strategy.universe),
             live_positions=lambda: paper_believed_positions(conn, name),
             planner_context=planner_context_for_deployment(deployment, get_settings().exchange),
-            planner=_frozen_planner(tenant),
+            planner=port,
         )
     except (KeyboardInterrupt, SystemExit):
         raise
@@ -695,8 +711,8 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
     except Exception as exc:  # noqa: BLE001 - pre-side-effect setup fault: isolate ONE tenant
         raise StrategySetupError(name, exc) from exc
     try:
-        result = run_tick(strategy, broker, provider, utc(start), utc(end),
-                          hooks=hooks, max_drawdown=max_drawdown)
+        result = run_tick(strategy, broker, provider, *bounds, hooks=hooks,
+                          max_drawdown=max_drawdown)
     except FrozenTenantFailure as exc:  # bound to its code and deployment_id (§8)
         raise StrategySetupError(name, exc) from exc
     except TickHalted as exc:
@@ -751,7 +767,8 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
             code_hash=identity.code_hash, config_hash=identity.config_hash,
             dependency_hash=identity.dependency_hash, account_id=acct.account_id, cash=acct.cash,
             clock_source=clock_source, snapshot_id=snapshot_id,
-            deployment_id=(deployment.id if deployment is not None else None))
+            deployment_id=(deployment.id if deployment is not None else None),
+            frozen_invocation_id=None if port is None else port.final_invocation_id)
     audit_append(conn, actor="agent", action="trade_tick",
                  reason=f"{len(result.submitted)} orders submitted", strategy=name)
     return ok({
@@ -1197,24 +1214,30 @@ def promote(
     with registry_conn() as conn:
         repo = SqliteStrategyRepository(conn)
         rec = repo.get(name)  # StrategyNotFound -> JSON error before any work
-        # Story 1.3c §9: a frozen deployment is refused FIRST — before authentication or any
-        # checkout identity hashing — with frozen_qualification_pending (no gate, token or stage).
-        refuse_frozen_promotion(conn, rec.id)
+        # Story 1.3d §5: this ledger read is the ONE slot. A FROZEN deployment's identity is its
+        # recorded descriptor, whose content is verified fresh HERE, before authentication (a human
+        # signs it) and before any row, look, token or stage change. Working-tree and legacy
+        # strategies only record the epoch read and keep today's order and identity sites.
+        slot = promotion_slot(conn, rec, data_dir=get_settings().data_dir)
         # AUTHENTICATE the human actor (#329) BEFORE the relaxation guard is even consulted. A bare
         # `--actor human` is forgeable, so asserting a human actor here requires an SSH signature
         # (namespace algua-human-actor) over a fresh single-use challenge binding this command +
-        # strategy + RECOMPUTED artifact identity + the FULL ForwardGateCriteria (all 8 thresholds).
-        # No signature => a challenge is issued+printed and NOTHING runs. A declared agent is
-        # returned unchanged (the relaxation guard refuses its relaxations exactly as before).
+        # strategy + artifact identity + the FULL ForwardGateCriteria (all 8 thresholds), and for a
+        # frozen epoch its deployment id and manifest digest. No signature => a challenge is
+        # issued+printed and NOTHING runs. A declared agent is returned unchanged, never hashed
+        # (its relaxations are refused exactly as before).
         actor_enum = authenticate_actor(
             conn, command="paper promote", name=name, rec=rec,
             stage_to=Stage.FORWARD_TESTED.value, declared_actor=actor_enum,
             actor_signature=actor_signature,
+            identity=lambda: (approvals.compute_artifact_hashes(name) if slot.frozen is None
+                              else slot.frozen.identity),
             run_context=canonical_run_context({
                 "min_observations": min_observations, "min_coverage": min_coverage,
                 "degradation_factor": degradation_factor, "sharpe_floor": sharpe_floor,
                 "min_vol": min_vol, "max_drawdown": max_drawdown, "max_staleness": max_staleness,
                 "forward_sharpe_confidence": forward_sharpe_confidence,
+                **slot.challenge_binding(),
             }),
         )
         # PREFLIGHT: actor legality + relaxations-need-human + stage legality. Refuses here,
@@ -1224,7 +1247,8 @@ def promote(
         outcome = run_forward_gate(
             repo, conn, name=name, actor=actor_enum, criteria=criteria,
             calendar=get_calendar(), now=datetime.now(UTC),
-            activities_fetch=broker.account_activities_window)
+            activities_fetch=broker.account_activities_window,
+            promotion=promotion_identity(conn, rec, slot))
         audit_append(conn, actor=actor, action="paper_promote",
                      reason="pass" if outcome.decision.passed else "fail", strategy=name)
     payload = {

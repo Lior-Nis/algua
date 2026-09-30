@@ -54,8 +54,9 @@ EXTERNAL_CAPITAL_TYPES = frozenset({"CSD", "CSW", "TRANS", "JNLC", "JNLS", "ACAT
 _MAX_DECISION_LAG_SESSIONS = 2
 
 # Per-filter exclusion keys, IN EVALUATION ORDER (first matching filter wins the count).
-_EXCLUSION_FILTERS = ("deployment_mismatch", "local_clock", "identity_drift", "legacy_null",
-                      "bad_tick_ts", "no_decision", "bad_decision_ts", "stale_decision")
+_EXCLUSION_FILTERS = ("deployment_mismatch", "invocation_unlinked", "local_clock",
+                      "identity_drift", "legacy_null", "bad_tick_ts", "no_decision",
+                      "bad_decision_ts", "stale_decision")
 
 
 # (after_iso, until_iso) -> raw activity dicts; exhaustively paginated by the broker layer,
@@ -108,11 +109,14 @@ def _identity_matches(row: sqlite3.Row, identity: ArtifactIdentity) -> bool:
 
 def _inadmissible_reason(
     row: sqlite3.Row, deployment_id: int, identity: ArtifactIdentity,
-    calendar: SessionCalendar, now_utc: datetime,
+    calendar: SessionCalendar, now_utc: datetime, *, frozen: bool,
 ) -> str | None:
-    """The FIRST failing admissibility filter (spec order), or None for an admissible tick."""
+    """The FIRST failing admissibility filter (spec order), or None for an admissible tick. A
+    FROZEN deployment's tick must also link its successful final invocation (Story 1.3d §4)."""
     if row["deployment_id"] != deployment_id:
         return "deployment_mismatch"
+    if frozen and not row["invocation_linked"]:
+        return "invocation_unlinked"
     if row["clock_source"] != "broker":
         return "local_clock"
     if not _identity_matches(row, identity):
@@ -203,8 +207,9 @@ def assemble_forward_evidence(
     now_iso = now_utc.isoformat()
 
     deployment = conn.execute(
-        "SELECT activated_at FROM strategy_deployments"
-        " WHERE id=? AND strategy_id=? AND retired_at IS NULL",
+        "SELECT d.activated_at, a.source_kind FROM strategy_deployments d"
+        " JOIN deployment_artifacts a ON a.id=d.artifact_id"
+        " WHERE d.id=? AND d.strategy_id=? AND d.retired_at IS NULL",
         (deployment_id, strategy_id),
     ).fetchone()
     if deployment is None:
@@ -215,18 +220,26 @@ def assemble_forward_evidence(
     activated_iso = activated_at.isoformat()
 
     # 1-2. Fetch this deployment's complete post-activation epoch in id order; partition into
-    # admissible return observations vs integrity-only rows.
+    # admissible return observations vs integrity-only rows. `invocation_linked`: the tick links a
+    # successful final (phase b) invocation of its own deployment and snapshot (1.3c-era frozen
+    # ticks link nothing and never count).
+    frozen = deployment["source_kind"] == "frozen"
     rows = conn.execute(
-        "SELECT id, tick_ts, decision_ts, equity, reconcile_ok, clock_source, code_hash,"
-        " config_hash, dependency_hash, account_id, recorded_at, deployment_id"
-        " FROM tick_snapshots WHERE lane='paper' AND strategy_id=? AND deployment_id=?"
-        " AND recorded_at>=? ORDER BY id",
+        "SELECT t.id, t.tick_ts, t.decision_ts, t.equity, t.reconcile_ok, t.clock_source,"
+        " t.code_hash, t.config_hash, t.dependency_hash, t.account_id, t.recorded_at,"
+        " t.deployment_id, i.id IS NOT NULL AS invocation_linked FROM tick_snapshots t"
+        " LEFT JOIN frozen_invocations i ON i.id=t.frozen_invocation_id AND i.phase='b'"
+        " AND i.deployment_id=t.deployment_id AND i.snapshot_id=t.snapshot_id"
+        " AND i.result_kind IN ('decision', 'late_no_decision')"
+        " WHERE t.lane='paper' AND t.strategy_id=? AND t.deployment_id=?"
+        " AND t.recorded_at>=? ORDER BY t.id",
         (strategy_id, deployment_id, activated_iso),
     ).fetchall()
     excluded = dict.fromkeys(_EXCLUSION_FILTERS, 0)
     admissible: list[sqlite3.Row] = []
     for row in rows:
-        reason = _inadmissible_reason(row, deployment_id, identity, calendar, now_utc)
+        reason = _inadmissible_reason(
+            row, deployment_id, identity, calendar, now_utc, frozen=frozen)
         if reason is None:
             admissible.append(row)
         else:

@@ -48,6 +48,7 @@ from algua.risk import global_halt, kill_switch
 from algua.strategies.base import StrategyConfig, config_hash
 from algua.strategies.loader import _index, _loaded_for_test, load_tradable_strategy
 from tests._deployment_helpers import force_legacy_strategy, frozen_manifest
+from tests._frozen_evidence_helpers import record_final_invocation
 from tests._venv_fixture import SITE_PACKAGES, uv_like_venv
 
 DEP = "d" * 64
@@ -262,6 +263,9 @@ def test_frozen_tenant_never_imports_its_checkout_strategy_module(tmp_path):
 def test_frozen_tick_is_stamped_with_the_descriptor_identity(world):
     content, repo, _manifests, ids, data_dir = world
     tenant = _resolve(repo, "s", FrozenContentVerifier(content.store), data_dir)
+    # A frozen tick carries its final invocation link (Story 1.3d, the v48 tick trigger).
+    link = record_final_invocation(
+        repo.connection, deployment_id=tenant.deployment_id, snapshot_id="snap-1")
 
     def stamp(identity: ArtifactIdentity) -> None:
         record_tick_snapshot(
@@ -269,8 +273,8 @@ def test_frozen_tick_is_stamped_with_the_descriptor_identity(world):
             equity=1000.0, peak_equity=1000.0, positions={}, n_submitted=0, reconcile_ok=True,
             lane="paper", strategy_id=tenant.strategy_id, code_hash=identity.code_hash,
             config_hash=identity.config_hash, dependency_hash=identity.dependency_hash,
-            account_id="paper", cash=1000.0, clock_source="broker",
-            deployment_id=tenant.deployment_id)
+            account_id="paper", cash=1000.0, clock_source="broker", snapshot_id="snap-1",
+            deployment_id=tenant.deployment_id, frozen_invocation_id=link)
 
     stamp(tenant.identity)
     row = repo.connection.execute(

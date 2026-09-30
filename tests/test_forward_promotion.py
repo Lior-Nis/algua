@@ -9,6 +9,7 @@ because the writer refuses to produce them — exactly the adversarial shapes th
 """
 import json
 from datetime import UTC, date, datetime, timedelta, timezone
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -30,6 +31,8 @@ from algua.registry.forward_evidence import (
 from algua.registry.forward_promotion import (
     forward_promotion_preflight,
     guard_forward_relaxations,
+    promotion_identity,
+    promotion_slot,
     run_forward_gate,
 )
 from algua.registry.repository import ArtifactIdentity
@@ -43,7 +46,7 @@ IDENT = ArtifactIdentity(code_hash="c", config_hash="g", dependency_hash="d")
 
 EXCLUSION_KEYS = {"local_clock", "identity_drift", "legacy_null", "bad_tick_ts",
                   "no_decision", "bad_decision_ts", "stale_decision",
-                  "deployment_mismatch"}
+                  "deployment_mismatch", "invocation_unlinked"}
 
 
 class FakeCalendar:
@@ -890,9 +893,12 @@ def _seed_passing_window(conn):
 
 
 def _run(repo, conn, *, actor=Actor.AGENT, criteria=None):
+    # The working-tree identity through the same chokepoint `paper promote` resolves it with.
+    rec = repo.get("s")
+    promotion = promotion_identity(conn, rec, promotion_slot(conn, rec, data_dir=Path("unused")))
     return run_forward_gate(
         repo, conn, name="s", actor=actor, criteria=criteria or ForwardGateCriteria(),
-        calendar=CAL, now=NOW, activities_fetch=lambda a, u: [])
+        calendar=CAL, now=NOW, activities_fetch=lambda a, u: [], promotion=promotion)
 
 
 def test_run_forward_gate_pass_from_paper_promotes_and_consumes(conn, repo, monkeypatch):

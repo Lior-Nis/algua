@@ -269,6 +269,10 @@ data, no non-finite number, no boolean where a number is expected. It must echo 
 
 ## 9. Promotion and live refusal (CAP-5)
 
+> Superseded by Story 1.3d §5: frozen promotion is qualified through linked evidence;
+> `frozen_qualification_pending` was removed. The live refusal stands. See the
+> [Story 1.3d contract](../spec-story-1-3d-frozen-evidence-and-qualification/frozen-evidence-contract.md).
+
 - `paper promote NAME` and the forward gate check the active deployment first, before actor
   authentication or any checkout identity hashing. A `frozen` deployment exits nonzero with
   `frozen_qualification_pending` before gate evaluation, token minting or stage change.

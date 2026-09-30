@@ -52,6 +52,9 @@ while the current supervisor keeps every authority, risk control and broker effe
   success: Until Story 1.3d, `paper promote` refuses every frozen deployment with
     `frozen_qualification_pending` before any gate evaluation, token use or stage change, and the
     live lane refuses to tick a frozen deployment.
+  superseded: The promotion refusal is superseded by Story 1.3d §5 (frozen promotion is qualified
+    through linked evidence; `frozen_qualification_pending` was removed). The live refusal stands.
+    See [the Story 1.3d contract](../spec-story-1-3d-frozen-evidence-and-qualification/frozen-evidence-contract.md).
 
 ## Constraints
 
@@ -87,5 +90,6 @@ while the current supervisor keeps every authority, risk control and broker effe
 A candidate admitted after this story runs in paper from its verified frozen bundle and environment
 through two fresh child processes per decision tick; its results and effects match the in-process
 planner on the parity fixtures; every named failure isolates the tenant with a stable code; frozen
-promotion is refused with `frozen_qualification_pending`; working-tree and legacy tenants behave
-exactly as before; and the full repository gate passes.
+promotion is refused with `frozen_qualification_pending` (superseded by Story 1.3d §5: frozen
+promotion is qualified through linked evidence; `frozen_qualification_pending` was removed);
+working-tree and legacy tenants behave exactly as before; and the full repository gate passes.

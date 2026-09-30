@@ -9,7 +9,9 @@ ALTER -- reversing it is provably benign (byte-identical schema, full registry/m
 test set passes, a legacy-shaped table migrates cleanly, and the trigger still fires correctly),
 but the ALTER-then-trigger order is kept anyway as the more conservative default; see the
 rationale in family.py. The only cross-context coupling is the single ``executescript(SCHEMA)``
-barrier that every later step depends on.
+barrier that every later step depends on, plus the v48 tick link (frozen_evidence.py): its index
+must follow the frozen_invocation_id ALTER (hard), and its triggers follow every tick_snapshots
+ALTER whose column they name (defensive, as above).
 
 It stays whole for a stronger reason: it is the single auditable place where the whole ordered
 sequence is visible at once. The one historical production ordering bug -- the GATE-2 finding
@@ -24,6 +26,7 @@ from datetime import UTC, datetime
 from algua.registry.db._util import _add_missing_columns
 from algua.registry.db.constants import SCHEMA_VERSION
 from algua.registry.db.core import _migrate_shortlisted_to_candidate
+from algua.registry.db.frozen_evidence import TICK_LINK_COLUMN, TICK_LINK_STATEMENTS
 from algua.registry.db.gate import _backfill_fdr_cohorts, _relabel_fdr_cohorts_for_current_size
 from algua.registry.db.holdout import _backfill_holdout_intervals
 from algua.registry.db.knowledge import _rebuild_negative_results_if_stale
@@ -278,5 +281,11 @@ def migrate(conn: sqlite3.Connection) -> None:
             "INSERT INTO deployment_migrations(id, legacy_cohort_captured_at) VALUES (1,?)",
             (marked_at,),
         )
+    # v48 (Story 1.3d): the tick -> final frozen invocation link. Existing ticks stay NULL (1.3c-era
+    # frozen ticks never count; no backfill). Index and triggers reference the column, so they run
+    # after the ALTER (the family_members precedent); the DDL lives in db/frozen_evidence.py.
+    _add_missing_columns(conn, "tick_snapshots", TICK_LINK_COLUMN)
+    for statement in TICK_LINK_STATEMENTS:
+        conn.execute(statement)
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()

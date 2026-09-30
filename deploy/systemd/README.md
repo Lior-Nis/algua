@@ -111,6 +111,32 @@ per-invocation-path, not per-command: a HUMAN running `paper merge-back` directl
 `paper merge-back` while a paper tick may fire (every 20 minutes; in practice, the hours right
 after the US close, when the session is newly complete and the tick has not yet recorded it).
 
+## Schema v48 (Story 1.3d) is forward-only
+
+Story 1.3d's registry schema (v48) adds the append-only `frozen_invocations` table, the
+`tick_snapshots.frozen_invocation_id` column and triggers that refuse a frozen deployment's tick
+unless it links that tick's successful final planner invocation. Rolling back to pre-1.3d code on a
+v48 database leaves all of this in place (the older `migrate()` re-stamps `user_version` but drops
+nothing), and that code never writes the link. Any frozen deployment's tick would then be refused
+by `tick_snapshots_frozen_link` **after that tenant's orders are sent**, aborting `run-all`. Legacy
+and working-tree ticks are unaffected.
+
+So before any rollback, do one of:
+
+- **Retire every frozen deployment.** `algua registry transition <name> --to retired` retires the
+  strategy's active deployment. List the strategies that have one with:
+
+  ```sql
+  SELECT s.name FROM strategy_deployments d
+  JOIN deployment_artifacts x ON x.id = d.artifact_id
+  JOIN strategies s ON s.id = d.strategy_id
+  WHERE x.source_kind = 'frozen' AND d.retired_at IS NULL;
+  ```
+
+- **Drop the trigger:** `DROP TRIGGER tick_snapshots_frozen_link;` on the registry database.
+  Frozen ticks written without it carry no link and never count as forward evidence. Redeploying
+  Story 1.3d code recreates the trigger (its `migrate()` is idempotent).
+
 ## Why the wrapper, not just the timer
 
 **Calendar gate.** The timer fires every calendar day at a fixed wall-clock time, but the market is

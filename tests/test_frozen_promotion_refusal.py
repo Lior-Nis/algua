@@ -1,42 +1,72 @@
-"""Story 1.3c §9 (CAP-5): a frozen deployment cannot be forward-qualified before Story 1.3d.
+"""Story 1.3d §5 (CAP-4): the frozen promotion chokepoint and the refusals that remain.
 
-`paper promote` and the forward gate read the strategy's ACTIVE deployment FIRST. A frozen one is
-refused with the stable, non-retryable `frozen_qualification_pending` before actor authentication,
-checkout identity hashing, gate evaluation, token minting or any stage change. Working-tree and
-legacy strategies keep today's path exactly.
+`paper promote` reads the strategy's ACTIVE deployment in the slot where Story 1.3c refused a frozen
+one. A frozen deployment's identity now comes from its recorded descriptor, verified there, before
+actor authentication: content that does not verify (here, a synthetic descriptor whose bundle was
+never published) refuses with `frozen_content_unavailable` before authentication, checkout identity
+hashing, gate evaluation, token minting or any stage change. `frozen_qualification_pending` is gone.
+Working-tree and legacy strategies keep today's order and identity sites exactly.
+
+The raw `registry transition` edge to `forward_tested` still refuses a frozen deployment (as
+`wrong_stage`: `paper promote` is the only way in), and go-live keeps `frozen_live_unsupported`.
 
 The frozen fixture is admitted through the REAL `intake_candidate_to_paper` primitive with a
-canonical frozen descriptor, so the refusal is exercised against a genuine `source_kind='frozen'`
-ledger row rather than a hand-written one.
+canonical frozen descriptor, so every refusal is exercised against a genuine `source_kind='frozen'`
+ledger row rather than a hand-written one. Promotion SUCCESS from linked evidence, and the refusals
+of corrupt, replaced and permission-drifted content, are in tests/test_frozen_promotion.py.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
 
-from algua.cli.errors import error_code, is_retryable
+from algua.cli.errors import _registry
 from algua.cli.main import app
 from algua.config.settings import get_settings
-from algua.contracts.lifecycle import Actor, Stage
-from algua.registry.artifact_errors import FrozenQualificationPending
+from algua.contracts.lifecycle import Actor, Stage, TransitionError
+from algua.registry import artifact_errors
 from algua.registry.artifact_recording import frozen_deployment_manifest
 from algua.registry.db import connect, migrate
-from algua.registry.forward_promotion import refuse_frozen_promotion, run_forward_gate
+from algua.registry.deployment import DeploymentError
+from algua.registry.forward_promotion import (
+    PromotionIdentity,
+    PromotionSlot,
+    promotion_identity,
+    promotion_slot,
+    run_forward_gate,
+)
+from algua.registry.frozen_runtime import FrozenContentVerifier
+from algua.registry.frozen_tenant_errors import FrozenContentUnavailable
 from algua.registry.repository import ArtifactIdentity
 from algua.registry.store import SqliteStrategyRepository
 from algua.research.forward_gates import ForwardGateCriteria
+from algua.strategies.base import config_hash
+from algua.strategies.loader import _loaded_for_test
 from tests._deployment_helpers import force_legacy_strategy, frozen_manifest
+from tests.test_frozen_runtime import _config, _recorded
 
 runner = CliRunner()
 
 NAME = "frozen_s"
-IDENTITY = ArtifactIdentity("b" * 32, "c" * 32, "d" * 64)
-CONFIG = {"name": NAME, "universe": ["AAPL"], "params": {"lookback": 20}}
+_STRATEGY_CONFIG = _config(NAME)
+CONFIG = _recorded(_STRATEGY_CONFIG)  # decodable, so the refusal is the (unpublished) content
+IDENTITY = ArtifactIdentity(
+    "b" * 32, config_hash(_loaded_for_test(_STRATEGY_CONFIG)), "d" * 64)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_store(monkeypatch, tmp_path):
+    """The content store the chokepoint verifies against: empty, so the synthetic descriptor's
+    bundle is never found (conftest isolates the registry, not the data dir)."""
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path / "data"))
 
 
 def _registry_conn() -> sqlite3.Connection:
@@ -89,6 +119,45 @@ def _admit_frozen(conn: sqlite3.Connection, name: str = NAME) -> int:
     return rec.id
 
 
+WT_IDENTITY = ArtifactIdentity("c", "g", "d")
+
+
+def _working_tree_strategy(conn: sqlite3.Connection, name: str):
+    """A paper strategy with one active working-tree deployment of ``WT_IDENTITY``."""
+    repo = SqliteStrategyRepository(conn)
+    rec = repo.add(name)
+    gate_id = repo.record_gate_evaluation(
+        rec.id, passed=True, n_funnel=1, own_lifetime_combos=1, windowed_total_combos=1,
+        funnel_window_days=90, breadth_provenance="measured", pit_ok=True,
+        pit_override=False, holdout_n_bars=63, min_holdout_observations=63,
+        code_hash=WT_IDENTITY.code_hash, config_hash=WT_IDENTITY.config_hash,
+        dependency_hash=WT_IDENTITY.dependency_hash, data_source="test", snapshot_id="snap",
+        period_start="2024-01-01", period_end="2024-12-31", holdout_frac=0.2, actor="human",
+        decision_json="{}", universe_name="u")
+    artifact_id = conn.execute(
+        "INSERT INTO deployment_artifacts(manifest_digest, manifest_json, code_hash,"
+        " config_hash, dependency_hash, resolved_config_json, universe_name,"
+        " environment_digest, python_implementation, python_version, abi_tag, platform_tag,"
+        " planner_protocol_version, source_kind, source_ref, asset_digests_json, created_at)"
+        " VALUES (?,'{}',?,?,?,'{}','u','e','CPython','3.12','abi','platform',1,"
+        " 'working_tree','ref','[]','t')", (f"wt-{name}", *WT_IDENTITY)).lastrowid
+    conn.execute(
+        "INSERT INTO strategy_deployments(strategy_id, artifact_id, research_gate_id,"
+        " activated_at) VALUES (?,?,?,'2025-01-01T00:00:00+00:00')",
+        (rec.id, artifact_id, gate_id))
+    conn.execute("UPDATE strategies SET stage='paper' WHERE id=?", (rec.id,))
+    conn.commit()
+    return repo.get(name)
+
+
+def _stop(label: str, calls: list[str] | None = None):
+    def _fn(*_args, **_kwargs):
+        if calls is not None:
+            calls.append(label)
+        raise RuntimeError(f"stop at {label}")
+    return _fn
+
+
 def _snapshot(conn: sqlite3.Connection, strategy_id: int) -> dict:
     """Every row a promotion attempt could leave behind."""
     def count(sql: str, *args) -> int:
@@ -137,56 +206,97 @@ class _Spies:
 
 
 # ---------------------------------------------------------------------------
-# The stable code
+# The retired code
 # ---------------------------------------------------------------------------
 
-def test_frozen_qualification_pending_is_a_stable_non_retryable_code():
-    exc = FrozenQualificationPending()
-    assert error_code(exc) == "frozen_qualification_pending"
-    assert is_retryable("frozen_qualification_pending") is False
-    assert "frozen" in str(exc)
+def test_frozen_qualification_pending_is_gone():
+    assert not hasattr(artifact_errors, "FrozenQualificationPending")
+    assert "frozen_qualification_pending" not in {code for _typ, code in _registry()}
+    envelope_doc = Path(__file__).resolve().parents[1] / "docs/contracts/cli-error-envelope.md"
+    assert "frozen_qualification_pending" not in envelope_doc.read_text()
 
 
 # ---------------------------------------------------------------------------
-# `paper promote` (the CLI entry point)
+# `paper promote` (the CLI entry point): the chokepoint runs first for a frozen deployment
 # ---------------------------------------------------------------------------
 
-def test_paper_promote_refuses_a_frozen_deployment_before_any_work(monkeypatch):
+@pytest.mark.parametrize("actor", ["agent", "human"])
+def test_paper_promote_verifies_frozen_content_before_any_work(monkeypatch, actor):
+    """The synthetic descriptor's bundle was never published: the fresh verification refuses in
+    the chokepoint slot, before authentication (a human gets no challenge, which would bind an
+    unverified identity), preflight, broker, evidence, evaluation, token or stage change."""
     with closing(_registry_conn()) as conn:
         sid = _admit_frozen(conn)
         before = _snapshot(conn, sid)
+        deployment_id = SqliteStrategyRepository(conn).active_deployment(sid).id
     spies = _Spies(monkeypatch)
 
-    result = runner.invoke(app, ["paper", "promote", NAME])
+    result = runner.invoke(app, ["paper", "promote", NAME, "--actor", actor])
 
     assert result.exit_code == 1, result.stdout
     payload = json.loads(result.stdout)
     assert payload["ok"] is False
-    assert payload["code"] == "frozen_qualification_pending"
+    assert payload["code"] == "frozen_content_unavailable"
+    assert payload["deployment_id"] == deployment_id
     assert payload["retryable"] is False
+    assert payload.get("action") != "human_actor_challenge"
     assert spies.calls == []
     with closing(_registry_conn()) as conn:
         after = _snapshot(conn, sid)
     assert after == before
-    assert after["stage"] == "paper" and after["forward_rows"] == 0
+    assert after["stage"] == "paper" and after["forward_rows"] == 0 and after["challenges"] == 0
 
 
-def test_paper_promote_human_refusal_precedes_the_challenge(monkeypatch):
-    """A declared human is refused BEFORE authentication: no challenge is issued or persisted
-    (issuing one would first hash the checkout)."""
+def test_paper_promote_working_tree_order_and_identity_site_are_unchanged(monkeypatch):
+    """A working-tree strategy is hashed from the checkout exactly where it always was: after
+    authentication, preflight and broker construction, immediately before the gate. The frozen
+    chokepoint never runs for it."""
+    order: list[str] = []
     with closing(_registry_conn()) as conn:
-        sid = _admit_frozen(conn)
-        before = _snapshot(conn, sid)
+        rec = _working_tree_strategy(conn, "wt_order")
 
-    result = runner.invoke(app, ["paper", "promote", NAME, "--actor", "human"])
+    import algua.cli.paper_cmd as paper_cmd
+    import algua.registry.forward_promotion as forward_promotion
+
+    real_auth = paper_cmd.authenticate_actor
+    real_preflight = paper_cmd.forward_promotion_preflight
+
+    def auth(*args, **kwargs):
+        order.append("authenticate")
+        return real_auth(*args, **kwargs)
+
+    def preflight(*args, **kwargs):
+        order.append("preflight")
+        return real_preflight(*args, **kwargs)
+
+    class _Broker:
+        def account_activities_window(self, after, until):
+            return []
+
+    def broker():
+        order.append("broker")
+        return _Broker()
+
+    def hashes(name):
+        order.append("checkout_identity")
+        return WT_IDENTITY
+
+    def verifier(*_args, **_kwargs):
+        raise AssertionError("a working-tree promotion never touches frozen content")
+
+    monkeypatch.setattr(paper_cmd, "authenticate_actor", auth)
+    monkeypatch.setattr(paper_cmd, "forward_promotion_preflight", preflight)
+    monkeypatch.setattr(paper_cmd, "_alpaca_broker_from_settings", broker)
+    monkeypatch.setattr(forward_promotion, "compute_artifact_hashes", hashes)
+    monkeypatch.setattr(forward_promotion, "FrozenContentVerifier", verifier)
+    monkeypatch.setattr(
+        "algua.registry.deployment.verify_working_tree_manifest", lambda manifest, repo_root: None)
+    monkeypatch.setattr(forward_promotion, "assemble_forward_evidence", _stop("assemble", order))
+
+    result = runner.invoke(app, ["paper", "promote", rec.name])
 
     assert result.exit_code == 1, result.stdout
-    payload = json.loads(result.stdout)
-    assert payload["code"] == "frozen_qualification_pending"
-    assert payload.get("action") != "human_actor_challenge"
-    with closing(_registry_conn()) as conn:
-        after = _snapshot(conn, sid)
-    assert after == before and after["challenges"] == 0
+    assert order == ["authenticate", "preflight", "broker", "checkout_identity", "assemble"]
 
 
 def test_paper_promote_legacy_strategy_path_is_unchanged(monkeypatch):
@@ -215,56 +325,264 @@ def test_paper_promote_legacy_strategy_path_is_unchanged(monkeypatch):
     assert "requires one active deployment epoch" in payload["error"]
 
 
+def _swap_epoch(conn: sqlite3.Connection, strategy_id: int, *, frozen: bool) -> int:
+    """Retire ``strategy_id``'s active epoch and activate a successor under a new research gate:
+    a FROZEN descriptor (whose bundle was never published), or the SAME working-tree artifact.
+    Returns the successor's id."""
+    old = conn.execute("SELECT id, artifact_id FROM strategy_deployments"
+                       " WHERE strategy_id=? AND retired_at IS NULL", (strategy_id,)).fetchone()
+    artifact_id = old["artifact_id"]
+    if frozen:
+        fields = dataclasses.asdict(frozen_deployment_manifest(frozen_manifest(
+            code_hash=IDENTITY.code_hash, config_hash=IDENTITY.config_hash,
+            dependency_hash=str(IDENTITY.dependency_hash), resolved_config=CONFIG,
+            universe_name="liquid-us")))
+        artifact_id = conn.execute(
+            f"INSERT INTO deployment_artifacts({', '.join(fields)}, created_at)"
+            f" VALUES ({', '.join('?' * len(fields))}, 't')", tuple(fields.values())).lastrowid
+    gate_id = SqliteStrategyRepository(conn).record_gate_evaluation(
+        strategy_id, passed=True, n_funnel=1, own_lifetime_combos=1, windowed_total_combos=1,
+        funnel_window_days=90, breadth_provenance="measured", pit_ok=True, pit_override=False,
+        holdout_n_bars=63, min_holdout_observations=63, code_hash=WT_IDENTITY.code_hash,
+        config_hash=WT_IDENTITY.config_hash, dependency_hash=WT_IDENTITY.dependency_hash,
+        data_source="test", snapshot_id="snap-2", period_start="2024-01-01",
+        period_end="2024-12-31", holdout_frac=0.2, actor="human", decision_json="{}",
+        universe_name="u")
+    conn.execute("UPDATE strategy_deployments SET retired_at='2026-01-01T00:00:00+00:00'"
+                 " WHERE id=?", (old["id"],))
+    successor = conn.execute(
+        "INSERT INTO strategy_deployments(strategy_id, artifact_id, research_gate_id,"
+        " activated_at) VALUES (?,?,?,'2026-01-01T00:00:00+00:00')",
+        (strategy_id, artifact_id, gate_id)).lastrowid
+    conn.commit()
+    assert successor is not None and successor != old["id"]
+    return int(successor)
+
+
+@pytest.mark.parametrize("successor", ["frozen", "working_tree"])
+def test_paper_promote_refuses_an_epoch_changed_after_the_slot(monkeypatch, successor):
+    """The slot read a working-tree epoch; the epoch then changes mid-command, after
+    authentication. The later working-tree resolution never takes a frozen branch (verifying content
+    nobody authenticated) and never follows a replaced epoch: it refuses as epoch drift before any
+    checkout hash, content verification, evidence or row."""
+    import algua.cli.paper_cmd as paper_cmd
+    import algua.registry.forward_promotion as forward_promotion
+
+    with closing(_registry_conn()) as conn:
+        rec = _working_tree_strategy(conn, NAME)
+        before = _snapshot(conn, rec.id)
+    calls: list[str] = []
+    real_preflight = paper_cmd.forward_promotion_preflight
+
+    def preflight(repo, *args, **kwargs):
+        out = real_preflight(repo, *args, **kwargs)
+        _swap_epoch(repo.connection, rec.id, frozen=successor == "frozen")
+        return out
+
+    class _Broker:
+        def account_activities_window(self, after, until):
+            return []
+
+    monkeypatch.setattr(paper_cmd, "forward_promotion_preflight", preflight)
+    monkeypatch.setattr(paper_cmd, "_alpaca_broker_from_settings", _Broker)
+    monkeypatch.setattr(
+        forward_promotion, "compute_artifact_hashes", _stop("checkout_identity", calls))
+    monkeypatch.setattr(forward_promotion, "FrozenContentVerifier", _stop("content", calls))
+    monkeypatch.setattr(
+        "algua.registry.deployment.verify_working_tree_manifest", lambda manifest, repo_root: None)
+    monkeypatch.setattr(forward_promotion, "assemble_forward_evidence", _stop("assemble", calls))
+
+    result = runner.invoke(app, ["paper", "promote", NAME])
+
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["code"] == "invalid_input" and payload["retryable"] is False
+    assert payload["error"] == "active deployment changed during forward promotion"
+    assert calls == []
+    with closing(_registry_conn()) as conn:
+        assert _snapshot(conn, rec.id) == before
+
+
+# The pre-1.3d `paper promote` run context for the default thresholds (canonical JSON).
+GOLDEN_RUN_CONTEXT = (
+    '{"degradation_factor":0.5,"forward_sharpe_confidence":0.95,"max_drawdown":0.25,'
+    '"max_staleness":5,"min_coverage":0.9,"min_observations":63,"min_vol":0.02,'
+    '"sharpe_floor":0.3}')
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_working_tree_and_legacy_human_challenges_keep_todays_bytes(monkeypatch, legacy):
+    """Only a FROZEN challenge binds its epoch: a working-tree or legacy challenge is byte-for-byte
+    the pre-1.3d encoding (checkout hashes plus exactly the eight thresholds)."""
+    with closing(_registry_conn()) as conn:
+        if legacy:
+            repo = SqliteStrategyRepository(conn)
+            force_legacy_strategy(conn, repo.add("legacy_challenge").id)
+            rec = repo.get("legacy_challenge")
+        else:
+            rec = _working_tree_strategy(conn, "wt_challenge")
+    monkeypatch.setattr("algua.registry.approvals.compute_artifact_hashes", lambda n: WT_IDENTITY)
+
+    result = runner.invoke(app, ["paper", "promote", rec.name, "--actor", "human"])
+
+    assert result.exit_code == 0, result.stdout
+    issued = json.loads(result.stdout)
+    assert issued["action"] == "human_actor_challenge"
+    assert issued["challenge"] == "\n".join([
+        "algua-human-actor", "command=paper promote", f"strategy={rec.name}",
+        f"strategy_id={rec.id}", "stage_from=paper", "stage_to=forward_tested", "code_hash=c",
+        "config_hash=g", "dependency_hash=d", f"run_context={GOLDEN_RUN_CONTEXT}",
+        f"nonce={issued['nonce']}", f"expires_at={issued['expires_at']}"])
+
+
 # ---------------------------------------------------------------------------
-# The forward gate (defense in depth: direct callers are refused too)
+# The chokepoint and the forward gate (direct callers)
 # ---------------------------------------------------------------------------
 
-def test_run_forward_gate_refuses_a_frozen_deployment_directly(monkeypatch):
+def test_promotion_identity_keeps_the_working_tree_and_legacy_paths(monkeypatch):
+    hashed: list[str] = []
+    monkeypatch.setattr(
+        "algua.registry.forward_promotion.compute_artifact_hashes",
+        lambda name: hashed.append(name) or WT_IDENTITY)
+    monkeypatch.setattr(
+        "algua.registry.deployment.verify_working_tree_manifest", lambda manifest, repo_root: None)
+    with closing(_registry_conn()) as conn:
+        repo = SqliteStrategyRepository(conn)
+        rec = _working_tree_strategy(conn, "working_tree_s")
+        slot = promotion_slot(conn, rec, data_dir=Path("/nonexistent"))
+        assert slot == PromotionSlot(repo.active_deployment(rec.id).id, None)
+        assert slot.challenge_binding() == {}
+        promotion = promotion_identity(conn, rec, slot)
+        assert promotion.identity == WT_IDENTITY
+        assert promotion.deployment == repo.active_deployment(rec.id)
+        assert promotion.content_digest is None
+
+        legacy = repo.add("no_deployment")
+        force_legacy_strategy(conn, legacy.id)
+        legacy = repo.get("no_deployment")
+        with pytest.raises(DeploymentError, match="requires one active deployment epoch"):
+            promotion_identity(conn, legacy, promotion_slot(conn, legacy, data_dir=Path("/x")))
+
+        drifted = _working_tree_strategy(conn, "drifted_s")
+        monkeypatch.setattr(
+            "algua.registry.forward_promotion.compute_artifact_hashes",
+            lambda name: WT_IDENTITY._replace(code_hash="drift"))
+        with pytest.raises(DeploymentError, match="does not match the working tree"):
+            promotion_identity(conn, drifted, promotion_slot(conn, drifted, data_dir=Path("/x")))
+    assert hashed == ["working_tree_s", "no_deployment"]
+
+
+def test_promotion_slot_refuses_unverified_frozen_content_without_the_checkout(monkeypatch):
+    with closing(_registry_conn()) as conn:
+        sid = _admit_frozen(conn)
+        spies = _Spies(monkeypatch)
+        with pytest.raises(FrozenContentUnavailable) as info:
+            promotion_slot(
+                conn, SqliteStrategyRepository(conn).get(NAME), data_dir=get_settings().data_dir)
+        assert info.value.deployment_id == SqliteStrategyRepository(conn).active_deployment(sid).id
+        assert spies.calls == []
+
+
+def test_a_frozen_slot_binds_its_epoch_and_verified_digest(monkeypatch):
+    """A frozen slot's verified identity is the descriptor's, and its challenge binding names the
+    epoch and the manifest digest whose content was verified (verification stubbed here)."""
+    monkeypatch.setattr(FrozenContentVerifier, "_verified", lambda self, descriptor, dep: Path())
+    with closing(_registry_conn()) as conn:
+        sid = _admit_frozen(conn)
+        deployment = SqliteStrategyRepository(conn).active_deployment(sid)
+        rec = SqliteStrategyRepository(conn).get(NAME)
+        slot = promotion_slot(conn, rec, data_dir=get_settings().data_dir)
+        assert slot.deployment_id == deployment.id and slot.frozen is not None
+        assert slot.frozen.deployment == deployment and slot.frozen.identity == IDENTITY
+        assert slot.frozen.content_digest == deployment.manifest_digest
+        assert slot.challenge_binding() == {
+            "deployment_id": deployment.id, "manifest_digest": deployment.manifest_digest}
+        assert promotion_identity(conn, rec, slot) is slot.frozen
+
+
+def _minted_working_tree_promotion(monkeypatch, conn: sqlite3.Connection, name: str):
+    monkeypatch.setattr(
+        "algua.registry.forward_promotion.compute_artifact_hashes", lambda n: WT_IDENTITY)
+    monkeypatch.setattr(
+        "algua.registry.deployment.verify_working_tree_manifest", lambda manifest, repo_root: None)
+    rec = _working_tree_strategy(conn, name)
+    return promotion_identity(conn, rec, promotion_slot(conn, rec, data_dir=Path("/x")))
+
+
+def test_a_promotion_identity_cannot_be_minted_outside_the_chokepoint(monkeypatch):
+    with closing(_registry_conn()) as conn:
+        minted = _minted_working_tree_promotion(monkeypatch, conn, "minted_s")
+        other = _working_tree_strategy(conn, "other_s")
+        foreign = SqliteStrategyRepository(conn).active_deployment(other.id)
+    with pytest.raises(TypeError, match="minted only by the promotion chokepoint"):
+        PromotionIdentity(foreign, WT_IDENTITY, None, object())  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        PromotionIdentity(foreign, WT_IDENTITY, None)  # type: ignore[call-arg]
+    with pytest.raises(ValueError, match="InitVar"):
+        dataclasses.replace(minted, deployment=foreign)
+
+
+def test_run_forward_gate_refuses_an_unverified_frozen_deployment_from_a_direct_caller(
+    monkeypatch,
+):
+    """The reviewer's repro: a direct caller hands the gate a frozen deployment whose bundle was
+    never published, paired with that row's own hashes, skipping content verification. The only
+    PromotionIdentity for it comes from the chokepoint (which refuses it); nothing else is
+    accepted, so no evidence, evaluation or row happens."""
     with closing(_registry_conn()) as conn:
         sid = _admit_frozen(conn)
         before = _snapshot(conn, sid)
+        repo = SqliteStrategyRepository(conn)
+        deployment = repo.active_deployment(sid)
+        own = ArtifactIdentity(
+            deployment.code_hash, deployment.config_hash, deployment.dependency_hash)
         spies = _Spies(monkeypatch)
-        with pytest.raises(FrozenQualificationPending):
-            run_forward_gate(
-                SqliteStrategyRepository(conn), conn, name=NAME, actor=Actor.AGENT,
-                criteria=ForwardGateCriteria(), calendar=object(),  # type: ignore[arg-type]
-                now=datetime.now(UTC), activities_fetch=lambda a, u: [])
+        for forged in ((deployment, own),
+                       SimpleNamespace(deployment=deployment, identity=own, content_digest=None)):
+            with pytest.raises(TypeError, match="needs a PromotionIdentity"):
+                run_forward_gate(
+                    repo, conn, name=NAME, actor=Actor.AGENT, criteria=ForwardGateCriteria(),
+                    calendar=object(),  # type: ignore[arg-type]
+                    now=datetime.now(UTC), activities_fetch=lambda a, u: [],
+                    promotion=forged)  # type: ignore[arg-type]
+        with pytest.raises(FrozenContentUnavailable):
+            promotion_slot(conn, repo.get(NAME), data_dir=get_settings().data_dir)
         assert spies.calls == []
         assert _snapshot(conn, sid) == before
 
 
-def test_refuse_frozen_promotion_passes_working_tree_and_legacy_strategies():
+def test_run_forward_gate_refuses_a_promotion_identity_of_another_strategy(monkeypatch):
     with closing(_registry_conn()) as conn:
+        promotion = _minted_working_tree_promotion(monkeypatch, conn, "minted_s")
+        other = _working_tree_strategy(conn, "other_s")
+        before = _snapshot(conn, other.id)
         repo = SqliteStrategyRepository(conn)
-        legacy = repo.add("no_deployment")
-        refuse_frozen_promotion(conn, legacy.id)  # no active deployment: not frozen
+        spies = _Spies(monkeypatch)
+        with pytest.raises(DeploymentError, match="belongs to another strategy"):
+            run_forward_gate(
+                repo, conn, name="other_s", actor=Actor.AGENT, criteria=ForwardGateCriteria(),
+                calendar=object(),  # type: ignore[arg-type]
+                now=datetime.now(UTC), activities_fetch=lambda a, u: [], promotion=promotion)
+        assert spies.calls == []
+        assert _snapshot(conn, other.id) == before
 
-        rec = repo.add("working_tree_s")
-        gate_id = repo.record_gate_evaluation(
-            rec.id, passed=True, n_funnel=1, own_lifetime_combos=1, windowed_total_combos=1,
-            funnel_window_days=90, breadth_provenance="measured", pit_ok=True,
-            pit_override=False, holdout_n_bars=63, min_holdout_observations=63,
-            code_hash="c", config_hash="g", dependency_hash="d", data_source="test",
-            snapshot_id="snap", period_start="2024-01-01", period_end="2024-12-31",
-            holdout_frac=0.2, actor="human", decision_json="{}", universe_name="u")
-        conn.execute(
-            "INSERT INTO deployment_artifacts(manifest_digest, manifest_json, code_hash,"
-            " config_hash, dependency_hash, resolved_config_json, universe_name,"
-            " environment_digest, python_implementation, python_version, abi_tag, platform_tag,"
-            " planner_protocol_version, source_kind, source_ref, asset_digests_json, created_at)"
-            " VALUES ('wt','{}','c','g','d','{}','u','e','CPython','3.12','abi','platform',1,"
-            " 'working_tree','ref','[]','t')")
-        artifact_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        conn.execute(
-            "INSERT INTO strategy_deployments(strategy_id, artifact_id, research_gate_id,"
-            " activated_at) VALUES (?,?,?,'2025-01-01T00:00:00+00:00')",
-            (rec.id, artifact_id, gate_id))
-        conn.commit()
-        refuse_frozen_promotion(conn, rec.id)  # working tree: today's path
 
-        frozen_id = _admit_frozen(conn)
-        with pytest.raises(FrozenQualificationPending):
-            refuse_frozen_promotion(conn, frozen_id)
+def test_promotion_identity_refuses_an_epoch_replaced_during_resolution(monkeypatch):
+    """The epoch can also change between the pre-hash ledger read and the verified read: the
+    identity is minted only for the epoch the slot saw."""
+    monkeypatch.setattr(
+        "algua.registry.deployment.verify_working_tree_manifest", lambda manifest, repo_root: None)
+    with closing(_registry_conn()) as conn:
+        rec = _working_tree_strategy(conn, "replaced_s")
+        slot = promotion_slot(conn, rec, data_dir=Path("/x"))
+
+        def hashes(name):
+            _swap_epoch(conn, rec.id, frozen=False)  # same artifact and hashes, new epoch
+            return WT_IDENTITY
+
+        monkeypatch.setattr("algua.registry.forward_promotion.compute_artifact_hashes", hashes)
+        with pytest.raises(DeploymentError, match="changed during forward promotion"):
+            promotion_identity(conn, rec, slot)
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +648,8 @@ def test_registry_transition_to_forward_tested_refuses_a_frozen_deployment_first
 
     assert result.exit_code == 1, result.stdout
     payload = json.loads(result.stdout)
-    assert payload["code"] == "frozen_qualification_pending"
+    assert payload["code"] == "wrong_stage"
+    assert "reach forward_tested only through paper promote" in payload["error"]
     assert payload["retryable"] is False
     assert calls == []
     with closing(_registry_conn()) as conn:
@@ -345,7 +664,7 @@ def test_transition_strategy_refuses_the_frozen_forward_edge_directly(monkeypatc
         sid = _admit_frozen(conn)
         before = _live_snapshot(conn, sid)
         calls = _checkout_spies(monkeypatch)
-        with pytest.raises(FrozenQualificationPending):
+        with pytest.raises(TransitionError, match="forward_tested only through paper promote"):
             transition_strategy(
                 SqliteStrategyRepository(conn), NAME, Stage.FORWARD_TESTED, Actor.HUMAN, "raw")
         assert calls == []

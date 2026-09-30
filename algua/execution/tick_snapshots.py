@@ -17,8 +17,14 @@ def record_tick_snapshot(  # noqa: PLR0913
     reconcile_ok: bool, lane: str, strategy_id: int, code_hash: str, config_hash: str,
     dependency_hash: str | None, account_id: str, cash: float, clock_source: str,
     snapshot_id: str | None = None, deployment_id: int | None = None,
+    frozen_invocation_id: int | None = None,
 ) -> None:
-    """Append a snapshot only when its deployment provenance is currently valid."""
+    """Append a snapshot only when its deployment provenance is currently valid.
+
+    ``frozen_invocation_id`` links a frozen tick to its final invocation (Story 1.3d). The schema,
+    not this writer, enforces it: a frozen tick must carry a valid link and no other tick may
+    (``tick_snapshots_frozen_link``); a refusal surfaces as ``sqlite3.IntegrityError``.
+    """
     if lane not in _VALID_LANES:
         raise ValueError(f"lane must be one of {sorted(_VALID_LANES)!r}, got {lane!r}")
     if clock_source not in _VALID_CLOCK_SOURCES:
@@ -29,11 +35,12 @@ def record_tick_snapshot(  # noqa: PLR0913
         strategy, tick_ts, decision_ts, equity, peak_equity, json.dumps(positions), n_submitted,
         1 if reconcile_ok else 0, lane, strategy_id, code_hash, config_hash, dependency_hash,
         account_id, cash, clock_source, datetime.now(UTC).isoformat(), snapshot_id,
+        frozen_invocation_id,
     )
     columns = (
         "strategy, tick_ts, decision_ts, equity, peak_equity, positions, n_submitted,"
         " reconcile_ok, lane, strategy_id, code_hash, config_hash, dependency_hash, account_id,"
-        " cash, clock_source, recorded_at, snapshot_id, deployment_id"
+        " cash, clock_source, recorded_at, snapshot_id, frozen_invocation_id, deployment_id"
     )
     if deployment_id is None:
         legacy = conn.execute(
@@ -49,13 +56,13 @@ def record_tick_snapshot(  # noqa: PLR0913
                 "NULL deployment tick is permitted only for the fixed legacy cohort")
         conn.execute(
             f"INSERT INTO tick_snapshots({columns})"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
             values,
         )
     else:
         cur = conn.execute(
             f"INSERT INTO tick_snapshots({columns})"
-            " SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, d.id"
+            " SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, d.id"
             " FROM strategy_deployments d"
             " JOIN deployment_artifacts a ON a.id=d.artifact_id"
             " JOIN strategies s ON s.id=d.strategy_id"

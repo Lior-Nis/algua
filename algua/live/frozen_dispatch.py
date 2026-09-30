@@ -9,16 +9,17 @@ the planner refuses is `frozen_planner_rejected`. A pending venue belief is answ
 
 Otherwise one fresh child runs the phase from the tenant's bundle (`frozen_invocation`), and its
 result must be the verdict: identical to a no-decision or snapshot (binding included), else a
-decision or a breach only the strategy's weights can cause (`DECISION_BREACH_KINDS`). A decision's
-intents must be `build_intents` of its weights from the supervisor's current weights at Phase A's
-decision time, unique, inside the gate universe or holdings; its weights are re-validated with the
-tenant's contract, a violation being a breach as in process. Any other disagreement is
+decision (cross-checked, its weights re-validated, in `frozen_attempt`) or a breach only the
+strategy's weights can cause (`DECISION_BREACH_KINDS`). Any other disagreement is
 `frozen_result_invalid`. Every fault is a `FrozenTenantFailure` carrying a §8 code, the deployment
-id and a sanitized, bounded diagnostic (raw stderr is read only into its sanitized head).
+id and a sanitized, bounded diagnostic (raw stderr is read only into its sanitized head). Each such
+child dispatch is an attempt, recorded once judged through the injected `record` (Story 1.3d §1).
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final
@@ -26,6 +27,14 @@ from typing import Final
 import pandas as pd
 
 from algua.contracts.types import ExecutionContract
+from algua.live.frozen_attempt import (
+    Attempt,
+    AttemptRecorder,
+    Record,
+    decision_problem,
+    mismatch,
+    weight_breach,
+)
 from algua.live.frozen_invocation import (
     LaunchFailure,
     Runner,
@@ -35,12 +44,7 @@ from algua.live.frozen_invocation import (
     sanitize_text,
     unsupported_content,
 )
-from algua.live.frozen_wire import (
-    WireError,
-    WireIdentity,
-    WireTooLarge,
-    encode_request,
-)
+from algua.live.frozen_wire import WireError, WireIdentity, WireTooLarge, encode_request
 from algua.live.frozen_wire_json import Phase, decode_pairs, encode_pairs
 from algua.live.frozen_wire_result import PlannerRejected, decode_result, encode_result
 from algua.live.planner_contract import (
@@ -57,18 +61,11 @@ from algua.live.planner_contract import (
     SnapshotRequired,
     VenueBeliefRequired,
 )
-from algua.live.planner_decision import build_intents
 from algua.live.planner_early import EarlyVerdict, closed_universe_bars, early_verdict
 from algua.live.planner_late import LateProceed, late_verdict, verified_phase_a
 from algua.live.planner_validation import validate_early
 from algua.primitives.contained_process import run_contained
-from algua.risk.limits import (
-    DARK_FEED_KINDS,
-    DECISION_BREACH_KINDS,
-    RISK_BREACH_KINDS,
-    RiskBreach,
-    validate_decision_weights,
-)
+from algua.risk.limits import DARK_FEED_KINDS, DECISION_BREACH_KINDS, RISK_BREACH_KINDS
 
 #: The §8 tenant failure codes; each is stable and deployment-bound.
 FROZEN_FAILURE_CODES: Final = frozenset({
@@ -106,16 +103,28 @@ class FrozenTarget:
 
 
 class FrozenPlanner:
-    """`PlannerPort` for one frozen tenant over ONE tick; build a new instance for every tick."""
+    """`PlannerPort` for one frozen tenant over ONE tick; build a new instance for every tick.
+
+    ``record`` persists a judged attempt, returning its id; the bars args name the tick's bars.
+    """
 
     def __init__(
-        self, target: FrozenTarget, *, invocations_root: Path, run: Runner = run_contained
+        self, target: FrozenTarget, *, invocations_root: Path, record: Record, snapshot_id: str,
+        bars_start: str | None, bars_end: str | None, run: Runner = run_contained,
     ) -> None:
         self._target = target
         self._invocations_root = invocations_root
         self._run = run
+        self._attempts = AttemptRecorder(
+            record, deployment_id=target.identity.deployment_id, snapshot_id=snapshot_id,
+            bars_start=bars_start, bars_end=bars_end)
         self._content_checked = False
         self._snapshot: SnapshotRequired | None = None
+
+    @property
+    def final_invocation_id(self) -> int | None:
+        """The id ``record`` returned for this tick's successful Phase B attempt, else None."""
+        return self._attempts.final_id
 
     # --- the port ------------------------------------------------------------------------------
 
@@ -123,9 +132,11 @@ class FrozenPlanner:
         verdict = self._early(early)
         if isinstance(verdict, PlannerRiskFailure):
             return verdict
-        result = self._invoke("a", early, None)
-        if _canonical("a", early, result) != _canonical("a", early, verdict):
-            raise self._mismatch(result, type(verdict).__name__)
+        with self._attempt("a", early.request_id, None) as attempt:
+            result = self._invoke(attempt, early, None)
+            if _canonical("a", early, result) != _canonical("a", early, verdict):
+                raise self._invalid(mismatch(result, type(verdict).__name__))
+            self._attempts.succeeded(attempt, result)
         if isinstance(verdict, SnapshotRequired):
             self._snapshot = verdict
         return verdict
@@ -145,16 +156,30 @@ class FrozenPlanner:
         verdict = self._late(late)
         if isinstance(verdict, (PlannerRiskFailure, VenueBeliefRequired)):
             return verdict  # run_tick resolves a requested belief and calls again
-        result = self._invoke("b", late.early, late)
+        with self._attempt("b", late.early.request_id, late.phase_a_binding) as attempt:
+            result = self._invoke(attempt, late.early, late)
+            answer = self._judged(result, verdict, late.early)
+            self._attempts.succeeded(attempt, result)  # a weight-rule breach is still a success
+        return answer
+
+    def _judged(
+        self, result: _Result, verdict: LateNoDecision | LateProceed, early: EarlyPlannerInput
+    ) -> LatePlannerResult:
+        """Phase B's answer when the child's result is the supervisor's verdict (§7)."""
         if isinstance(verdict, LateNoDecision):
-            if _canonical("b", late.early, result) != _canonical("b", late.early, verdict):
-                raise self._mismatch(result, "LateNoDecision")
+            if _canonical("b", early, result) != _canonical("b", early, verdict):
+                raise self._invalid(mismatch(result, "LateNoDecision"))
             return verdict
         if isinstance(result, Decision):
-            return self._checked_decision(result, verdict)
+            target = self._target
+            if problem := decision_problem(result, verdict, target.gate_universe):
+                raise self._invalid(problem)
+            breach = weight_breach(
+                result, target.execution, target.identity.strategy_name, target.gate_universe)
+            return result if breach is None else self._risk(*breach)
         if isinstance(result, PlannerRiskFailure) and result.kind in DECISION_BREACH_KINDS:
             return result
-        raise self._mismatch(result, "a decision")
+        raise self._invalid(mismatch(result, "a decision"))
 
     # --- the supervisor's own strategy-free verdict ---------------------------------------------
 
@@ -192,19 +217,30 @@ class FrozenPlanner:
             return self._risk(verdict.kind, verdict.detail)
         return verdict
 
-    # --- one child ------------------------------------------------------------------------------
+    # --- one attempt: one child ----------------------------------------------------------------
+
+    @contextmanager
+    def _attempt(self, phase: Phase, request_id: str, binding: str | None) -> Iterator[Attempt]:
+        """Record a tenant failure raised inside, before it propagates; nothing if systemic."""
+        attempt = self._attempts.begin(phase, request_id, binding)
+        try:
+            yield attempt
+        except FrozenTenantFailure as failure:
+            self._attempts.failed(attempt, failure.code, failure.diagnostic)
+            raise
 
     def _invoke(
-        self, phase: Phase, early: EarlyPlannerInput, late: LatePlannerInput | None
+        self, attempt: Attempt, early: EarlyPlannerInput, late: LatePlannerInput | None
     ) -> _Result:
-        target = self._target
+        target, phase = self._target, attempt.phase
         if not self._content_checked:
             problem = unsupported_content(target.bundle_root)
             if problem is not None:
                 raise self._failure("frozen_content_unsupported", problem)
             self._content_checked = True
         try:
-            request_json, bars_arrow = encode_request(phase, early, late, target.identity)
+            request_json, bars_arrow = attempt.request = encode_request(
+                phase, early, late, target.identity)
         except WireTooLarge as exc:
             raise self._failure("frozen_request_too_large", str(exc)) from exc
         except WireError as exc:  # the supervisor's own input is not a valid request
@@ -221,6 +257,7 @@ class FrozenPlanner:
             )
         except LaunchFailure as exc:
             raise self._failure("frozen_launch_failed", str(exc)) from exc
+        attempt.ended = ended
         code = process_failure(ended)
         if code is not None:
             raise self._failure(code, process_diagnostic(ended))
@@ -234,48 +271,12 @@ class FrozenPlanner:
             return self._risk(result.kind, result.detail)
         return result
 
-    # --- a decision against the verdict ---------------------------------------------------------
-
-    def _checked_decision(self, result: Decision, verdict: LateProceed) -> LatePlannerResult:
-        ts, current = verdict.decision_ts, verdict.current_weights
-        intents = list(result.ordered_intents)
-        if result.state.decision_ts != ts or any(i.decision_ts != ts for i in intents):
-            raise self._invalid("a decision timestamp is not Phase A's decision_ts")
-        symbols = [intent.symbol for intent in intents]
-        if len(set(symbols)) != len(symbols):
-            raise self._invalid("the intents repeat a symbol")
-        if outside := sorted(set(symbols) - set(self._target.gate_universe) - set(current)):
-            raise self._invalid(f"intents outside the gate universe and holdings: {outside}")
-        if result.state != replace(verdict.state, target_weights=result.state.target_weights):
-            raise self._invalid("the decision state is not the one the captured values give")
-        weights = pd.Series(dict(result.state.target_weights), dtype="float64")
-        if intents != build_intents(weights, current, ts):
-            raise self._invalid("the intents are not build_intents of the target weights")
-        target = self._target
-        try:
-            validate_decision_weights(
-                weights, target.execution, target.identity.strategy_name,
-                allowed_symbols=target.gate_universe,
-            )
-        except RiskBreach as exc:
-            return self._risk(exc.kind, exc.detail)
-        return result
-
     # --- helpers ------------------------------------------------------------------------------
 
     def _require_snapshot(self) -> SnapshotRequired:
         if self._snapshot is None:
             raise RuntimeError("frozen planner port called before a Phase A snapshot")
         return self._snapshot
-
-    def _mismatch(self, result: _Result, expected: str) -> FrozenTenantFailure:
-        if isinstance(result, PlannerRiskFailure):
-            return self._invalid(f"the child reports a {result.kind} breach the supervisor does "
-                                 "not find")
-        if type(result).__name__ != expected:
-            return self._invalid(f"the child answered {type(result).__name__} where the "
-                                 f"supervisor's verdict is {expected}")
-        return self._invalid(f"the child's {expected} is not the one these inputs give")
 
     def _rejected(self, refusal: PlannerInputFailure | PhaseBindingFailure) -> FrozenTenantFailure:
         return self._failure("frozen_planner_rejected", f"{refusal.code}: {refusal.detail}")

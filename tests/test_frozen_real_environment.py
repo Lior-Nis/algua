@@ -14,7 +14,9 @@ Everything below the planner inputs is production machinery, nothing is faked:
   the published bundle, for Phase A and for Phase B with a resolved (disabled) venue belief.
 
 The frozen results must equal the in-process planner's on the checkout strategy, as canonical
-encodings, and no invocation directory may survive.
+encodings, and no invocation directory may survive. The port records each child attempt through a
+collecting recorder (Story 1.3d): one successful Phase A and one successful Phase B attempt, and
+nothing for the supervisor-settled venue-belief request.
 
 The strategy is `cross_sectional_momentum`, committed at `HEAD` (the bundle comes from Git objects,
 so an uncommitted fixture would not be in it). The checkout's tracked files must match `HEAD`: the
@@ -43,6 +45,7 @@ import pandas as pd
 import pytest
 
 from algua.calendar.market_calendar import MarketCalendar
+from algua.contracts.frozen_evidence import FrozenAttempt
 from algua.contracts.lifecycle import Actor
 from algua.data.store import DataStore
 from algua.live.frozen_dispatch import FrozenPlanner, FrozenTarget
@@ -227,7 +230,16 @@ def test_real_prepare_verify_dispatch_equals_the_in_process_planner(
     reference = InProcessPlanner(
         replace(checkout, config=checkout.config.model_copy(update={"universe": GATE})))
     invocations = store / "frozen/invocations"
-    port = FrozenPlanner(target, invocations_root=invocations)
+    attempts: list[FrozenAttempt] = []
+
+    def record(attempt: FrozenAttempt) -> int:
+        attempts.append(attempt)
+        return len(attempts)
+
+    bars_start = datetime.combine(SESSIONS[0], time(), UTC).isoformat()
+    port = FrozenPlanner(target, invocations_root=invocations, record=record,
+                         snapshot_id="real-frozen-snapshot", bars_start=bars_start,
+                         bars_end=NOW.isoformat())
 
     # --- dispatch: Phase A, closed bars, Phase B through the real provisioned interpreter -------
     first = port.phase_a(early)
@@ -250,3 +262,11 @@ def test_real_prepare_verify_dispatch_equals_the_in_process_planner(
     sides = {intent.symbol: intent.side.value for intent in second.ordered_intents}
     assert sides[HELD] == "sell" and "buy" in sides.values(), sides
     assert list(invocations.iterdir()) == []
+
+    # --- evidence: one success per child, none for the supervisor-settled belief request -------
+    assert [(a.phase, a.result_kind, a.failure_code) for a in attempts] == [
+        ("a", "snapshot_required", None), ("b", "decision", None)]
+    assert port.final_invocation_id == 2 and attempts[1].phase_a_invocation_id == 1
+    assert attempts[0].phase_a_binding == attempts[1].phase_a_binding == first.phase_a_binding
+    assert {(a.request_id, a.snapshot_id, a.bars_start, a.bars_end) for a in attempts} == {
+        (REQUEST_ID, "real-frozen-snapshot", bars_start, NOW.isoformat())}
