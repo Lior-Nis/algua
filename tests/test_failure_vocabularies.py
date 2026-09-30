@@ -47,6 +47,9 @@ RISK_FORWARDING_SITES = {
     ("algua/live/planner_early.py", "risk_failure", "exc.kind"),
     # Decodes a frozen child's risk_kind, refused unless it is in RISK_BREACH_KINDS.
     ("algua/live/frozen_wire_result.py", "_decode_body", "risk_kind"),
+    # Re-wraps a decoded child risk_failure or a caught supervisor RiskBreach with a sanitized
+    # detail; the helper itself refuses any kind outside RISK_BREACH_KINDS before constructing.
+    ("algua/live/frozen_dispatch.py", "FrozenPlanner._risk", "kind"),
 }
 FAILURE_FORWARDING_SITES = {
     # The helper itself: every caller passes a literal, which the scan checks at the call.
