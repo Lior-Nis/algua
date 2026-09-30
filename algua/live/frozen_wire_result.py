@@ -38,6 +38,7 @@ from algua.live.frozen_wire_json import (
     parse_canonical,
 )
 from algua.live.planner_contract import (
+    PLANNER_FAILURE_CODES,
     Decision,
     EarlyNoDecision,
     LateNoDecision,
@@ -47,7 +48,7 @@ from algua.live.planner_contract import (
     PlannerState,
     SnapshotRequired,
 )
-from algua.risk.limits import DARK_FEED_KINDS
+from algua.risk.limits import DARK_FEED_KINDS, RISK_BREACH_KINDS
 
 
 @dataclass(frozen=True)
@@ -202,11 +203,16 @@ def _decode_body(kind: str, r: dict[str, Any]) -> WireResult:
         )
     if kind == "risk_failure":
         risk_kind: str = expect(r["risk_kind"], str, "risk_kind")
+        if risk_kind not in RISK_BREACH_KINDS:  # a child names only the supervisor's vocabulary
+            raise WireError("bad_value", "risk_kind is not a known risk breach kind")
         return PlannerRiskFailure(
             risk_kind, expect(r["detail"], str, "detail"), risk_kind in DARK_FEED_KINDS
         )
     if kind == "planner_rejected":
-        return PlannerRejected(expect(r["code"], str, "code"), expect(r["detail"], str, "detail"))
+        code = expect(r["code"], str, "code")
+        if code not in PLANNER_FAILURE_CODES:
+            raise WireError("bad_value", "code is not a known planner failure code")
+        return PlannerRejected(code, expect(r["detail"], str, "detail"))
     if kind == "late_no_decision":
         _reason(r["reason"], ("warming",))
         return LateNoDecision("warming", _decode_state(r["state"]))

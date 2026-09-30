@@ -528,3 +528,20 @@ def test_closed_bar_selection_without_a_closed_universe_session_has_no_decision_
     out_of_universe = closed_universe_bars(raw[raw["symbol"] == "OLD"], NOW, ("AAA",))
     assert len(out_of_universe.bars) == 3 and out_of_universe.universe_bars.empty
     assert out_of_universe.decision_ts is None
+
+
+def test_a_reconcile_breach_reads_the_same_whatever_the_mapping_order():
+    # A frozen child receives every mapping sorted by symbol (wire v1), the in-process planner in
+    # broker order; the breach text must not depend on which (Story 1.3c parity).
+    strategy = _strategy()
+    early = _early(strategy, positions={"OLD": 2.0})
+    first = phase_a(strategy, early)
+    assert isinstance(first, SnapshotRequired)
+
+    def breach(belief: dict[str, float]) -> str:
+        result = phase_b(
+            strategy, LatePlannerInput(early, first.phase_a_binding, _captured(belief=belief)))
+        assert isinstance(result, PlannerRiskFailure) and result.kind == "reconcile"
+        return result.detail
+
+    assert breach({"ZZZ": 1.0, "OLD": 5.0}) == breach({"OLD": 5.0, "ZZZ": 1.0})

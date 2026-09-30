@@ -45,6 +45,8 @@ RISK_FORWARDING_SITES = {
     ("algua/live/live_loop.py", "_raise_planner_failure", "result.kind"),
     # Copies a caught RiskBreach into the planner's result value.
     ("algua/live/planner_early.py", "risk_failure", "exc.kind"),
+    # Decodes a frozen child's risk_kind, refused unless it is in RISK_BREACH_KINDS.
+    ("algua/live/frozen_wire_result.py", "_decode_body", "risk_kind"),
 }
 FAILURE_FORWARDING_SITES = {
     # The helper itself: every caller passes a literal, which the scan checks at the call.

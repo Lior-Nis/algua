@@ -226,9 +226,11 @@ def _body(result: dict[str, Any], phase: str) -> bytes:
         ("a", {"kind": "early_no_decision", "reason": "stale", "state": {}}, "bad_value"),
         ("b", {"kind": "late_no_decision", "reason": "no_bars", "state": {}}, "bad_value"),
         ("a", {"kind": "risk_failure", "risk_kind": 5, "detail": "d"}, "bad_type"),
-        ("b", {"kind": "planner_rejected", "code": "c", "detail": None}, "bad_type"),
-        ("b", {"kind": "planner_rejected", "code": "c", "detail": _nested_list(MAX_JSON_DEPTH)},
-         "json_depth"),
+        ("a", {"kind": "risk_failure", "risk_kind": "made_up", "detail": "d"}, "bad_value"),
+        ("b", {"kind": "planner_rejected", "code": "made_up", "detail": "d"}, "bad_value"),
+        ("b", {"kind": "planner_rejected", "code": "invalid_now", "detail": None}, "bad_type"),
+        ("b", {"kind": "planner_rejected", "code": "invalid_now",
+               "detail": _nested_list(MAX_JSON_DEPTH)}, "json_depth"),
     ],
 )
 def test_decode_refuses_malformed_result_bodies(phase, result, reason):

@@ -164,7 +164,8 @@ def phase_b_impl(
             if drift:
                 raise RiskBreach(
                     "reconcile",
-                    f"venue belief {belief} disagrees with positions_before {positions} before "
+                    f"venue belief {dict(sorted(belief.items()))} disagrees with positions_before "
+                    f"{dict(sorted(positions.items()))} before "
                     "tick — refusing to trade on inconsistent state",
                 )
         elif not isinstance(captured.venue_belief, VenueBeliefDisabled):
