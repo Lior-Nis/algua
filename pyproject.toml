@@ -71,6 +71,7 @@ root_package = "algua"
 # authority. They may reach planner, strategy, config and model code, but never the registry, data
 # providers, brokers/ledgers, the CLI or the operator. The supervisor-side port obeys the same wall:
 # it receives plain values (FrozenTarget) from the CLI rather than reaching into the registry.
+# Story 1.3d: it records attempt evidence through an injected `record`, never the registry itself.
 name = "frozen planner child, wire and port stay off authority layers"
 type = "forbidden"
 source_modules = [
@@ -81,6 +82,7 @@ source_modules = [
     "algua.live.frozen_wire_result",
     "algua.live.frozen_dispatch",
     "algua.live.frozen_invocation",
+    "algua.live.frozen_attempt",
 ]
 forbidden_modules = [
     "algua.registry",

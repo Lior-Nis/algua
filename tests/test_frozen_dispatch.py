@@ -4,12 +4,15 @@ The fast tests drive `FrozenPlanner` with a fake `run` that answers crafted `Con
 inspects the sealed invocation directory while the "child" runs. The end-to-end tests launch the
 real child from a real bundle through the shared harness and require the frozen port to be
 indistinguishable from the in-process planner: equal canonical results per phase, and an equal
-effect trace for a whole `run_tick`.
+effect trace for a whole `run_tick`. Every port records its judged attempts (Story 1.3d) into a
+collecting `Recorder`; the end-to-end tests require those records to hash exactly what each real
+child was sent and wrote (the recording rules themselves are pinned in `test_frozen_attempt.py`).
 """
 
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
 import stat
 from dataclasses import replace
@@ -21,6 +24,7 @@ from typing import Any
 import pandas as pd
 import pytest
 
+from algua.contracts.frozen_evidence import FrozenAttempt
 from algua.contracts.types import OrderIntent, Side
 from algua.execution.alpaca_broker import TickSnapshot
 from algua.live import frozen_invocation
@@ -30,7 +34,7 @@ from algua.live.frozen_dispatch import (
     FrozenTarget,
     FrozenTenantFailure,
 )
-from algua.live.frozen_invocation import sanitize_text
+from algua.live.frozen_invocation import Runner, sanitize_text
 from algua.live.frozen_wire import (
     BOOTSTRAP,
     KILL_GRACE_SECONDS,
@@ -56,7 +60,7 @@ from algua.live.planner_contract import (
     VenueBeliefPending,
     VenueBeliefRequired,
 )
-from algua.primitives.contained_process import ContainedResult
+from algua.primitives.contained_process import ContainedResult, run_contained
 from algua.risk.limits import DARK_FEED_KINDS, RISK_BREACH_KINDS, RiskBreach
 from algua.strategies.base import config_hash
 from tests._frozen_harness import (
@@ -84,6 +88,33 @@ from tests._frozen_harness import (
 IDENTITY = WireIdentity(STRATEGY, DEPLOYMENT_ID, ARTIFACT_ID, MANIFEST, digest("good"), ENV_DIGEST)
 DAY = timedelta(days=1)
 PRINTABLE = {chr(code) for code in range(0x20, 0x7F)}
+#: The tick's bars as the CLI names them to the port (Story 1.3d §3).
+SNAPSHOT_ID = "snapshot-of-the-tick"
+BARS_START = "2022-12-27T00:00:00+00:00"
+BARS_END = "2023-01-06T00:00:00+00:00"
+
+
+class Recorder:
+    """A fake `record`: keeps every judged attempt, answering distinctive non-sequential ids."""
+
+    def __init__(self) -> None:
+        self.attempts: list[FrozenAttempt] = []
+        self.ids: list[int] = []
+
+    def __call__(self, attempt: FrozenAttempt) -> int:
+        self.attempts.append(attempt)
+        self.ids.append(1000 + 17 * len(self.ids))
+        return self.ids[-1]
+
+
+def frozen_port(target: FrozenTarget, invocations_root: Path, *, run: Runner | None = None,
+                record: Recorder | None = None) -> FrozenPlanner:
+    """One tick's port, recording into ``record`` (a fresh `Recorder` by default)."""
+    return FrozenPlanner(
+        target, invocations_root=invocations_root,
+        record=Recorder() if record is None else record, snapshot_id=SNAPSHOT_ID,
+        bars_start=BARS_START, bars_end=BARS_END,
+        run=run_contained if run is None else run)
 
 
 def _strategy():
@@ -212,8 +243,7 @@ def world(tmp_path):
 
     def planner(*answers: Any, target: FrozenTarget | None = None):
         run = FakeRun(*answers)
-        port = FrozenPlanner(target or _target(bundle, environment),
-                             invocations_root=invocations, run=run)
+        port = frozen_port(target or _target(bundle, environment), invocations, run=run)
         return port, run
 
     return SimpleNamespace(bundle=bundle, environment=environment, invocations=invocations,
@@ -412,7 +442,7 @@ def test_a_real_interpreter_that_cannot_start_is_the_tenants_launch_failure(tmp_
     if case == "not_executable":
         (environment / "bin").mkdir(parents=True)
         (environment / "bin/python").write_text("")  # mode 0644: exec fails with EACCES
-    port = FrozenPlanner(_target(bundle, environment), invocations_root=tmp_path / "inv")
+    port = frozen_port(_target(bundle, environment), tmp_path / "inv")
 
     failure = _failure(lambda: port.phase_a(early_input(in_process())), "frozen_launch_failed")
 
@@ -428,8 +458,7 @@ def test_an_unreadable_bundle_entry_is_unsupported_content_not_a_raw_error(tmp_p
         if os.access(live / "frozen_child.py", os.F_OK):
             pytest.skip("running with privileges that ignore directory permissions")
         run = FakeRun()
-        port = FrozenPlanner(_target(bundle, tmp_path / "env"),
-                             invocations_root=tmp_path / "inv", run=run)
+        port = frozen_port(_target(bundle, tmp_path / "env"), tmp_path / "inv", run=run)
 
         failure = _failure(lambda: port.phase_a(early_input(in_process())),
                            "frozen_content_unsupported")
@@ -533,8 +562,7 @@ def test_a_short_stderr_is_not_flagged_truncated(world):
 def test_unsupported_content_is_refused_before_any_launch(tmp_path, protocol, child):
     bundle = _bundle(tmp_path, protocol=protocol, child=child)
     run = FakeRun()
-    port = FrozenPlanner(_target(bundle, tmp_path / "env"), invocations_root=tmp_path / "inv",
-                         run=run)
+    port = frozen_port(_target(bundle, tmp_path / "env"), tmp_path / "inv", run=run)
 
     _failure(lambda: port.phase_a(early_input(in_process())), "frozen_content_unsupported")
 
@@ -1085,6 +1113,37 @@ def _canonical(phase: str, result: object) -> bytes:
     return encode_result(phase, REQUEST_ID, result)
 
 
+class SpyRun:
+    """The real contained runner, keeping what each child was sent and how it ended."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict[str, bytes]] = []
+        self.ended: list[ContainedResult] = []
+
+    def __call__(self, argv, **kwargs) -> ContainedResult:
+        invocation = Path(argv[-1])
+        self.sent.append({path.name: path.read_bytes() for path in invocation.iterdir()})
+        self.ended.append(run_contained(argv, **kwargs))
+        return self.ended[-1]
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _assert_recorded_as_run(recorder: Recorder, spy: SpyRun, kinds: list[str]) -> None:
+    """One successful record per real child, hashing exactly what it was sent and wrote."""
+    assert [attempt.result_kind for attempt in recorder.attempts] == kinds
+    assert [attempt.phase for attempt in recorder.attempts] == ["a", "b"][:len(kinds)]
+    for attempt, sent, ended in zip(recorder.attempts, spy.sent, spy.ended, strict=True):
+        assert ended.stdout.endswith(b"\n")  # the canonical document and its newline
+        assert attempt.result_sha256 == _sha256(ended.stdout)
+        assert attempt.request_json == sent["request.json"].decode("utf-8")
+        assert attempt.request_sha256 == _sha256(sent["request.json"])
+        assert attempt.bars_sha256 == _sha256(sent["bars.arrow"])
+        assert (attempt.failure_code, attempt.returncode, attempt.signal) == (None, 0, None)
+
+
 @pytest.mark.parametrize("case", ["no_bars", "warming", "decision", "drawdown"])
 def test_the_frozen_port_equals_the_in_process_planner(store, tmp_path, case):
     strategy = in_process()
@@ -1093,13 +1152,16 @@ def test_the_frozen_port_equals_the_in_process_planner(store, tmp_path, case):
         frame = early.raw_bars
         early = replace(early, raw_bars=frame[~frame.symbol.isin(GATE)], early_positions={})
     reference = _in_process()
-    port = FrozenPlanner(_real_target(store), invocations_root=tmp_path / "invocations")
+    spy, recorder = SpyRun(), Recorder()
+    port = frozen_port(_real_target(store), tmp_path / "invocations", run=spy, record=recorder)
 
     first = port.phase_a(early)
 
     assert _canonical("a", first) == _canonical("a", reference.phase_a(early))
     if case in ("no_bars", "warming"):
         assert isinstance(first, EarlyNoDecision) and first.reason == case
+        _assert_recorded_as_run(recorder, spy, ["early_no_decision"])
+        assert port.final_invocation_id is None
         return
     assert isinstance(first, SnapshotRequired)
     pd.testing.assert_frame_equal(port.closed_bars(early), reference.closed_bars(early))
@@ -1111,6 +1173,12 @@ def test_the_frozen_port_equals_the_in_process_planner(store, tmp_path, case):
     assert _canonical("b", second) == _canonical("b", reference.phase_b(late))
     assert isinstance(second, Decision if case == "decision" else PlannerRiskFailure)
     assert _leftovers(tmp_path / "invocations") == []
+    if case == "decision":
+        _assert_recorded_as_run(recorder, spy, ["snapshot_required", "decision"])
+        assert port.final_invocation_id == recorder.ids[1]
+    else:  # the supervisor's own drawdown breach settles Phase B without a child
+        _assert_recorded_as_run(recorder, spy, ["snapshot_required"])
+        assert port.final_invocation_id is None
 
 
 # --- end to end: run_tick's effect trace --------------------------------------------------------
@@ -1172,13 +1240,27 @@ def _tick(port_for, case: str) -> tuple[list[Any], Any]:
     return events, outcome
 
 
-@pytest.mark.parametrize(
-    "case", ["decision", "no_bars", "warming", "stale_marks", "reconcile", "drawdown"])
+#: tick case -> the result kinds of the attempts it runs a real child for, in order.
+TICK_ATTEMPTS = {
+    "decision": ["snapshot_required", "decision"],
+    "no_bars": ["early_no_decision"],
+    "warming": ["early_no_decision"],
+    "stale_marks": [],  # the supervisor's Phase A breach: no child
+    "reconcile": ["snapshot_required"],  # the supervisor's Phase B breach: no Phase B child
+    "drawdown": ["snapshot_required"],
+}
+
+
+@pytest.mark.parametrize("case", sorted(TICK_ATTEMPTS))
 def test_run_tick_through_the_frozen_port_has_the_in_process_effect_trace(store, tmp_path, case):
     in_process_trace, in_process_outcome = _tick(lambda strategy: None, case)
-    frozen_trace, frozen_outcome = _tick(
-        lambda strategy: FrozenPlanner(_real_target(store), invocations_root=tmp_path / "inv"),
-        case)
+    spy, recorder, ports = SpyRun(), Recorder(), []
+
+    def port_for(strategy):
+        ports.append(frozen_port(_real_target(store), tmp_path / "inv", run=spy, record=recorder))
+        return ports[-1]
+
+    frozen_trace, frozen_outcome = _tick(port_for, case)
 
     # The same outcome -- a breach with identical kind AND text (planner breach texts are plain
     # ASCII, so the §7 sanitizer leaves them untouched) -- through the identical effect trace:
@@ -1197,3 +1279,6 @@ def test_run_tick_through_the_frozen_port_has_the_in_process_effect_trace(store,
         assert frozen_outcome.submitted == [] and frozen_outcome.target_weights == {}
         assert frozen_trace == ["positions", ("fetch", GATE, "1d")]
     assert _leftovers(tmp_path / "inv") == []
+    _assert_recorded_as_run(recorder, spy, TICK_ATTEMPTS[case])
+    (port,) = ports
+    assert port.final_invocation_id == (recorder.ids[1] if case == "decision" else None)
