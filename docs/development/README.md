@@ -43,10 +43,10 @@ is the `decomposed` parent outcome. The
 for one implementation/review cycle, and the approved
 [Sprint Change Proposal](sprint-change-proposal-2026-09-25.md) divides it into Stories 1.3a–1.3d.
 [Story 1.3b](stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md) is done
-(PR #676). [Story 1.3c](stories/1-3c-execute-frozen-planners-in-paper.md) is `ready-for-dev` after
-its [targeted readiness review](implementation-readiness-report-2026-09-30-story-1-3c.md) and adopted
-[normative frozen-execution contract](specs/spec-story-1-3c-frozen-paper-execution/SPEC.md).
-Story 1.3d remains backlog and requires its own readiness review. The older
+(PR #676). [Story 1.3c](stories/1-3c-execute-frozen-planners-in-paper.md) is done (PR #680).
+[Story 1.3d](stories/1-3d-bind-operational-evidence-and-qualification.md) is `ready-for-dev` after its
+[targeted readiness review](implementation-readiness-report-2026-09-30-story-1-3d.md) and adopted
+[normative evidence contract](specs/spec-story-1-3d-frozen-evidence-and-qualification/SPEC.md). The older
 [readiness assessment](implementation-readiness-report-2026-09-24.md) covers only Story 1.1, not
 either whole epic. [Deferred findings](stories/deferred-work.md) retain pre-existing issues outside
 the active story boundary.

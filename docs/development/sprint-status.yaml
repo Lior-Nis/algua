@@ -30,7 +30,7 @@
 # WORKFLOW NOTES:
 # ===============
 # - Story 1.3 is a decomposed parent traceability record, not an executable work item.
-# - Stories 1.3a and 1.3b are done; Story 1.3c passed readiness; Story 1.3d remains backlog.
+# - Stories 1.3a-1.3c are done; Story 1.3d passed readiness.
 # - A ready story is not merged, deployed, qualified, or authorized to trade.
 # - Move a story through in-progress and review before done.
 
@@ -48,8 +48,8 @@ development_status:
   1-3-materialize-and-execute-frozen-planner-artifacts: in-progress  # aggregate parent only
   1-3a-complete-two-phase-planner-boundary-in-process: done
   1-3b-materialize-and-verify-recoverable-planner-artifacts: done
-  1-3c-execute-frozen-planners-in-paper: review
-  1-3d-bind-operational-evidence-and-qualification: backlog
+  1-3c-execute-frozen-planners-in-paper: done
+  1-3d-bind-operational-evidence-and-qualification: ready-for-dev
   epic-1-retrospective: optional
   epic-2: backlog
   epic-2-retrospective: optional

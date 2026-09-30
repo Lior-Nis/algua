@@ -1,12 +1,12 @@
 ---
-baseline_commit: dc2a222ef811dc1c3a835d656a411de58423796c
+baseline_commit: ae7e3ff
 ---
 
 # Story 1.3d: Bind operational evidence and qualification
 
-Status: backlog
+Status: ready-for-dev
 
-Prepared: 2026-09-25. Baseline: Story 1.3 readiness baseline `dc2a222` (PR #671).
+Prepared: 2026-09-25. Readiness: 2026-09-30. Baseline: Story 1.3c merge `ae7e3ff` (PR #680).
 Epic: 1. Parent: Story 1.3. Requirements: FR5–FR6, FR9–FR10, FR12 and NFR1–NFR8.
 Depends on: Stories 1.3a–1.3c reviewed and merged.
 
@@ -27,6 +27,13 @@ promotion to require it for frozen deployments, and removes the temporary
 It does not migrate existing working-tree/legacy tenants, garbage-collect content, change the live
 ceremony, authorize capital, narrow code hashing or grant agents new authority. Live remains bound to
 the existing authenticated human wall until its separately reviewed deployment-signing story.
+
+## Normative contract
+
+The [Story 1.3d machine contract](../specs/spec-story-1-3d-frozen-evidence-and-qualification/SPEC.md)
+and its [field-level companion](../specs/spec-story-1-3d-frozen-evidence-and-qualification/frozen-evidence-contract.md)
+are normative; the companion's §2 (exact DDL and triggers) is this story's protected schema review.
+Implementers and reviewers must read both, and the Story 1.3c contract they build on.
 
 ## Acceptance criteria
 
