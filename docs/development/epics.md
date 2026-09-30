@@ -220,12 +220,13 @@ The approved implementation sequence is:
 2. [Story 1.3b — materialize and verify recoverable planner artifacts](stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md)
    (`done`);
 3. [Story 1.3c — execute frozen planners in paper](stories/1-3c-execute-frozen-planners-in-paper.md)
-   (`ready-for-dev`);
+   (`done`);
 4. [Story 1.3d — bind operational evidence and qualification](stories/1-3d-bind-operational-evidence-and-qualification.md)
-   (`backlog`).
+   (`ready-for-dev`).
 
-Stories 1.1, 1.2, 1.3a and 1.3b are done. Story 1.3c passed its targeted readiness review after
-adopting an exact normative frozen-execution contract and is ready for development. Story 1.3d
-remains backlog; no later child is approved merely because the parent or decomposition is approved.
+Stories 1.1, 1.2, 1.3a, 1.3b and 1.3c are done. Story 1.3d passed its targeted readiness review
+after adopting an exact normative evidence contract and is ready for development. Controlled
+migration remains backlog; no later child is approved merely because the parent or decomposition is
+approved.
 Epic 1 migration and Epic 2 require their own detailed stories and readiness review. No sprint
 completion is claimed.

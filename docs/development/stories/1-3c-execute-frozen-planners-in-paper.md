@@ -4,7 +4,7 @@ baseline_commit: 216c8ecc5d6b857f1f173060bdba4ec1eb300962
 
 # Story 1.3c: Execute frozen planners in paper
 
-Status: review
+Status: done
 
 Prepared: 2026-09-25. Readiness: 2026-09-30. Baseline: Story 1.3b merge `216c8ec` (PR #676).
 Epic: 1. Parent: Story 1.3. Requirements: FR4, FR6, FR9–FR10 and NFR1–NFR8.
@@ -248,3 +248,4 @@ tests/test_contract_float_fields.py and updates to existing planner, paper, inta
 
 - 2026-09-30: Contract and readiness (PR #678); implemented frozen paper execution; review round 1
   applied; moved to review.
+- 2026-09-30: Merged (PR #680, `ae7e3ff`) and deployed; story done.
