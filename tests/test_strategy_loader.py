@@ -300,3 +300,181 @@ def test_reload_resets_reexported_class_state(tmp_path):
                   "algua.strategies.momentum._cls_mid_probe",
                   "algua.strategies.momentum._cls_state_probe"):
             sys.modules.pop(m, None)
+
+
+def test_load_strategy_config_refreshes_a_warm_module_before_retaining_config():
+    """Frozen preparation retains CONFIG from the declared-config read: a warm process that already
+    imported the module must not freeze its stale configuration after the source changed."""
+    import algua.strategies.momentum as fam
+    from algua.strategies.loader import load_strategy_config
+
+    strat = Path(fam.__path__[0]) / "config_refresh_probe.py"
+    template = (
+        "import pandas as pd\n"
+        "from algua.contracts.types import ExecutionContract\n"
+        "from algua.strategies.base import StrategyConfig\n"
+        "CONFIG = StrategyConfig(name='config_refresh_probe', universe=[{universe}],\n"
+        "    execution=ExecutionContract(rebalance_frequency='1d'),\n"
+        "    construction='equal_weight_positive')\n"
+        "def signal(view, params):\n"
+        "    return pd.Series(dtype='float64')\n"
+    )
+    try:
+        strat.write_text(template.format(universe="'AAPL'"))
+        assert load_strategy_config("config_refresh_probe").universe == ["AAPL"]
+        strat.write_text(template.format(universe="'AAPL', 'MSFT'"))
+        assert load_strategy_config("config_refresh_probe").universe == ["AAPL", "MSFT"]
+        assert load_strategy("config_refresh_probe").config.universe == ["AAPL", "MSFT"]
+    finally:
+        strat.unlink(missing_ok=True)
+        sys.modules.pop("algua.strategies.momentum.config_refresh_probe", None)
+
+
+def test_load_strategy_config_bypasses_timestamp_valid_stale_bytecode():
+    """A same-size, same-mtime source edit leaves the cached bytecode's timestamp stamp valid; the
+    warm refresh must still compile the CURRENT source rather than retain the stale CONFIG."""
+    import importlib.util
+    import os
+    import py_compile
+
+    import algua.strategies.momentum as fam
+    from algua.strategies.loader import load_strategy_config
+
+    strat = Path(fam.__path__[0]) / "bytecode_refresh_probe.py"
+    cached = Path(importlib.util.cache_from_source(str(strat)))
+    template = (
+        "import pandas as pd\n"
+        "from algua.contracts.types import ExecutionContract\n"
+        "from algua.strategies.base import StrategyConfig\n"
+        "CONFIG = StrategyConfig(name='bytecode_refresh_probe', universe=['{symbol}'],\n"
+        "    execution=ExecutionContract(rebalance_frequency='1d'),\n"
+        "    construction='equal_weight_positive')\n"
+        "def signal(view, params):\n"
+        "    return pd.Series(dtype='float64')\n"
+    )
+    try:
+        strat.write_text(template.format(symbol="AAPL"))
+        assert load_strategy_config("bytecode_refresh_probe").universe == ["AAPL"]
+        py_compile.compile(
+            str(strat), cfile=str(cached),
+            invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP,
+        )
+        stamp = strat.stat()
+        strat.write_text(template.format(symbol="MSFT"))
+        os.utime(strat, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        assert strat.stat().st_size == stamp.st_size
+        assert load_strategy_config("bytecode_refresh_probe").universe == ["MSFT"]
+    finally:
+        strat.unlink(missing_ok=True)
+        cached.unlink(missing_ok=True)
+        sys.modules.pop("algua.strategies.momentum.bytecode_refresh_probe", None)
+
+
+def test_load_strategy_config_reloads_the_family_closure_dependency_first():
+    """``sys.modules`` order reflects when each module last finished executing, not its current
+    source's imports: a helper loaded before an independently imported deeper helper, and only
+    later edited to import it, sits BEFORE it. The refresh must still reload the deeper helper
+    first, or the helper re-binds a stale value and the retained CONFIG is stale."""
+    import importlib
+
+    import algua.strategies.momentum as fam
+    from algua.strategies.loader import load_strategy_config
+
+    d = Path(fam.__path__[0])
+    deep = d / "_closure_deep_probe.py"
+    mid = d / "_closure_mid_probe.py"
+    strat = d / "closure_order_probe.py"
+    mid.write_text("UNIVERSE = ['AAPL']\n")
+    strat.write_text(
+        "import pandas as pd\n"
+        "from algua.contracts.types import ExecutionContract\n"
+        "from algua.strategies.base import StrategyConfig\n"
+        "from algua.strategies.momentum._closure_mid_probe import UNIVERSE\n"
+        "CONFIG = StrategyConfig(name='closure_order_probe', universe=list(UNIVERSE),\n"
+        "    execution=ExecutionContract(rebalance_frequency='1d'),\n"
+        "    construction='equal_weight_positive')\n"
+        "def signal(view, params):\n"
+        "    return pd.Series(dtype='float64')\n"
+    )
+    try:
+        assert load_strategy_config("closure_order_probe").universe == ["AAPL"]
+        # Another family member imports the deeper helper independently, AFTER the helper that
+        # will later depend on it is already loaded.
+        deep.write_text("UNIVERSE = ['AAPL', 'MSFT']\n")
+        importlib.invalidate_caches()
+        importlib.import_module("algua.strategies.momentum._closure_deep_probe")
+        mid.write_text("from algua.strategies.momentum._closure_deep_probe import UNIVERSE\n")
+        deep.write_text("UNIVERSE = ['MSFT']\n")
+        assert load_strategy_config("closure_order_probe").universe == ["MSFT"]
+        assert load_strategy("closure_order_probe").config.universe == ["MSFT"]
+    finally:
+        for f in (deep, mid, strat):
+            f.unlink(missing_ok=True)
+        for m in ("algua.strategies.momentum.closure_order_probe",
+                  "algua.strategies.momentum._closure_mid_probe",
+                  "algua.strategies.momentum._closure_deep_probe"):
+            sys.modules.pop(m, None)
+
+
+def test_load_strategy_config_fails_closed_on_a_cyclic_family_import_graph():
+    """A cyclic static import component has no dependency-safe refresh order: the declared-config
+    read refuses it as not found (frozen preparation's fail-closed mapping) and leaves the warm
+    family closure exactly as it was."""
+    import algua.strategies.momentum as fam
+    from algua.strategies.loader import load_strategy_config
+
+    d = Path(fam.__path__[0])
+    left, right = d / "_cycle_left_probe.py", d / "_cycle_right_probe.py"
+    strat = d / "cycle_probe_strat.py"
+    left.write_text("UNIVERSE = ['AAPL']\n")
+    strat.write_text(
+        "import pandas as pd\n"
+        "from algua.contracts.types import ExecutionContract\n"
+        "from algua.strategies.base import StrategyConfig\n"
+        "from algua.strategies.momentum._cycle_left_probe import UNIVERSE\n"
+        "CONFIG = StrategyConfig(name='cycle_probe_strat', universe=list(UNIVERSE),\n"
+        "    execution=ExecutionContract(rebalance_frequency='1d'),\n"
+        "    construction='equal_weight_positive')\n"
+        "def signal(view, params):\n"
+        "    return pd.Series(dtype='float64')\n"
+    )
+    try:
+        assert load_strategy_config("cycle_probe_strat").universe == ["AAPL"]
+        warm = sys.modules["algua.strategies.momentum.cycle_probe_strat"]
+        left.write_text(
+            "from algua.strategies.momentum import _cycle_right_probe\nUNIVERSE = ['MSFT']\n")
+        right.write_text("from algua.strategies.momentum import _cycle_left_probe\n")
+        with pytest.raises(StrategyNotFound, match="cyclic"):
+            load_strategy_config("cycle_probe_strat")
+        assert sys.modules["algua.strategies.momentum.cycle_probe_strat"] is warm
+        assert load_strategy("cycle_probe_strat").config.universe == ["AAPL"]
+    finally:
+        for f in (left, right, strat):
+            f.unlink(missing_ok=True)
+        for m in ("algua.strategies.momentum.cycle_probe_strat",
+                  "algua.strategies.momentum._cycle_left_probe",
+                  "algua.strategies.momentum._cycle_right_probe"):
+            sys.modules.pop(m, None)
+
+
+def test_cold_load_shares_the_refresh_serialization():
+    """A non-reloading load imports through the same serialization as the warm refresh, so it can
+    never import into (or return) a family another supported caller is still rebuilding."""
+    import threading
+
+    from algua.primitives import module_refresh
+
+    loaded = threading.Event()
+
+    def load() -> None:
+        load_strategy("cross_sectional_momentum")
+        loaded.set()
+
+    with module_refresh._REFRESH_LOCK:
+        loader = threading.Thread(target=load)
+        loader.start()
+        entered_while_held = loaded.wait(0.3)
+    loader.join(10)
+
+    assert not entered_while_held, "a cold load bypassed the refresh serialization"
+    assert loaded.is_set()

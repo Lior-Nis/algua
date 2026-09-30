@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import importlib
 import inspect
 import pkgutil
-import sys
 from pathlib import Path
+from types import ModuleType
 
 import algua.strategies as _strategies_pkg
 from algua.contracts.model_types import ModelHandle
@@ -14,6 +13,11 @@ from algua.portfolio.construction import (
     validate_construction_params,
 )
 from algua.portfolio.overlays import OverlayError, resolve_overlays
+from algua.primitives.module_refresh import (
+    ModuleRefreshError,
+    refresh_package_closure,
+    serialized_import,
+)
 from algua.strategies.base import (
     LoadedStrategy,
     StrategyConfig,
@@ -60,41 +64,21 @@ def _index() -> dict[str, str]:
     return index
 
 
-def _reload_strategy_closure(dotted: str) -> None:
-    """Reload the strategy module ``dotted`` and its author-written first-party helper modules so a
-    warm batch worker (#326) does not carry their module-level state across tasks. A strategy's
-    helpers live as sibling modules in its family package ``algua.strategies.<family>``; reload
-    every already-loaded module under that package, the strategy module LAST (so it re-binds helper
-    references). The family ``__init__`` is reloaded too (a family may keep shared helpers there).
-    The enforced-pure shared layers outside the family package are intentionally left warm."""
-    family_pkg = dotted.rsplit(".", 1)[0]  # algua.strategies.<family>
-    prefix = family_pkg + "."
-    # sys.modules INSERTION order is dependency-first: Python finishes importing a module's
-    # imported submodules (inserting them) before the importer finishes and is itself inserted. So
-    # iterating in insertion order reloads a helper's dependencies BEFORE the helper, and the helper
-    # re-executes its `from ._dep import x` against the freshly-reloaded dep — no stale object
-    # rebind. The strategy module is reloaded LAST (below), after every helper it depends on.
-    siblings = [
-        m for m in list(sys.modules)
-        if (m == family_pkg or m.startswith(prefix)) and m != dotted and sys.modules[m] is not None
-    ]
-    for mod_name in siblings:
-        # Best-effort: a stale entry whose source file was deleted (e.g. a test's temp module left
-        # in sys.modules after its file was unlinked) is not a live dependency of THIS strategy and
-        # cannot be reloaded — skip it rather than fail the load.
-        if not _module_source_exists(sys.modules[mod_name]):
-            continue
-        importlib.reload(sys.modules[mod_name])
-    importlib.reload(sys.modules[dotted])  # the strategy module last
-
-
-def _module_source_exists(module: object) -> bool:
-    """True iff the module still has an on-disk source file (a reload target). A namespace package
-    or a module whose file was deleted returns False."""
-    origin = getattr(getattr(module, "__spec__", None), "origin", None)
-    if not isinstance(origin, str) or origin in ("built-in", "frozen", "namespace"):
-        return False
-    return Path(origin).exists()
+def _reload_strategy_closure(dotted: str) -> ModuleType:
+    """Re-import the strategy module ``dotted`` and its author-written first-party helper modules
+    so a warm batch worker (#326) does not carry their module-level state across tasks. A
+    strategy's helpers live as sibling modules in its family package ``algua.strategies.<family>``;
+    every loaded module under that package is replaced by FRESH module objects imported from
+    CURRENT source (the family ``__init__`` included), all-or-nothing, with stale bytecode purged
+    first (see ``primitives.module_refresh``). The enforced-pure shared layers outside the family
+    package stay warm. A cyclic or symlinked family closure fails closed as not found. Returns the
+    fresh strategy module, so a caller never re-reads ``sys.modules`` after the refresh
+    serialization is released (another supported caller's refresh may then be mid-transaction)."""
+    try:
+        family = dotted.rsplit(".", 1)[0]  # algua.strategies.<family>
+        return refresh_package_closure(family, root=dotted)
+    except ModuleRefreshError as exc:
+        raise StrategyNotFound(f"{dotted}: {exc}") from exc
 
 
 def load_strategy(name: str, *, reload: bool = False) -> LoadedStrategy:
@@ -108,18 +92,18 @@ def load_strategy(name: str, *, reload: bool = False) -> LoadedStrategy:
     run-all``, #326) reuses ONE process across many strategies, so ``sys.modules`` would otherwise
     carry a strategy's OWN module-level state into the next task. A strategy's first-party helper
     modules are part of its artifact identity (they are hashed into ``code_hash`` — see
-    ``registry.approvals``) and live as sibling modules in its family package, so we reload every
-    already-loaded ``algua.strategies.<family>.*`` module (helpers first, the strategy module last,
-    so the root re-binds fresh helper references). The enforced-pure shared layers
+    ``registry.approvals``) and live as sibling modules in its family package, so every loaded
+    ``algua.strategies.<family>.*`` module is replaced by a fresh import of the strategy's current
+    closure (see ``_reload_strategy_closure``). The enforced-pure shared layers
     (``algua.features`` / ``portfolio`` / ``contracts``, import-linter-guarded to hold no mutable
     globals) need no reload; the heavy vectorbt/numba stack stays warm."""
     dotted = _index().get(name)
     if dotted is None:
         raise StrategyNotFound(name)
-    module = importlib.import_module(dotted)
     if reload:
-        _reload_strategy_closure(dotted)
-        module = sys.modules[dotted]
+        module = _reload_strategy_closure(dotted)
+    else:
+        module = serialized_import(dotted)
     if not hasattr(module, "CONFIG") or not hasattr(module, "signal"):
         raise StrategyNotFound(f"{name} is missing CONFIG or signal")
 
@@ -207,6 +191,22 @@ def load_strategy(name: str, *, reload: bool = False) -> LoadedStrategy:
         config=config, signal_fn=module.signal, signal_panel_fn=panel_fn, construct_fn=construct_fn,
         overlay_fns=overlay_fns,
     )
+
+
+def load_strategy_config(name: str) -> StrategyConfig:
+    """Read a strategy's declared config without resolving any referenced model artifact.
+
+    The module closure is force-refreshed first, so a warm process that already imported it
+    cannot retain (and later freeze) a CONFIG that no longer matches the current source; later
+    non-reloading loads in the same process then observe the refreshed module."""
+    dotted = _index().get(name)
+    if dotted is None:
+        raise StrategyNotFound(name)
+    module = _reload_strategy_closure(dotted)
+    config = getattr(module, "CONFIG", None)
+    if not isinstance(config, StrategyConfig) or config.name != name:
+        raise StrategyNotFound(f"{name}: missing or mismatched CONFIG")
+    return config
 
 
 def _resolve_model_handle(name: str, config: StrategyConfig) -> ModelHandle:

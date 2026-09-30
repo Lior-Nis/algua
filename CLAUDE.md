@@ -18,6 +18,8 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
 - **Historical architecture rationale:** `docs/superpowers/specs/2026-05-29-algua-platform-architecture-design.md`.
   Dated plans preserve earlier decisions; the current roadmap is PRD §25.
 - **Why the rules exist (detail):** `docs/agent/operating.md`
+- **Delivering BMAD stories:** `docs/agent/story-delivery.md` — mirror actionable work to the shared
+  Algua Todoist board, implement with Claude, then hand the diff to Codex for independent review.
 - **How this foundation was built (task plan):** `docs/superpowers/plans/2026-05-29-foundation-command-surface.md`
 - **Reviewing/fixing the system?** Read `AGENTS.md` first (review mandate + invariants + deferred scope).
 - **Data contract:** `docs/contracts/bar-schema.md` — the shape of bars crossing the

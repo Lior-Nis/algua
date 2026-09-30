@@ -31,11 +31,12 @@ remote consumer to leak to), matching the issue's own recommendation.
 *retry-with-backoff* vs *abort* without pattern-matching English. It is deliberately conservative:
 `retryable` defaults to **`false`**, and only a *transient environmental* failure (one that could
 succeed identically on replay) opts a code in. A deterministic input/logic error is never retryable —
-re-running it just burns the same failure. Today exactly one code is retryable:
+re-running it just burns the same failure. Today exactly two codes are retryable:
 
 | `code` | `retryable` | why |
 |---|---|---|
 | `db_unavailable` (`sqlite3.OperationalError`, e.g. a busy/locked registry DB) | `true` | transient contention — a bounded backoff-and-retry can clear it |
+| `frozen_environment_unavailable` | `true` | a compatible wheel selected by the committed lock may become available on retry |
 | every other code (incl. `internal`, `usage_error`, `aborted`, all input/logic/domain errors) | `false` | deterministic — replay reproduces the same failure |
 
 Like `code`, `retryable` is an **additive** contract: `false` is the safe default, and a future code
@@ -51,6 +52,15 @@ resolves — anything unmatched is `internal`.
 
 | exception type | `code` |
 |---|---|
+| `FrozenSourceInvalid` | `frozen_source_invalid` |
+| `FrozenSourceDrift` | `frozen_source_drift` |
+| `FrozenAssetsUnsupported` | `frozen_assets_unsupported` |
+| `FrozenBundleCorrupt` | `frozen_bundle_corrupt` |
+| `FrozenEnvironmentUnavailable` | `frozen_environment_unavailable` |
+| `FrozenEnvironmentIncompatible` | `frozen_environment_incompatible` |
+| `FrozenEnvironmentCorrupt` | `frozen_environment_corrupt` |
+| `FrozenDescriptorConflict` | `frozen_descriptor_conflict` |
+| `ArtifactNotFound` | `artifact_not_found` |
 | `AllocationError` | `allocation_error` |
 | `TransitionError` | `wrong_stage` |
 | `ProviderError` | `provider_error` |
