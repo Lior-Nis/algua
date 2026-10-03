@@ -1278,8 +1278,9 @@ def flatten(
     actor: str = typer.Option("agent", "--actor", help="human | agent"),
 ) -> None:
     """Emergency: close this strategy's believed paper positions and trip its kill-switch.
-    The offset loop iterates paper_believed_positions (strategy-attributed paper_venue_fills),
-    so sibling positions on the shared account are never touched."""
+    It cancels only this strategy's own open orders, and the offset loop iterates
+    paper_believed_positions (strategy-attributed paper_venue_fills), so sibling orders and
+    positions on the shared account are never touched."""
     actor_enum = Actor(actor)  # fail fast on a bad actor before touching a switch (#259)
     with registry_conn() as conn:
         rec = SqliteStrategyRepository(conn).get(name)
@@ -1294,12 +1295,12 @@ def flatten(
         kill_switch.trip(conn, name, reason="flatten", actor=actor_enum.value)
         audit_append(conn, actor=actor_enum.value, action="flatten",
                      reason="manual flatten", strategy=name)
-        # Account-wide cancel; ingest fills up to the broker clock, then offset every believed
-        # position — single-sourced in the execution layer (#336). Fails SAFE: any liquidation
-        # error is captured to res.flatten_error (never an unstructured traceback).
+        # Scoped cancel (never a sibling's orders); ingest fills up to the broker clock, then
+        # offset every believed position — single-sourced in the execution layer (#336). Fails
+        # SAFE: any liquidation error is captured to res.flatten_error (never a traceback).
         res = flatten_strategy(
             conn, broker, name, LedgerKind.PAPER, lane="paper", strategy_id=rec.id,
-            cancel=broker.cancel_open_orders,
+            cancel=lambda: paper_scoped_cancel(conn, broker, name),
             ingest=lambda: ingest_paper_venue(conn, broker, tick_clock(broker.clock)[0]),
         )
         if res.flatten_error is not None:

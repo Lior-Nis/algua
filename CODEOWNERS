@@ -76,6 +76,7 @@
 /algua/registry/store/frozen_evidence.py @Lior-Nis   # Story 1.3d: the append-only invocation recorder
 /algua/live/frozen_attempt.py            @Lior-Nis   # Story 1.3d: attempt judgement (decision cross-check, weight rerun) + the attempt recorder
 /algua/execution/tick_snapshots.py       @Lior-Nis   # the tick provenance guard (deployment epoch + frozen invocation link)
+/algua/execution/dust.py                 @Lior-Nis   # Story 1.4: paper dust rule the bench flatness check (store/crud.py) trusts
 
 # --- Modules carved OUT of the files above by the simplification program (stages 6a-6c).
 # The code did not become less integrity-critical by moving; without these lines the carve
