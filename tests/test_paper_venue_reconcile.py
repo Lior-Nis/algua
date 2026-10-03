@@ -489,6 +489,12 @@ def test_flatten_still_offsets_when_broker_clock_raises(monkeypatch, tmp_path):
         def cancel_open_orders(self) -> None:
             pass
 
+        def list_open_orders(self) -> list:
+            return []
+
+        def cancel_order(self, oid: str) -> None:
+            pass
+
         def submit_offset(self, sym: str, qty: float, coid: str) -> str:
             offset_calls.append((sym, qty, coid))
             return f"o-{sym}"

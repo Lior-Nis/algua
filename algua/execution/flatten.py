@@ -13,12 +13,13 @@ from __future__ import annotations
 import math
 import sqlite3
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from algua.audit.log import append as audit_append
 from algua.contracts.types import OffsetBroker
 from algua.execution.dust import paper_dust, paper_ledger_net
+from algua.execution.errors import BrokerError
 from algua.execution.live_ledger import (
     LedgerKind,
     backfill_broker_order_id,
@@ -40,10 +41,13 @@ class FlattenResult:
     """The primitive facts of a flatten attempt; each call site builds its own payload from these.
 
     ``n_offsets`` is the number of offset orders that ACTUALLY went out; ``flatten_error`` is the
-    stringified exception if the loop failed part-way (``None`` on a clean run)."""
+    stringified failure if any symbol (or the loop) failed (``None`` on a clean run); ``unsold`` is
+    each PAPER symbol whose material believed quantity was not offset because the ledger says the
+    shared account does not hold it."""
 
     n_offsets: int
     flatten_error: str | None
+    unsold: dict[str, float] = field(default_factory=dict)
 
 
 def _believed(conn: sqlite3.Connection, name: str, kind: LedgerKind) -> dict[str, float]:
@@ -112,10 +116,13 @@ def flatten_strategy(  # noqa: PLR0913
 
     Fails SAFE: ANY exception (not only ``BrokerError``) is captured into ``flatten_error`` plus an
     audited ``flatten_failed`` row, so the emergency exit never crashes with an unstructured
-    traceback. Returns the ``FlattenResult`` facts; the call site owns payload construction.
+    traceback. A ``BrokerError`` on one symbol's offset (a venue refusal) is recorded and the loop
+    continues with the remaining symbols; any other exception stops the loop. Returns the
+    ``FlattenResult`` facts; the call site owns payload construction.
     """
     n_offsets = 0
-    flatten_error: str | None = None
+    errors: list[str] = []
+    unsold: dict[str, float] = {}
     try:
         cancel()
         ingest()
@@ -148,6 +155,8 @@ def flatten_strategy(  # noqa: PLR0913
                 # venue would refuse the whole sale. The unsold remainder stays in this tenant's
                 # ledger (dust when it is the cross-tenant residual).
                 offset_qty = min(qty, max(paper_ledger_net(conn, symbol), 0.0))
+                if not paper_dust(conn, symbol, qty - offset_qty):
+                    unsold[symbol] = qty - offset_qty
                 if paper_dust(conn, symbol, offset_qty):
                     continue
             else:
@@ -155,12 +164,22 @@ def flatten_strategy(  # noqa: PLR0913
             coid = client_order_id(name, now(), symbol)
             side = "sell" if offset_qty > 0 else "buy"
             _record(conn, name, symbol, side, coid, kind, strategy_id)
-            oid = broker.submit_offset(symbol, offset_qty, coid)
+            try:
+                oid = broker.submit_offset(symbol, offset_qty, coid)
+            except BrokerError as exc:
+                # A venue refusal of one symbol must not strand the rest of the liquidation.
+                errors.append(f"{symbol}: {exc}")
+                log.error("flatten_offset_refused", extra={"fields": {
+                    "strategy": name, "lane": lane, "symbol": symbol}}, exc_info=True)
+                continue
             _backfill(conn, coid, oid, kind)
             n_offsets += 1
     except Exception as exc:  # noqa: BLE001 — emergency path must fail safe, never propagate
-        flatten_error = str(exc)
-        audit_append(conn, actor="system", action="flatten_failed", reason=str(exc), strategy=name)
+        errors.append(str(exc))
         log.error("flatten_failed", extra={"fields": {"strategy": name, "lane": lane}},
                   exc_info=True)
-    return FlattenResult(n_offsets=n_offsets, flatten_error=flatten_error)
+    flatten_error = "; ".join(errors) if errors else None
+    if flatten_error is not None:
+        audit_append(conn, actor="system", action="flatten_failed", reason=flatten_error,
+                     strategy=name)
+    return FlattenResult(n_offsets=n_offsets, flatten_error=flatten_error, unsold=unsold)

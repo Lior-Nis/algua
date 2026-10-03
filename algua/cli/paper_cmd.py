@@ -1303,15 +1303,19 @@ def flatten(
             cancel=lambda: paper_scoped_cancel(conn, broker, name),
             ingest=lambda: ingest_paper_venue(conn, broker, tick_clock(broker.clock)[0]),
         )
+        # A material belief the ledger says the account does not hold is reported, never hidden.
+        unsold = {"unsold": res.unsold} if res.unsold else {}
         if res.flatten_error is not None:
-            emit(breach_payload(res.flatten_error, strategy=name, liquidation_submitted=False,
-                                offsets_submitted=res.n_offsets))
+            emit(breach_payload(res.flatten_error, strategy=name,
+                                liquidation_submitted=res.n_offsets > 0,
+                                offsets_submitted=res.n_offsets, **unsold))
             raise typer.Exit(1)
     # liquidation_submitted reflects whether any offset order ACTUALLY went out (GATE-2 HIGH): a
     # strategy already flat (no believed positions) submits none, so report False rather than imply
     # a liquidation that never happened. Accepted offset fills land async (may be next open).
     emit(ok({"strategy": name, "kill_switch": "tripped",
-             "liquidation_submitted": res.n_offsets > 0, "offsets_submitted": res.n_offsets}))
+             "liquidation_submitted": res.n_offsets > 0, "offsets_submitted": res.n_offsets,
+             **unsold}))
 
 
 @paper_app.command("halt-all")

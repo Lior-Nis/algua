@@ -14,7 +14,9 @@ import pytest
 
 from algua.audit.log import read as audit_read
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
+from algua.execution import paper_reconcile
 from algua.execution.dust import paper_dust, paper_ledger_net
+from algua.execution.errors import BrokerError
 from algua.execution.flatten import flatten_strategy
 from algua.execution.live_ledger import LedgerKind, paper_believed_positions
 from algua.registry import allocations
@@ -131,6 +133,53 @@ def test_flatten_sells_nothing_when_the_ledger_net_is_not_long(conn):
     venue = _Venue()
     res = _flatten(conn, venue, "liquidity")
     assert res.flatten_error is None and venue.offsets == []
+    assert res.unsold == {"UNH": 2.0}                # reported, never hidden
+
+
+def test_flatten_reports_a_material_unsold_remainder_but_not_dust(conn):
+    _fill(conn, "liquidity", "UNH", 3.552855)
+    _fill(conn, "gains", "UNH", -0.000123)            # $0.06 short: the remainder is dust
+    _fill(conn, "big", "KO", 5.0, price=60.0)
+    _fill(conn, "other", "KO", -2.0, price=60.0)      # account holds 3: 2 KO ($120) unsold
+    res = _flatten(conn, _Venue(), "liquidity")
+    assert res.unsold == {}
+    res = _flatten(conn, _Venue(), "big")
+    assert res.unsold == {"KO": pytest.approx(2.0)}
+
+
+class _RefusingVenue(_Venue):
+    def __init__(self, refuse: str) -> None:
+        super().__init__()
+        self.refuse = refuse
+
+    def submit_offset(self, symbol: str, qty: float, coid: str) -> str:
+        if symbol == self.refuse:
+            raise BrokerError("alpaca 403 on /v2/orders (offset): insufficient qty")
+        return super().submit_offset(symbol, qty, coid)
+
+
+def test_a_venue_refusal_of_one_symbol_does_not_strand_the_rest(conn):
+    for symbol in ("AAA", "BBB", "CCC"):
+        _fill(conn, "s", symbol, 2.0)
+    venue = _RefusingVenue("BBB")
+    res = _flatten(conn, venue, "s")
+    assert sorted(s for s, _ in venue.offsets) == ["AAA", "CCC"]
+    assert res.n_offsets == 2
+    assert res.flatten_error is not None and res.flatten_error.startswith("BBB: alpaca 403")
+    [row] = [r for r in audit_read(conn) if r["action"] == "flatten_failed"]
+    assert "BBB" in row["reason"]
+
+
+def test_a_systemic_error_still_stops_the_loop(conn):
+    for symbol in ("AAA", "BBB"):
+        _fill(conn, "s", symbol, 2.0)
+
+    class _Locked(_Venue):
+        def submit_offset(self, symbol, qty, coid):
+            raise sqlite3.OperationalError("database is locked")
+
+    res = _flatten(conn, _Locked(), "s")
+    assert res.n_offsets == 0 and res.flatten_error == "database is locked"
 
 
 def test_flatten_buys_back_a_material_short_in_full(conn):
@@ -212,3 +261,44 @@ def test_the_live_lane_bench_check_keeps_its_exact_rule(conn):
             "VALUES ('l1','s1','UNH',0.000123,500.0,'2026-10-01T14:00:00Z')")
     with pytest.raises(TransitionError, match="not flat"):
         transition_strategy(repo, "s1", Stage.DORMANT, Actor.AGENT, reason="bench")
+
+
+# --- the paper account reconcile --------------------------------------------------------------
+
+def _stage(conn, name: str, stage: Stage) -> None:
+    repo = SqliteStrategyRepository(conn)
+    known = {r.name for r in repo.list_strategies()}
+    sid = repo.get(name).id if name in known else repo.add(name=name).id
+    force_legacy_strategy(conn, sid, stage=stage.value)
+
+
+def test_a_retired_tenants_dust_still_explains_its_half_of_the_account(conn):
+    """The review's halting sequence: retire the dust-short tenant first while its long sibling is
+    still on the lane. The broker holds the pair's sum, so the account must stay clean."""
+    _fill(conn, "liquidity", "UNH", 3.552855)
+    _fill(conn, "gains", "UNH", -0.000123)
+    _stage(conn, "liquidity", Stage.PAPER)
+    _stage(conn, "gains", Stage.RETIRED)
+    for _ in range(4):
+        r = paper_reconcile.reconcile(conn, {"UNH": 3.55273207}, paper_reconcile.next_cycle(conn))
+        assert r.clean and not r.halt
+
+
+def test_a_retired_tenants_material_belief_never_explains_a_position(conn):
+    _fill(conn, "pap", "UNH", 1.0)
+    _fill(conn, "gone", "UNH", 2.0)                    # $1,000 left on a retired strategy
+    _stage(conn, "pap", Stage.PAPER)
+    _stage(conn, "gone", Stage.RETIRED)
+    assert paper_reconcile.attributed_paper_net(conn) == {"UNH": pytest.approx(1.0)}
+    r = paper_reconcile.reconcile(conn, {"UNH": 3.0}, paper_reconcile.next_cycle(conn))
+    assert not r.clean
+
+
+def test_the_cohort_exit_leaves_a_clean_empty_account(conn):
+    _fill(conn, "liquidity", "UNH", 3.552855)
+    _fill(conn, "gains", "UNH", -0.000123)
+    _fill(conn, "liquidity", "UNH", -3.55273207)       # the capped sale's fill
+    _stage(conn, "liquidity", Stage.RETIRED)
+    _stage(conn, "gains", Stage.RETIRED)
+    r = paper_reconcile.reconcile(conn, {}, paper_reconcile.next_cycle(conn))
+    assert r.clean and not r.halt
