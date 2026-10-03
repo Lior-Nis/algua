@@ -173,6 +173,8 @@ def test_flatten_submit_exception_captured_both_lanes(conn, monkeypatch, exc, ki
         "algua.execution.flatten.paper_believed_positions",
         lambda conn, name: {"AAA": 5.0}
     )
+    # the paper long-offset cap reads the ledger's account net; keep the stubbed world consistent
+    monkeypatch.setattr("algua.execution.flatten.paper_ledger_net", lambda conn, symbol: 5.0)
 
     broker = _FakeOffsetBrokerWithFailingSubmit(exc)
     lane = "live" if kind is LedgerKind.LIVE else "paper"

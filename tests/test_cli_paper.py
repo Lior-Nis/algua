@@ -663,13 +663,21 @@ def test_trade_tick_recovers_stranded_fill(monkeypatch):
 
 
 class _FlattenBroker:
-    def __init__(self, fail=False):
+    def __init__(self, fail=False, open_orders=()):
         self.fail = fail
         self.cancelled = False
         self.offset_calls: list = []   # (sym, qty, coid) tuples
+        self.open_orders = [dict(o) for o in open_orders]
+        self.cancelled_ids: list[str] = []
 
     def cancel_open_orders(self):
         self.cancelled = True
+
+    def list_open_orders(self):
+        return list(self.open_orders)
+
+    def cancel_order(self, oid):
+        self.cancelled_ids.append(oid)
 
     def clock(self):
         return "2023-06-01T14:00:00+00:00"
@@ -721,14 +729,21 @@ def test_paper_flatten_closes_and_trips(monkeypatch, tmp_path):
     _to_paper()
     # seed a paper-venue fill so paper_believed_positions returns something to offset
     _seed_paper_venue_fill(tmp_path / "p.db", "cross_sectional_momentum", "AAA")
-    broker = _FlattenBroker()
+    _seed_paper_venue_order(tmp_path / "p.db", "cross_sectional_momentum", "AAA")
+    _seed_paper_venue_order(tmp_path / "p.db", "sibling_strat", "SIB")
+    broker = _FlattenBroker(open_orders=[
+        {"id": "own-1", "client_order_id": "coid-cross_sectional_momentum-AAA"},
+        {"id": "sib-1", "client_order_id": "coid-sibling_strat-SIB"},
+    ])
     monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
     result = runner.invoke(app, ["paper", "flatten", "cross_sectional_momentum"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert payload["liquidation_submitted"] is True and payload["kill_switch"] == "tripped"
-    # scoped to the strategy's believed positions via paper_venue_fills, not account-wide close
-    assert broker.cancelled is True
+    # Story 1.4: only this strategy's own resting order is cancelled; a sibling's survives, and
+    # the account-wide cancel is never used.
+    assert broker.cancelled_ids == ["own-1"]
+    assert broker.cancelled is False
     assert any(sym == "AAA" for sym, _, _ in broker.offset_calls)
     show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
     assert show["kill_switch"]["tripped"] is True
@@ -753,7 +768,7 @@ def test_paper_flatten_allowed_at_forward_tested_stage(monkeypatch, tmp_path):
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert payload["liquidation_submitted"] is True and payload["kill_switch"] == "tripped"
-    assert broker.cancelled is True
+    assert broker.cancelled is False  # scoped cancel, never account-wide (Story 1.4)
     assert any(sym == "AAA" for sym, _, _ in broker.offset_calls)
     show = json.loads(runner.invoke(app, ["paper", "show", name]).stdout)
     assert show["kill_switch"]["tripped"] is True

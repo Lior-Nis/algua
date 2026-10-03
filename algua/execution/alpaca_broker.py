@@ -369,11 +369,8 @@ class _AlpacaBroker:
         """Submit a market order to OFFSET a believed position: sell `signed_qty` shares if long
         (signed_qty>0), buy them back if short (<0). Used by per-strategy liquidation — sized to the
         strategy's ledger qty so the account net moves by exactly this strategy's contribution."""
-        # Format qty as fixed-point Decimal (mirrors the notional path), NOT format(qty,'g') — that
-        # rounds to 6 sig figs and can emit scientific notation (e.g. '1e+06') for a large/fraction
-        # believed qty (#269). believed qty is summed from broker fills as a float, so quantize to
-        # Alpaca's max fractional precision (9 dp) to shed float noise; a residual that rounds to
-        # zero (already flat) is a noop, not a malformed zero-qty order.
+        # Fixed-point Decimal qty, NOT format(qty,'g') (6 sig figs / scientific notation, #269),
+        # quantized to Alpaca's 9 dp to shed float noise; a residual that rounds to zero is a noop.
         body = _qty_order(symbol, signed_qty, client_order_id)
         if body is None:
             return "noop"
@@ -395,9 +392,12 @@ class _AlpacaBroker:
         return self.submit_sized(intent, self.snapshot([intent.symbol]), client_order_id)
 
     def list_open_orders(self) -> list[Any]:
-        """All OPEN orders on the account (GET /v2/orders?status=open). Each carries `id` and
-        `client_order_id`; the caller scopes cancellation to a strategy by client_order_id."""
-        return self._read(self._get("/v2/orders?status=open"), "/v2/orders")
+        """All OPEN orders on the account, up to Alpaca's 500-per-call maximum (its default is 50).
+        Each carries `id` and `client_order_id`; the caller scopes cancellation by the latter."""
+        rows = self._read(self._get("/v2/orders?status=open&limit=500"), "/v2/orders")
+        if isinstance(rows, list) and len(rows) >= 500:  # a full page may hide a tenant's orders
+            raise BrokerError(f"alpaca /v2/orders: {len(rows)} open orders fill the page; refusing")
+        return rows
 
     def get_order_by_client_order_id(self, client_order_id: str) -> dict[str, Any] | None:
         """The broker's order carrying `client_order_id` (GET /v2/orders:by_client_order_id), any

@@ -4,7 +4,7 @@ baseline_commit: 34ab0d77c61af9ac20637c59545874720bd15fc9
 
 # Story 1.3: Materialize and execute frozen planner artifacts
 
-Status: decomposed
+Status: done
 
 Prepared: 2026-09-24. Baseline: Story 1.2 merge `34ab0d7` (PR #669).
 Epic: 1. Requirements: FR4, FR6, FR9–FR10 and the paper portion of FR1/FR12.
@@ -385,6 +385,8 @@ To be recorded during implementation.
 
 ## Change Log
 
+- 2026-10-01: All four children are done (Story 1.3d merged in PR #683); the parent outcome is
+  complete. Existing legacy tenants leave paper through Story 1.4's controlled exit.
 - 2026-09-25: Status changed to `decomposed` after implementation-readiness review. Stories
   1.3a–1.3d and their coverage map now govern implementation; unsupported model assets were
   explicitly deferred. No runtime, authority, schema or deployment behavior changed.

@@ -572,8 +572,19 @@ def test_account_activities_reads_list(monkeypatch):
 
 def test_list_open_orders(monkeypatch):
     monkeypatch.setattr(ab, "requests", _FakeRequests(
-        {"/v2/orders?status=open": _FakeResp(200, [{"id": "o1", "client_order_id": "c1"}])}))
+        {"/v2/orders?status=open&limit=500":
+         _FakeResp(200, [{"id": "o1", "client_order_id": "c1"}])}))
     assert _broker().list_open_orders() == [{"id": "o1", "client_order_id": "c1"}]
+
+
+def test_list_open_orders_refuses_a_full_page(monkeypatch):
+    # Alpaca's default page is 50 and the call caps at 500: a full page may hide a tenant's older
+    # resting orders from the scoped cancel, so it fails closed rather than cancel a partial list.
+    full = [{"id": f"o{i}", "client_order_id": f"c{i}"} for i in range(500)]
+    monkeypatch.setattr(ab, "requests", _FakeRequests(
+        {"/v2/orders?status=open&limit=500": _FakeResp(200, full)}))
+    with pytest.raises(BrokerError, match="fill the page"):
+        _broker().list_open_orders()
 
 
 def test_cancel_order_by_id(monkeypatch):

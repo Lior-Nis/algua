@@ -331,12 +331,20 @@ class CrudMixin(TransitionMixin):
         no longer iterates. When the caller injects an ``exit_guard`` (the broker-backed drain,
         wired for the LIVE lane, #497 F2/H1), its ``cancel_and_ingest`` already ran before the lock;
         we re-list the strategy's STILL-open orders UNDER the lock so a cancel that failed to remove
-        one (a non-cancelable/partial state) blocks the revoke+CAS rather than orphaning it."""
+        one (a non-cancelable/partial state) blocks the revoke+CAS rather than orphaning it.
+
+        A paper residual the venue cannot trade (``paper_dust``: under the reconcile tolerance or
+        the minimum order) is flat for this check; ``paper flatten`` skips the same residuals."""
+        from algua.execution.dust import paper_dust
         from algua.execution.live_ledger import LedgerKind, believed_positions
         kind = LedgerKind.LIVE if source is Stage.LIVE else LedgerKind.PAPER
-        if believed_positions(self._conn, name, kind):
+        held = believed_positions(self._conn, name, kind)
+        if kind is LedgerKind.PAPER:
+            held = {s: q for s, q in held.items() if not paper_dust(self._conn, s, q)}
+        if held:
             raise TransitionError(
-                f"{name} is not flat (open {kind.value} positions); flatten before this transition")
+                f"{name} is not flat (open {kind.value} positions {sorted(held)}); flatten before "
+                "this transition")
         if exit_guard is not None:
             open_ids = exit_guard.owned_open_order_ids()
             if open_ids:
