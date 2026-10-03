@@ -45,11 +45,12 @@ development_status:
   epic-1: in-progress
   1-1-extract-in-process-decision-planner: done
   1-2-record-working-tree-deployments: done
-  1-3-materialize-and-execute-frozen-planner-artifacts: in-progress  # aggregate parent only
+  1-3-materialize-and-execute-frozen-planner-artifacts: done  # aggregate parent only
   1-3a-complete-two-phase-planner-boundary-in-process: done
   1-3b-materialize-and-verify-recoverable-planner-artifacts: done
   1-3c-execute-frozen-planners-in-paper: done
-  1-3d-bind-operational-evidence-and-qualification: review
+  1-3d-bind-operational-evidence-and-qualification: done
+  1-4-controlled-exit-of-the-legacy-paper-cohort: review
   epic-1-retrospective: optional
   epic-2: backlog
   epic-2-retrospective: optional

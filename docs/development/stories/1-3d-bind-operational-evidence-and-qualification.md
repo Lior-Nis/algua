@@ -4,7 +4,7 @@ baseline_commit: ae7e3ff
 
 # Story 1.3d: Bind operational evidence and qualification
 
-Status: review
+Status: done
 
 Prepared: 2026-09-25. Readiness: 2026-09-30. Baseline: Story 1.3c merge `ae7e3ff` (PR #680).
 Epic: 1. Parent: Story 1.3. Requirements: FR5–FR6, FR9–FR10, FR12 and NFR1–NFR8.
@@ -168,6 +168,7 @@ dispatch, paper CLI, isolation, promotion-refusal, forward-promotion, human-acto
 
 - 2026-10-01: Contract and readiness (PR #681); implemented frozen evidence and qualification; review
   round 1 applied; moved to review.
+- 2026-10-01: Merged (PR #683, `14621bf`); schema v48 applied in production; done.
 
 ## Development notes
 

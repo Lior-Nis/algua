@@ -222,11 +222,20 @@ The approved implementation sequence is:
 3. [Story 1.3c — execute frozen planners in paper](stories/1-3c-execute-frozen-planners-in-paper.md)
    (`done`);
 4. [Story 1.3d — bind operational evidence and qualification](stories/1-3d-bind-operational-evidence-and-qualification.md)
-   (`ready-for-dev`).
+   (`done`).
 
-Stories 1.1, 1.2, 1.3a, 1.3b and 1.3c are done. Story 1.3d passed its targeted readiness review
-after adopting an exact normative evidence contract and is ready for development. Controlled
-migration remains backlog; no later child is approved merely because the parent or decomposition is
-approved.
-Epic 1 migration and Epic 2 require their own detailed stories and readiness review. No sprint
-completion is claimed.
+Stories 1.1, 1.2 and 1.3a–1.3d are done, so the Story 1.3 parent outcome is complete.
+
+### Story 1.4: Controlled exit of the legacy paper cohort
+
+As the operator, I want every legacy paper tenant stopped, liquidated and retired so the only
+strategies that trade in paper from now on are frozen deployments admitted through the qualified
+path.
+
+The owner decided on 2026-10-01 to retire the whole cohort rather than requalify any of it, so the
+story fixes the three defects that kept the existing `paper flatten` and `paper -> retired` from
+exiting tenants on the shared account, then retires them. Full acceptance criteria are in
+[Story 1.4](stories/1-4-controlled-exit-of-the-legacy-paper-cohort.md) and its normative
+[contract](specs/spec-story-1-4-legacy-cohort-exit/SPEC.md).
+
+Epic 2 requires its own detailed stories and readiness review. No sprint completion is claimed.
