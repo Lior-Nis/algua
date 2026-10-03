@@ -54,7 +54,11 @@ agent-allowed, risk-reducing actions; the owner asked for both.
    unchanged (tests).
 4. **One protected rule.** The rule lives in one leaf module the registry may import, protected by
    CODEOWNERS and the integrity-critical set; import contracts, size pins and the full gate pass.
-5. **The cohort is gone.** Every legacy tenant is kill-switched, flattened and retired with audited
+5. **No halt from retirement.** A strategy that left the paper lane with dust keeps that dust
+   explained in the account reconcile; a material non-lane belief never explains a position (tests).
+6. **Honest emergency flatten.** One symbol's venue refusal does not stop the rest; unsold material
+   beliefs are reported; the scoped cancel never acts on a truncated open-order list (tests).
+7. **The cohort is gone.** Every legacy tenant is kill-switched, flattened and retired with audited
    transitions, its allocation revoked, and the paper operator resumes with no legacy tenant.
 
 ## Owner decision (Lior, 2026-10-01)
@@ -71,8 +75,32 @@ and working-tree tick paths now that the cohort is empty.
 - [x] Shared paper dust rule and ledger-net offset cap in the flatten loop (AC2).
 - [x] Accept sub-minimum paper residuals in the bench flatness check (AC3).
 - [x] Protection, mutation checks, full gate (AC4).
-- [ ] Independent review; merge and deploy.
-- [ ] Flatten and retire the cohort; resume the paper operator (AC5).
+- [x] Independent review round and fixes (AC5–AC6).
+- [ ] Merge and deploy.
+- [ ] Flatten and retire the cohort; resume the paper operator (AC7).
+
+### Review Findings
+
+Independent review round 1 (2026-10-03; Codex out of quota, so the story-delivery fallback ran a
+combined Blind Hunter + Edge Case Hunter + Acceptance Auditor pass and applied the rule to the
+production ledger read-only).
+
+- [x] [Review][Patch] HIGH: retiring with dust dropped the residual out of the paper account
+  reconcile while the broker still held it (or its counterpart), deferring every cycle and engaging
+  the global halt; left-lane dust is now counted [algua/execution/paper_reconcile.py]
+- [x] [Review][Patch] The ledger-net cap cannot see sells queued by earlier flattens, so a later
+  tenant's offset could still be refused and abort its loop; a per-symbol venue refusal now
+  continues with the remaining symbols [algua/execution/flatten.py]
+- [x] [Review][Patch] The scoped cancel listed only Alpaca's default 50 open orders; it now reads up
+  to 500 and fails closed on a full page [algua/execution/alpaca_broker.py]
+- [x] [Review][Patch] A capped or skipped material belief was reported as success; `paper flatten`
+  now reports it as `unsold` [algua/execution/flatten.py, algua/cli/paper_cmd.py]
+- [x] [Review][Patch] The protected rule read unprotected sizing/reconcile constants; `dust.py` owns
+  its constants [algua/execution/dust.py]
+- [x] [Review][Defer] Paper-lane bench exits have no open-order re-check (live has one) — #685; the
+  operator flattens and waits for fills before retiring
+- [x] [Review][Defer] A stale last-fill price can misjudge a residual within about $1 of the
+  minimum — bounded, recorded
 
 ## Development notes
 

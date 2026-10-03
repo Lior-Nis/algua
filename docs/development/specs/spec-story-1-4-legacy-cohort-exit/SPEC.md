@@ -40,13 +40,26 @@ cohort impossible to exit cleanly on the shared paper account.
   success: The `paper -> retired` (and every other paper-lane bench) flatness check treats the same
     sub-minimum residuals as flat; a tradeable residual still blocks and names its symbols. The live
     lane's rule is unchanged.
+- id: CAP-4
+  intent: Retiring with dust never halts the account.
+  success: The paper account reconcile counts a strategy that has left the paper lane only where its
+    remaining belief is that sub-minimum dust, so the residual (or its cross-tenant counterpart) the
+    venue still holds stays explained; a material non-lane belief and orphan fills still never
+    explain a broker position.
+- id: CAP-5
+  intent: An emergency flatten liquidates as much as it can and says what it could not.
+  success: A venue refusal of one symbol's offset is recorded and the loop continues with the rest
+    (a systemic error still stops it); a material belief the ledger says the account does not hold is
+    reported as `unsold`; the scoped cancel reads up to 500 open orders and fails closed on a full
+    page rather than cancel a partial list.
 
 ## Constraints
 
-- One shared rule: `algua/execution/dust.py` (`paper_dust`, `paper_ledger_net`) is a leaf module so
-  the registry's bench check and the flatten loop use the same rule without the registry importing
-  the live lane. It is CODEOWNERS-protected and in the integrity-critical set, because the protected
-  bench check trusts it.
+- One shared rule: `algua/execution/dust.py` (`paper_dust`, `paper_ledger_net`) is a stdlib-only
+  leaf with its own constants (1e-6 shares; the $1 venue minimum), so the registry's bench check,
+  the flatten loop and the account reconcile use one rule without the registry importing the live
+  lane, and a sizing or reconcile setting elsewhere cannot widen it. It is CODEOWNERS-protected and
+  in the integrity-critical set, because the protected bench check trusts it.
 - No schema change, lifecycle edge, gate, authority, CLI command or error code. The broker's
   `submit_offset` stays strict: an emergency offset the account cannot fully fill still raises.
 - The paper `trade-tick` breach keeps its account-wide cancel (single tenant by construction).
