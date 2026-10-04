@@ -51,6 +51,19 @@ development_status:
   1-3c-execute-frozen-planners-in-paper: done
   1-3d-bind-operational-evidence-and-qualification: done
   1-4-controlled-exit-of-the-legacy-paper-cohort: review
-  epic-1-retrospective: optional
-  epic-2: backlog
+  epic-1-retrospective: done
+  epic-2: in-progress
+  # 2-1 and 2-2 are design-complete with no Epic 2 predecessor; each still runs its contract-first
+  # readiness check ("Contract and readiness first", docs/agent/story-delivery.md) before code.
+  # Later stories wait on the predecessor named in their story file.
+  2-1-refuse-live-qualification-on-relaxed-gates: backlog  # next: contract + readiness
+  2-2-drain-resting-paper-orders-on-lane-exit: backlog  # next: contract + readiness
+  2-3-bind-live-authorization-to-the-frozen-deployment: backlog  # after 2-1 and 2-2
+  2-4-hand-off-and-execute-frozen-deployments-live: backlog  # after 2-3
+  2-5-enforce-the-experimental-capital-envelope: backlog  # after 2-4; activation needs owner inputs
+  2-6-pause-live-trading-at-ten-percent-drawdown: backlog  # after 2-5
+  2-7-trace-orders-from-deployment-to-position: backlog  # after 2-6
+  2-8-validate-releases-in-paper-before-live: backlog  # owner decision + after 2-7
+  2-9-define-safe-states-and-incident-evidence: backlog  # after 2-8
+  2-10-run-the-72-hour-unattended-acceptance: backlog  # after 2-1..2-9 deployed + preconditions
   epic-2-retrospective: optional
