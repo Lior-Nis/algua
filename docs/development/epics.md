@@ -142,6 +142,11 @@ Build on Epic 1; do not rebuild or re-freeze the artifact during live activation
 Coverage: live portion of FR1 and FR12; FR8, FR11, FR13–FR14. Linked work: #661 slice 6 and #624.
 The owner tasks below gate policy-dependent stories, not Epic 1's planner extraction.
 
+Prepared 2026-10-04 as ten dependency-ordered stories, 2.1–2.10 (see "Prepared implementation
+stories" below). The two policy decisions it needed were made on 2026-10-04. The account and
+deployment prerequisites task stays open; it gates activation, not construction. Linked issues:
+#614, #647, #648, #682, #685.
+
 ### Requirement coverage map
 
 | Requirements | Delivery outcome |
@@ -159,13 +164,43 @@ The owner tasks below gate policy-dependent stories, not Epic 1's planner extrac
 
 Assigned to Lior on the Algua board, without invented deadlines:
 
-- [10% pause/resumption policy](https://app.todoist.com/app/task/6hcQ3C4cVCgX8HQG): equity reference,
-  cash flows, threshold equality, orders/positions and human-reviewed resumption.
-- [Signed-relaxation policy](https://app.todoist.com/app/task/6hcQ3C8gGj7Vrx5p): explicit treatment
-  of authenticated exceptions under the new experimental budget, before live qualification.
-- [Account/deployment prerequisites](https://app.todoist.com/app/task/6hcQ3CHr49rCRV3p): capital and
-  instrument restrictions, key custody, protected merges and immutable signing anchor before
-  activation. Coordinate with the existing VPS task; never paste credentials into task comments.
+- [10% pause/resumption policy](https://app.todoist.com/app/task/6hcQ3C4cVCgX8HQG): **decided
+  2026-10-04** ([#624](https://github.com/Lior-Nis/algua/issues/624)). Drawdown is measured from the
+  live account's equity high-water mark, and deposits and withdrawals move the peak by the same
+  amount. The pause triggers at a drawdown of 10% or more. On trigger: engage the global live halt,
+  cancel resting orders and block new orders; open positions are kept. Resumption only through a
+  signed human command after a drawdown report, and it re-bases the peak to current equity.
+  Implemented by Story 2.6.
+- [Signed-relaxation policy](https://app.todoist.com/app/task/6hcQ3C8gGj7Vrx5p): **decided
+  2026-10-04** ([#624](https://github.com/Lior-Nis/algua/issues/624)). Signed relaxations remain
+  available for research and paper exploration. A relaxed research gate or forward certificate can
+  never authorize go-live; experimental live qualification must pass every gate at its protected
+  default. Agents receive no waiver authority. Implemented by Story 2.1.
+- [Account/deployment prerequisites](https://app.todoist.com/app/task/6hcQ3CHr49rCRV3p): **still
+  open.** A human-access acceptance check before activation: capital and instrument restrictions,
+  key custody, protected merges and immutable signing anchor (see #648). Coordinate with the
+  existing VPS task; never paste credentials into task comments. It gates activation, not the
+  construction of any Epic 2 story. The activation inputs it must supply are the USD ceiling
+  equivalent to ₪2,000 and the permitted instrument list (Story 2.5), plus live credentials and the
+  live bars provider (Story 2.3).
+
+Decisions surfaced while preparing Epic 2, made by Lior on 2026-10-04:
+
+- **Release validation (Story 2.8):** a supervisor release may run live only after at least one
+  completed paper cycle on the identical release that ticked a frozen tenant with a clean reconcile
+  and a complete trace audit; live stays refused when the paper book is empty.
+- **Alerts (Story 2.10):** email to the owner through the existing kaggler SMTP sender, driven by
+  systemd `OnFailure=` hooks and the `fleet health` watchdog.
+- **#682:** the raw `registry transition --to forward_tested|candidate` edges are removed for every
+  actor; the promote commands are the only ways in (Story 2.1).
+
+Still open:
+
+- **Not blocking:** whether the experimental account keeps the existing liquidating book breaker
+  (15% drawdown, 5% daily loss, peak not cash-flow adjusted) alongside the 10% pause; whether the
+  pause's global halt should keep stopping the paper lane; whether `live flatten` stays available
+  while paused (Story 2.6); and whether the capital ceiling bounds capital at risk rather than the
+  account balance (Story 2.5).
 
 ## Prepared implementation stories
 
@@ -238,4 +273,91 @@ exiting tenants on the shared account, then retires them. Full acceptance criter
 [Story 1.4](stories/1-4-controlled-exit-of-the-legacy-paper-cohort.md) and its normative
 [contract](specs/spec-story-1-4-legacy-cohort-exit/SPEC.md).
 
-Epic 2 requires its own detailed stories and readiness review. No sprint completion is claimed.
+**Epic 2 stories, prepared 2026-10-04** from FR1, FR8 and FR11–FR14, the two owner decisions
+recorded on #624, and the current code at `e875b6d`. They are dependency-ordered. Stories 2.1 and
+2.2 are independent and design-complete; every later story waits for its predecessor. Each still
+requires its own contract and readiness review before implementation (see "Contract and readiness
+first" in [story delivery](../agent/story-delivery.md)). None authorizes activation, funding or a
+capital change. No sprint completion is claimed.
+
+### Story 2.1: Refuse live qualification built on relaxed gates
+
+Records the exact relaxation set on every new research and forward-gate row, classifies existing
+rows once at migration, and refuses go-live, at challenge issuance and at completion, unless both
+the deployment's research gate and its forward certificate are unrelaxed. No flag or signature
+waives it, and exploration keeps every signed relaxation. It goes first because rows minted before
+it carry no recorded set. [Story 2.1](stories/2-1-refuse-live-qualification-on-relaxed-gates.md):
+`ready-for-dev`.
+
+### Story 2.2: Drain a strategy's resting paper orders on every paper-lane exit
+
+Fixes #685: every paper-source book exit, including `forward_tested -> live`, cancels the strategy's
+own resting paper orders, ingests fills, and refuses while an order remains, failing closed without
+the venue. Needed before the signed go-live and the unattended paper run.
+[Story 2.2](stories/2-2-drain-resting-paper-orders-on-lane-exit.md): `ready-for-dev`.
+
+### Story 2.3: Bind the signed live authorization to the exact frozen deployment
+
+Changes the go-live signature from the checkout identity to the deployment: id, manifest, bundle and
+environment digests, research gate, forward certificate, live bars provider (#614) and live account.
+Trade time re-verifies against the deployment record; leaving live or `live revoke` ends the
+authorization; go-live becomes frozen-only and never rebuilds. #661 slice 6.
+[Story 2.3](stories/2-3-bind-live-authorization-to-the-frozen-deployment.md): `backlog` until 2.1
+and 2.2 merge.
+
+### Story 2.4: Hand a frozen deployment off from paper and execute it in the live lane
+
+Adds an agent-allowed `paper handoff` that leaves the paper book flat without invalidating the
+certificate, then runs the authorized deployment's planner in the live lane from its verified
+bundle, with invocation evidence and tick linkage, while the supervisor keeps every live authority.
+[Story 2.4](stories/2-4-hand-off-and-execute-frozen-deployments-live.md): `backlog` until 2.3
+merges.
+
+### Story 2.5: Enforce the experimental capital envelope
+
+A protected, fail-closed policy: capital ceiling, long-only, gross at most 1.0, permitted
+instruments only, cash (never margin) for buys, refusal of leveraged or shorting deployments at
+go-live, and signed human approval for any live allocation increase. Building needs no owner input;
+activating needs the USD ceiling and the instrument list.
+[Story 2.5](stories/2-5-enforce-the-experimental-capital-envelope.md): `backlog` until 2.4 merges.
+
+### Story 2.6: Pause live trading at a 10% drawdown of the experimental account
+
+Implements the owner's pause: a cash-flow-adjusted high-water mark, an inclusive 10% trigger, global
+halt plus cancel of resting orders with positions kept, a latch no agent path can lift, a stored
+drawdown report and a signed resume that re-bases the peak. The existing book breaker is unchanged.
+[Story 2.6](stories/2-6-pause-live-trading-at-ten-percent-drawdown.md): `backlog` until 2.5 merges.
+
+### Story 2.7: Trace every order from its deployment to the resulting position
+
+An immutable trace row written before each paper and live POST links deployment, invocation, bars
+snapshot, decision, sizing and risk decision to the broker order, fills and position. Live intent
+becomes crash-safe at parity with paper; `trace order` and `trace audit` read the chain.
+[Story 2.7](stories/2-7-trace-orders-from-deployment-to-position.md): `backlog` until 2.6 merges.
+
+### Story 2.8: Validate each supervisor release in paper before it trades live
+
+Records the supervisor release identity on every paper and live cycle and refuses live strategy
+ticks on a release that paper has not validated, while every risk-reducing step still runs. Ships
+the live operator job and units disabled; enabling them is part of activation.
+[Story 2.8](stories/2-8-validate-releases-in-paper-before-live.md): `backlog` until the owner
+decides the minimum paper validation and 2.7 merges.
+
+### Story 2.9: Define the safe states and assemble incident evidence
+
+A reviewed catalogue of every state the system may enter on its own, tied to the code by a test;
+operator alerts recorded in the registry; `fleet incidents`; and a fleet-health watchdog unit.
+[Story 2.9](stories/2-9-define-safe-states-and-incident-evidence.md): `backlog` until 2.8 merges.
+
+### Story 2.10: Run the 72-hour unattended acceptance exercise
+
+A planned, drill-based 72-hour paper run with controlled restart, data outage and halt drills,
+judged against the Story 2.9 catalogue, with an evidence report. No real-money acceptance.
+[Story 2.10](stories/2-10-run-the-72-hour-unattended-acceptance.md): `backlog` until 2.1–2.9 are
+deployed, a frozen tenant is ticking in paper and the owner has chosen the alert destination.
+
+Outside Epic 2, with reasons: #682 (unauthenticated raw human edges) does not widen live authority,
+because go-live independently requires a fresh certificate and a signature and frozen deployments
+refuse the raw edge. #647 (paper whole-account breaker and lane unification) limits what paper can
+validate for live-only code; Story 2.8 records that limit. #648 (GitHub enforces code-owner review
+on three paths) belongs to the open prerequisites task.
