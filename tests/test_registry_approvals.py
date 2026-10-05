@@ -66,6 +66,7 @@ def test_live_requires_human_actor(repo):
         _to_live(repo, STRATEGY, Actor.AGENT)
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_live_succeeds_with_human_and_recorded_approval(repo):
     _advance_to_forward_tested(repo, STRATEGY)
     record_approval(repo, STRATEGY, "lior")
@@ -80,6 +81,7 @@ def test_string_live_engages_gate(repo):
         _to_live(repo, STRATEGY, Actor.HUMAN, to="live")
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_string_live_succeeds_with_approval(repo):
     _advance_to_forward_tested(repo, STRATEGY)
     record_approval(repo, STRATEGY, "lior")
@@ -210,6 +212,7 @@ def test_legacy_null_dependency_row_never_matches(repo):
     assert has_valid_approval(repo, rec.id, code_hash, config_hash, None) is False
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_live_transition_records_full_identity_hashes(repo):
     # Audit symmetry: a successful forward_tested -> live transition must record the full pinned
     # identity (code, config, AND dependency hash) in the stage_transitions history.

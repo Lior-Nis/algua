@@ -77,6 +77,12 @@
 /algua/live/frozen_attempt.py            @Lior-Nis   # Story 1.3d: attempt judgement (decision cross-check, weight rerun) + the attempt recorder
 /algua/execution/tick_snapshots.py       @Lior-Nis   # the tick provenance guard (deployment epoch + frozen invocation link)
 /algua/execution/dust.py                 @Lior-Nis   # Story 1.4: paper dust rule the bench flatness check (store/crud.py) trusts
+# Story 2.2: the exit drains the bench flatness check (store/crud.py) trusts, and the lock that
+# serializes every paper-lane exit with the paper operator.
+/algua/execution/paper_exit_drain.py     @Lior-Nis   # Story 2.2: the paper-lane exit drain (cancel own orders, settle, under-lock re-check)
+/algua/execution/lane_exit.py            @Lior-Nis   # Story 2.2: both lanes' exit-drain selection + the live exit drain (was unprotected)
+/algua/execution/venue_sync.py           @Lior-Nis   # Story 2.2: paper venue ingest + stranded recovery (was cli/paper_venue.py) + the drain's cursor-keeping ingest
+/algua/operator/deployment_lock.py       @Lior-Nis   # Story 2.2: operator.lock on retirement and every paper-lane exit
 
 # --- Modules carved OUT of the files above by the simplification program (stages 6a-6c).
 # The code did not become less integrity-critical by moving; without these lines the carve

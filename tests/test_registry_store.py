@@ -119,6 +119,7 @@ def test_illegal_transition_raises(repo):
         _transition(repo, "alpha", Stage.LIVE, Actor.AGENT)
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_transition_service_allows_injected_live_approval_verifier(repo):
     repo.add("cross_sectional_momentum")
     # CANDIDATE via human: scaffolding to forward_tested, not exercising the agent shortlist gate.

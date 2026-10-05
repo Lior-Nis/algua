@@ -1,4 +1,4 @@
-"""Operator-lock serialization for lifecycle changes that retire deployments."""
+"""Operator-lock serialization for retirement and every paper-lane exit."""
 from __future__ import annotations
 
 import os
@@ -10,6 +10,9 @@ from pathlib import Path
 
 from algua.contracts.lifecycle import Stage, TransitionError
 from algua.operator.schedule import OperatorLockHeld, operator_run_lock
+
+#: The stages ``paper run-all`` ticks and the paper account reconcile counts.
+_PAPER_LANE = frozenset({Stage.PAPER, Stage.FORWARD_TESTED})
 
 
 def _operator_lock_path() -> Path:
@@ -24,10 +27,20 @@ def _operator_lock_path() -> Path:
 
 
 @contextmanager
-def deployment_retirement_lock(from_stage: Stage, target: Stage) -> Iterator[None]:
-    """Serialize retirement with the paper operator's broker/tick critical section."""
-    required = (from_stage is Stage.PAPER and target is Stage.CANDIDATE) or target is Stage.RETIRED
-    if not required:
+def operator_transition_lock(from_stage: Stage, target: Stage) -> Iterator[None]:
+    """Serialize retirement and every paper-lane exit with the paper operator's broker/tick
+    critical section (Story 2.2 §2.5): without it, a timer-driven cycle whose pre-tick stage check
+    passed could submit for the strategy after its exit commits (#685's orphan).
+
+    The lock is ``operator.lock`` of the checkout whose code runs, taken non-blocking: a held lock
+    refuses the transition at once (never waits, never deadlocks a nested acquire), before any exit
+    drain is selected. It excludes the paper timer only when run from the operator's checkout. The
+    edges locked before Story 2.2 (``paper -> candidate`` and every ``-> retired``) keep their
+    message byte for byte; ``paper -> dormant`` and ``forward_tested -> live`` get their own."""
+    retirement = target is Stage.RETIRED or (
+        from_stage is Stage.PAPER and target is Stage.CANDIDATE)
+    lane_exit = from_stage in _PAPER_LANE and target not in _PAPER_LANE
+    if not (retirement or lane_exit):
         yield
         return
     try:
@@ -39,4 +52,6 @@ def deployment_retirement_lock(from_stage: Stage, target: Stage) -> Iterator[Non
     except OperatorLockHeld as exc:
         raise TransitionError(
             "operator.lock is held; deployment retirement cannot interleave with a paper tick"
+            if retirement else
+            "operator.lock is held; a paper-lane exit cannot interleave with a paper tick"
         ) from exc

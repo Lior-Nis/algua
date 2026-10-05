@@ -198,6 +198,7 @@ def test_flatten_leaves_the_uncapped_long_untouched_when_the_ledger_covers_it(co
     assert venue.offsets == [("UNH", 3.0)]
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_the_production_cohort_residual_flattens_and_retires(conn):
     """The 2026-10-01 UNH pair end to end: one capped sale, then both tenants are flat enough to
     retire, and their remaining beliefs still sum to what the account holds (zero)."""
@@ -228,6 +229,7 @@ def _paper_tenant(conn, name: str) -> int:
     return sid
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_a_paper_tenant_holding_only_dust_retires(conn):
     sid = _paper_tenant(conn, "s1")
     _fill(conn, "s1", "UNH", 1.0)
@@ -239,6 +241,7 @@ def test_a_paper_tenant_holding_only_dust_retires(conn):
     assert allocations.active_allocation(conn, sid) is None
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_a_paper_tenant_holding_a_material_position_cannot_retire(conn):
     sid = _paper_tenant(conn, "s1")
     _fill(conn, "s1", "UNH", 0.002)                  # $1.00 — tradeable
@@ -250,6 +253,7 @@ def test_a_paper_tenant_holding_a_material_position_cannot_retire(conn):
     assert allocations.active_allocation(conn, sid) is not None
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_the_live_lane_bench_check_keeps_its_exact_rule(conn):
     repo = SqliteStrategyRepository(conn)
     sid = repo.add(name="s1").id

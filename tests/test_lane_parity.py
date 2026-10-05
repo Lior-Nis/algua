@@ -14,11 +14,30 @@ These tests are deliberately STRUCTURAL (they read the tick sources) rather than
 behavioural test proves the invariant holds on the path it exercises; these prove neither lane can
 QUIETLY DROP it. Both kinds are worth having — the behavioural ones live in test_cli_live.py and
 test_cli_paper.py.
+
+Book exits (Story 2.2, T16 at the end of this file): for a while only the live lane drained a
+leaving strategy's resting orders, while paper selected no guard at all (#685). Three facts now tie
+the edge set, the selector and the single production path into the store together:
+_REVOKE_ON_EXIT is exactly the set of allowed edges that leave a lane's operating stages;
+select_exit_guard answers every one with the SOURCE lane's guard; and only transitions.py
+calls .apply_transition( while no module injects a selector, so every production exit reaches
+the store through the default selection.
 """
 from __future__ import annotations
 
 import ast
 import pathlib
+
+import pytest
+
+from algua.contracts.lifecycle import ALLOWED_TRANSITIONS, Stage
+from algua.execution import lane_exit
+from algua.execution.lane_exit import LiveExitGuard, select_exit_guard
+from algua.execution.paper_exit_drain import PaperExitGuard
+from algua.registry import transitions
+from algua.registry.db import connect, migrate
+from algua.registry.store import SqliteStrategyRepository
+from algua.registry.transitions import _REVOKE_ON_EXIT
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 LANES = {
@@ -136,3 +155,57 @@ def test_both_lanes_route_dark_feed_through_the_shared_predicate():
         f"these lanes no longer branch on `is_dark_feed`: {missing}. A dark bar feed would fall "
         f"through to trip-and-flatten and dump the book at unknown prices (#452 HIGH#3)."
     )
+
+
+# --- T16 (Story 2.2 §2.1, §2.3): both lanes' book exits carry their lane's drain ------------------
+
+PAPER_LANE = frozenset({Stage.PAPER, Stage.FORWARD_TESTED})
+LIVE_LANE = frozenset({Stage.LIVE})
+
+
+def _lane_exits() -> set[tuple[Stage, Stage]]:
+    return {
+        (source, target)
+        for source, targets in ALLOWED_TRANSITIONS.items()
+        for target in targets
+        for lane in (PAPER_LANE, LIVE_LANE)
+        if source in lane and target not in lane
+    }
+
+
+def test_revoke_on_exit_is_exactly_the_set_of_lane_exits():
+    """A new lifecycle edge out of a lane cannot be added without its allocation shed and drain."""
+    assert _REVOKE_ON_EXIT == _lane_exits()
+
+
+@pytest.mark.parametrize(("source", "target"), sorted(_REVOKE_ON_EXIT))
+def test_the_selector_answers_every_lane_exit_with_the_source_lanes_guard(
+        tmp_path, empty_exit_venues, source, target):
+    conn = connect(tmp_path / "reg.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    repo.add(name="s1")
+
+    guard = select_exit_guard(repo, "s1", source, target)
+
+    assert type(guard) is (LiveExitGuard if source in LIVE_LANE else PaperExitGuard)
+
+
+def test_transition_strategy_selects_through_the_lane_exit_selector():
+    assert transitions._default_exit_guard_selector() is lane_exit.select_exit_guard
+
+
+def _algua_calls(predicate) -> list[str]:
+    found = []
+    for path in sorted((REPO / "algua").rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and predicate(node):
+                found.append(str(path.relative_to(REPO)))
+    return found
+
+
+def test_only_transitions_reaches_the_store_transition_and_none_injects_a_selector():
+    assert _algua_calls(lambda c: isinstance(c.func, ast.Attribute)
+                        and c.func.attr == "apply_transition") == ["algua/registry/transitions.py"]
+    assert _algua_calls(lambda c: any(k.arg == "exit_guard_selector" for k in c.keywords)) == []

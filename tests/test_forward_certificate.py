@@ -399,6 +399,7 @@ def test_live_with_approval_but_no_certificate_fails(repo, conn, monkeypatch):
                             forward_certificate_verifier=verifier)
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_live_with_certificate_passes_through_to_approval(repo, conn, monkeypatch):
     rec = _registered(repo, conn)
     monkeypatch.setattr("algua.registry.transitions._compute_hashes", lambda n: IDENT)
@@ -445,6 +446,7 @@ def test_certificate_check_runs_before_approval(repo, conn, monkeypatch):
                             forward_certificate_verifier=verifier)
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_live_gate_computes_identity_once_and_shares_it(repo, conn, monkeypatch):
     """The TOCTOU fix (#124 GATE-2): ONE identity computation feeds both the certificate
     verifier and the approval check — an injected verifier gets the same identity the approval

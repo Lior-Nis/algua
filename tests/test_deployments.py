@@ -516,6 +516,7 @@ def test_legacy_tick_must_match_strategy_name_and_lane(tmp_path):
         )
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 @pytest.mark.parametrize(
     ("target", "reason", "retired"),
     [

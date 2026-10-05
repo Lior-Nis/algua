@@ -242,6 +242,7 @@ def _bench_to_dormant(name="cross_sectional_momentum"):
                             reason="benched mid-cycle")
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_still_live_allocated_false_after_bench(monkeypatch):
     # #281: the submit-time guard reflects a live->dormant bench (stage flips + allocation revoked).
     from contextlib import closing
@@ -260,6 +261,7 @@ def test_still_live_allocated_false_after_bench(monkeypatch):
         assert _still_live_allocated(conn, "cross_sectional_momentum") is False
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_run_all_halts_strategy_benched_to_dormant_mid_cycle(monkeypatch):
     _permissive_book(monkeypatch)
     # #281: a live->dormant bench landing MID-CYCLE must halt the tick via should_halt — never
@@ -846,6 +848,7 @@ def test_run_all_reserves_buying_power_across_strategies(monkeypatch):
         assert n == 2   # one trim + one skip recorded
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_live_allocate_rejects_dormant(monkeypatch):
     from contextlib import closing
 

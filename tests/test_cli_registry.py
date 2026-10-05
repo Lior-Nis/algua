@@ -123,6 +123,7 @@ def _stub_passing_certificate(monkeypatch):
         lambda: (lambda repo, name, sid, ident: dict(cert)))
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_full_path_to_live_signed_ceremony(tmp_path, monkeypatch):
     """Two-step signed go-live: challenge then signature."""
     strategy = "cross_sectional_momentum"

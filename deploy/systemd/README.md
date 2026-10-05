@@ -124,7 +124,9 @@ and working-tree ticks are unaffected.
 So before any rollback, do one of:
 
 - **Retire every frozen deployment.** `algua registry transition <name> --to retired` retires the
-  strategy's active deployment. List the strategies that have one with:
+  strategy's active deployment. It first drains the strategy's resting paper orders, so it needs
+  the paper credentials and a reachable paper venue (run it from this main checkout, while the
+  paper and merge-back services are idle). List the strategies that have one with:
 
   ```sql
   SELECT s.name FROM strategy_deployments d

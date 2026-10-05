@@ -108,6 +108,7 @@ def _forward_token(repo, sid, *, actor="agent"):
         actor=actor, decision_json="{}", consumable=True)
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_agent_paper_to_candidate_backstep_is_free(tmp_path):
     # The legal paper -> candidate BACK-step must not demand a shortlist token (an agent at
     # paper can never mint one — promotion preflight requires backtested). No monkeypatch on
