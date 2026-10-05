@@ -129,6 +129,10 @@ seam). `PAPER_PROMOTE_INPUTS` covers the `paper promote` Typer parameters
 | paper | `max_staleness` | `5` | **yes** if looser | `threshold:max_staleness_sessions` | `not (v <= 5)` |
 | paper | `forward_sharpe_confidence` | `0.95` | **yes** if looser | `threshold:forward_sharpe_confidence` | `not (v >= 0.95)` |
 
+The `(no option)` `min_holdout_observations` row documents a token only; it is not a key of
+`RESEARCH_PROMOTE_INPUTS`, whose keys equal the click parameters ∪ `promote_task` parameters (25,
+verified at baseline).
+
 ### 1.5 Why the actor rows differ
 
 A human `research promote` skips walls an agent run enforces with no flag at all: the
@@ -165,19 +169,22 @@ RELAXATION_TABLES = ("gate_evaluations", "forward_gate_evaluations")
 RELAXATIONS_COLUMN = {"relaxations_json": (
     "TEXT CHECK (relaxations_json IS NULL OR CASE WHEN json_valid(relaxations_json)"
     " THEN json_type(relaxations_json) = 'array' AND json(relaxations_json) = relaxations_json"
-    " ELSE 0 END)")}
+    " AND instr(relaxations_json, char(92)) = 0 ELSE 0 END)")}
 ```
 
 ```sql
 CREATE TRIGGER IF NOT EXISTS trg_gate_evaluations_relaxations_recorded
 BEFORE INSERT ON gate_evaluations
 BEGIN
+    SELECT RAISE(ABORT, 'gate_evaluations rows are append-only')
+    WHERE EXISTS (SELECT 1 FROM gate_evaluations WHERE id = NEW.id);
     SELECT RAISE(ABORT, 'gate_evaluations.relaxations_json is required on every new row')
     WHERE NEW.relaxations_json IS NULL;
     SELECT RAISE(ABORT, 'gate_evaluations.relaxations_json must be a canonical JSON array')
     WHERE NOT (CASE WHEN json_valid(NEW.relaxations_json)
                     THEN json_type(NEW.relaxations_json) = 'array'
                          AND json(NEW.relaxations_json) = NEW.relaxations_json
+                         AND instr(NEW.relaxations_json, char(92)) = 0
                     ELSE 0 END);
     SELECT RAISE(ABORT, 'gate_evaluations.relaxations_json holds a token outside the research vocabulary')
     WHERE EXISTS (SELECT 1 FROM json_each(NEW.relaxations_json) e
@@ -200,12 +207,15 @@ BEGIN SELECT RAISE(ABORT, 'gate_evaluations.relaxations_json is immutable'); END
 CREATE TRIGGER IF NOT EXISTS trg_forward_gate_evaluations_relaxations_recorded
 BEFORE INSERT ON forward_gate_evaluations
 BEGIN
+    SELECT RAISE(ABORT, 'forward_gate_evaluations rows are append-only')
+    WHERE EXISTS (SELECT 1 FROM forward_gate_evaluations WHERE id = NEW.id);
     SELECT RAISE(ABORT, 'forward_gate_evaluations.relaxations_json is required on every new row')
     WHERE NEW.relaxations_json IS NULL;
     SELECT RAISE(ABORT, 'forward_gate_evaluations.relaxations_json must be a canonical JSON array')
     WHERE NOT (CASE WHEN json_valid(NEW.relaxations_json)
                     THEN json_type(NEW.relaxations_json) = 'array'
                          AND json(NEW.relaxations_json) = NEW.relaxations_json
+                         AND instr(NEW.relaxations_json, char(92)) = 0
                     ELSE 0 END);
     SELECT RAISE(ABORT, 'forward_gate_evaluations.relaxations_json holds a token outside the forward vocabulary')
     WHERE EXISTS (SELECT 1 FROM json_each(NEW.relaxations_json) e
@@ -225,21 +235,31 @@ BEFORE UPDATE OF relaxations_json ON forward_gate_evaluations
 BEGIN SELECT RAISE(ABORT, 'forward_gate_evaluations.relaxations_json is immutable'); END;
 ```
 
-- The four statements are module constants executed in the order above as
+- The four statements are module constants, collected in the order above as
   `RELAXATION_STATEMENTS`; each constant is the statement text above without its trailing `;`
   (the v48 constants' form), and each is idempotent. Lines over 100 columns carry
   `# noqa: E501`, as the v48 fragment does.
-- `migrate()` (`algua/registry/db/migrate.py`) runs, after the v48 tick-link block and before the
-  `user_version` stamp:
-  ```python
-  for table in RELAXATION_TABLES:
-      _add_missing_columns(conn, table, RELAXATIONS_COLUMN)
-  classify_unrecorded_gate_rows(conn)          # §3; one-time
-  for statement in RELAXATION_STATEMENTS:
-      conn.execute(statement)
-  ```
-  Hard orderings: the ALTER precedes the classification and the triggers; the classification
-  precedes the immutability triggers. The module docstring of `migrate.py` names them.
+- `db/relaxations.py` exports `apply_relaxation_schema(conn: sqlite3.Connection) -> None`, which
+  runs, in this order: `_add_missing_columns(conn, table, RELAXATIONS_COLUMN)` for each table in
+  `RELAXATION_TABLES`, then `classify_unrecorded_gate_rows(conn)`, then each statement in
+  `RELAXATION_STATEMENTS`. `migrate()` imports only that name and calls it once, after the v48
+  tick-link loop and before the `user_version` stamp, under a one-line `# v49 (Story 2.1): ...`
+  comment. The hard orderings (ALTER before classification and triggers; classification before the
+  immutability triggers) are stated in `db/relaxations.py`'s module docstring; `migrate.py`'s
+  docstring gains one sentence pointing there. (`_add_missing_columns` is imported from
+  `algua.registry.db._util`, as `migrate.py` does, so the fragment never imports `migrate.py`.)
+- Each recorded trigger's first statement makes its table append-only. `INSERT OR REPLACE` (or
+  `REPLACE INTO`) naming an existing `id` would otherwise pass every other statement: the
+  implicit delete of conflict resolution fires no trigger and, through the repo's own `connect()`
+  with `foreign_keys=ON`, even rewrote a deployment-anchoring research row, so a relaxed set could
+  become `[]` (verified at readiness; the Story 1.3d `frozen_invocations_no_replace` precedent).
+  A plain INSERT and an INSERT with an explicit new `id` are unaffected. The object count is
+  unchanged.
+- The canonical test also requires that the text contains no backslash (`char(92)`), in the
+  trigger and in the column CHECK alike: no token contains one, and SQLite's `json()` keeps a JSON
+  escape, so a token spelled with an escape (for example `["demo\u005fdata"]`) would pass
+  `json(x) = x` and the vocabulary check yet fail `decode_relaxations`. With the clause, trigger,
+  CHECK and decoder accept exactly the same texts.
 - `json1` is built into SQLite since 3.38 and present on the runtime's 3.45.1 (rehearsed).
   `ALTER TABLE ... ADD COLUMN` with this CHECK is accepted and checked against existing rows (all
   NULL, so it passes) on SQLite ≥ 3.37.
@@ -251,10 +271,19 @@ BEGIN SELECT RAISE(ABORT, 'forward_gate_evaluations.relaxations_json is immutabl
   already undeletable by its foreign key, and a database writer is outside the accident threat
   model (Story 1.3d precedent).
 - v49 is forward-only. v48 code on a v49 registry cannot write a gate row (the recorded trigger
-  refuses it), so research and paper promotion fail closed. The rollback runbook (in
-  `deploy/systemd/README.md`, next to the v48 note): stop the timers, drop the two
+  refuses it), so research and paper promotion fail closed. Roll-forward: stop
+  `algua-mergeback-drain.timer` and `algua-research.timer` and wait for running units to exit
+  before deploying v49; run one registry command (e.g. `algua registry list`) to migrate; then
+  restart the timers. (A v48 promote still running when a v49 process migrates has already burned
+  its single-use holdout at `on_peek`, `promote_run.py:255-273`, and its INSERT is then refused;
+  re-gating needs a human `--allow-holdout-reuse`, which v49 records as a relaxation, so that
+  strategy could never be live-eligible. The drainer runs every 30 minutes,
+  `algua-mergeback-drain.timer:8`.) The rollback runbook: stop the timers, drop the two
   `_relaxations_recorded` triggers, run v48 code; rows it writes stay NULL, which the v49 predicate
-  reads as `unrecorded` after the roll-forward.
+  reads as `unrecorded` after the roll-forward (v48 `migrate()` re-stamps `user_version` 48; the
+  next v49 `migrate()` re-creates the dropped triggers, re-stamps 49 and skips classification,
+  because the immutability triggers remain). Both the roll-forward and the rollback runbook go in
+  the v49 note of `deploy/systemd/README.md`, next to the v48 note.
 - Schema fingerprint (`tests/test_registry_db.py:12-13`): object count 137 → 141 (four triggers);
   the digest changes. `test_schema_version_is_current` asserts 49.
 
@@ -414,10 +443,14 @@ def verify_live_qualification(
 3. Research: `SELECT relaxations_json FROM gate_evaluations WHERE id=? AND strategy_id=?` with
    `deployment.research_gate_id`. Missing row, NULL, or `decode_relaxations(...,
    RESEARCH_VOCABULARY) is None` → `("unrecorded",)`; else the decoded tuple.
-4. Certificate: if `cid is None` → `("unrecorded",)`. Else
-   `SELECT relaxations_json FROM forward_gate_evaluations WHERE id=? AND strategy_id=? AND deployment_id=?`
-   with `(cid, strategy_id, deployment.id)`; missing row, NULL, or undecodable with
-   `FORWARD_VOCABULARY` → `("unrecorded",)`; else the decoded tuple.
+4. Certificate: if `cid is None` → `("unrecorded",)`. Else read the newest forward row of the
+   active deployment, `SELECT id, relaxations_json FROM forward_gate_evaluations WHERE
+   strategy_id=? AND deployment_id=? ORDER BY id DESC LIMIT 1` with `(strategy_id,
+   deployment.id)`. If there is no row or its `id != cid`, the result is `("unrecorded",)`.
+   Otherwise decode it with `FORWARD_VOCABULARY`; NULL or undecodable reads as `("unrecorded",)`;
+   else the decoded tuple. (The default verifier already selects the newest row,
+   `live_certificate.py:83-89`, so its verdict is unchanged; an injected verifier returning an
+   older id, even a clean one, is refused.)
 5. Return `LiveQualification(deployment.id, deployment.research_gate_id, research, cid, certificate)`.
 
 `verify_live_qualification`:
@@ -465,11 +498,14 @@ Call sites, the only two:
   the frozen refusal and the identity computation and before the approval verifier, so before
   `ssh-keygen` (`live_gate.verify_pending`, reached through the CLI closure at
   `registry_cmd.py:235-244`) and before challenge consumption inside `apply_transition`. An
-  injected `forward_certificate_verifier` replaces only step 1.
+  injected `forward_certificate_verifier` replaces only step 1; it cannot choose which certificate
+  is judged (step 4 of `live_qualification_relaxations`).
 
-The predicate reads rows that cannot change (the column is trigger-immutable; a deployment's
-`research_gate_id` is trigger-immutable, `db/deployment.py:47-55`); the active deployment changes
-only with a stage change, which the go-live stage CAS detects.
+The predicate reads rows that cannot change (the column is trigger-immutable and both tables are
+append-only, §2; a deployment's `research_gate_id` is trigger-immutable,
+`db/deployment.py:47-55`); the active deployment changes only with a stage change, which the
+go-live stage CAS detects. A forward row appended between the verifier and the predicate makes the
+returned id no longer the newest, which reads `unrecorded` and refuses (fail closed).
 
 ## 6. No raw way in (CAP-6, AC10, #682)
 
@@ -523,7 +559,7 @@ Every path that writes a gate row, reaches go-live, or enters `candidate` / `for
 |---|---|---|---|
 | W1 | research row INSERT, atomic record-and-promote | `store/gate.py:386` in `record_gate_with_fdr_and_maybe_promote` `:289` ← `promotion.run_gate` `:476` ← `promote_task` `promote_run.py:291` | §4 records `research_relaxations`; recorded trigger |
 | W1a | `research promote` CLI | `research_cmd.py:110` | via W1 |
-| W1b | `research run-all` batch worker | `research_batch_cmd.py:63` (keys `:76-81`) | via W1; AC2 table test covers its keys |
+| W1b | `research run-all` batch worker | `research_batch_cmd.py:63` (keys `:80-85`) | via W1; AC2 table test covers its keys |
 | W1c | merge-back strict-agent promote seam | `paper_cmd.py:552` (drainer: `.opencode/scripts/drain-mergeback-queue.sh:100` may add `--demo`) | via W1; `--demo` records `demo_data` |
 | W2 | research row INSERT, plain writer | `store/gate.py:85` in `record_gate_evaluation` `:51`; callers: tests, `scripts/seed_runs_dev.py:426` | required `relaxations_json` parameter; recorded trigger |
 | W3 | forward row INSERT, single statement | `store/forward_gate.py:108` in `_insert_forward_gate_row_locked` `:73` | recorded trigger |
@@ -534,7 +570,7 @@ Every path that writes a gate row, reaches go-live, or enters `candidate` / `for
 | W5 | raw SQL INSERT (tests, a DB writer) | tests listed in §11 | recorded trigger refuses a missing or malformed set |
 | L1 | go-live challenge issuance | `registry_cmd.py:203-228`: actor `:204`, stage `:207`, frozen `:208`, identity `:215`, verifier `:216-217`, `live_gate.issue_challenge` `:218` (`live_gate.py:45`) | §5 `verify_live_qualification` replaces `:216-217`, before `:218` |
 | L2 | go-live completion (CLI) | `registry_cmd.py:230-255` → `transition_strategy` `:249` → `_validate_live_gate` `transitions.py:116` (verifier `:142-143`, approval `:144-153` → `_verify` `registry_cmd.py:235-244` → `live_gate.verify_pending` `live_gate.py:132`) → `apply_transition` (consume + `live_authorizations`) | §5 at `:142-143`, before the approval verifier |
-| L3 | programmatic `transition_strategy(..., LIVE, HUMAN)`, default or injected verifiers, `has_valid_approval` (`approvals.py:211`) | `transitions.py:36`, `:65-74` | same `_validate_live_gate`; an injected verifier replaces only the certificate step |
+| L3 | programmatic `transition_strategy(..., LIVE, HUMAN)`, default or injected verifiers, `has_valid_approval` (`approvals.py:211`) | `transitions.py:36`, `:65-74` | same `_validate_live_gate`; an injected verifier replaces only the certificate step and cannot steer which certificate is judged (§5 step 4) |
 | L4 | `verify_forward_certificate` direct caller | only `transitions._default_forward_certificate_verifier` `transitions.py:268` | wrapped by §5 at both call sites |
 | L5 | store primitive `apply_transition(rec, LIVE, HUMAN, live_authorization=...)` | `store/crud.py:238`; production caller: only `transitions.py:97` | structural test (§10) pins the single production caller |
 | L6 | legacy-cohort certificate branch | `live_certificate.py:91-95` | no active deployment → predicate `unrecorded` |
@@ -547,7 +583,7 @@ Every path that writes a gate row, reaches go-live, or enters `candidate` / `for
 | F1 | `paper promote` → `forward_tested` | `store/forward_gate.py:163` (inside W3b's transaction) | the only way in |
 | F2 | raw `paper -> forward_tested` | `transitions.py:85-93` today | §6 refused for every actor |
 | F3 | store primitive `apply_transition(..., FORWARD_TESTED)` | as C4 | structural test |
-| X | other stage writers (`idea -> backtested`, intake) | `mergeback_intake.py:233-249`, `evaluation/backtest_run.py:105`, `store/deployment.py:208` | not candidate/forward_tested/live; unchanged |
+| X | other stage writers (`idea -> backtested`, intake) | `mergeback_intake.py:233-249` (SQL `:238`), `evaluation/backtest_run.py:105`, `store/deployment.py:208` | not candidate/forward_tested/live; unchanged; the structural test (§10) pins the three SQL stage writers (`mergeback_intake.py:238`, the store CAS `store/base.py:125`, `db/core.py:75`) |
 
 `operator/mergeback.py:532` `run_gate()` is the merge-back quality gate, not `promotion.run_gate`.
 
@@ -589,16 +625,17 @@ Claims, each with its proof:
 |---|---|---|
 | `algua/registry/relaxations.py` | new (§1, plus moved `guard_agent_relaxations`) | new, < 300 |
 | `algua/registry/live_qualification.py` | new (§5) | new, < 300 |
-| `algua/registry/db/relaxations.py` | new (§2 DDL, §3 classifier) | new, < 300 |
+| `algua/registry/db/relaxations.py` | new (§2 DDL and `apply_relaxation_schema`, §3 classifier) | new, < 300 |
 | `algua/registry/gate_fail_capture.py` | new: `capture_gate_fail_experience` moved verbatim from `promote_run.py:54-100` with its imports (`write_experience_note`, `now_iso`, the `negative_results` names, `get_settings`) | new, < 300 |
-| `algua/registry/promote_run.py` | carve out the capture; add §4 (import, 4-line call, `relaxations=` kwarg) | 348 (pin 348) → about 301; lower the pin to the exact result |
+| `algua/registry/promote_run.py` | carve out the capture; add §4 (import, 4-line call, `relaxations=` kwarg) | 348 (pin 348) → about 301 (about 299 by readiness count); lower the pin to the exact result, or delete it if the result is below 300 |
 | `algua/registry/promotion.py` | carve out `guard_agent_relaxations`; add one import line, one parameter, one `gate_row` entry | 542 (pin 542) → about 526; lower the pin |
 | `algua/registry/store/gate.py` | delete `find_consumable_gate_evaluation`; add the parameter and the two INSERT columns | 594 (pin 594) → about 577; lower the pin |
 | `algua/registry/repository.py` | delete the two `find_consumable_*` Protocol methods; add two parameters | 965 (pin 965) → about 938; lower the pin |
 | `algua/registry/store/forward_gate.py` | delete `find_consumable_forward_gate_evaluation`; add the parameter and column | 217 → about 192 |
 | `algua/registry/forward_promotion.py` | guard reuses the table; `gate_row` entry; one import | 280 → about 276 (stays under 300) |
 | `algua/registry/transitions.py` | §5 completion call, §6 | 277 → about 235 |
-| `algua/registry/db/migrate.py`, `db/constants.py` | v49 block and version | small |
+| `algua/registry/db/migrate.py` | one import, one call, one comment line, one docstring sentence | 291 → at most 296; stays unpinned (below 300) |
+| `algua/registry/db/constants.py` | `SCHEMA_VERSION` 48 → 49 and a v49 comment line | small |
 | `algua/cli/registry_cmd.py` | §5 issuance (line count unchanged; pin 446, size 444) | unchanged |
 | `algua/cli/errors.py` | one import, one registry entry | 181 → 183 |
 | `algua/research/forward_gates.py` (pin 392), `research/gates.py` (544), `cli/paper_cmd.py` (1409), `forward_evidence.py`, `live_certificate.py` | not edited | - |
@@ -612,6 +649,14 @@ Claims, each with its proof:
   `promote_task`) and `/algua/cli/registry_cmd.py` (the go-live issuance check and completion
   closure; precedent: `paper_cmd.py`, `research_cmd.py`). All five join
   `INTEGRITY_CRITICAL_MODULES` (`tests/test_repo_hygiene.py:237`).
+- Coordination with Story 2.2, which also rewrites `transition_strategy` (`exit_guard` becomes
+  `exit_guard_selector` behind the operator lock), deletes `_live_exit_guard` from `registry_cmd.py`
+  (lowering the 446 pin) and edits CODEOWNERS and `INTEGRITY_CRITICAL_MODULES` (2.2 contract
+  §2.2–2.3, §6): whichever of 2.1/2.2 merges second rebases. §6's refusal stays directly after the
+  intake refusal. `verify_live_qualification` stays in `_validate_live_gate`, i.e. before 2.2's
+  lock and drain, so a refused go-live cancels nothing. The issuance edit stays line-neutral
+  against the then-current pin. The combined `transitions.py` comes to about 248 lines
+  (277 − 42 + 13).
 - Import boundaries: no `algua/contracts` change. The new modules import `algua.research`
   (allowed: "research never imports registry" is the only research contract), `algua.contracts`,
   `algua.registry.store` / `repository`; none imports `algua.live` ("registry stays off the live
@@ -657,40 +702,55 @@ Coverage required:
   W3a refresh, W3b) carries the expected set; an agent row that tightens a threshold records `[]`.
 - Schema: INSERT without the column, with each malformed form and out-of-vocabulary token, and any
   UPDATE naming the column are refused with the §2 messages; `consumed` and FDR updates still work.
+  On both tables, `INSERT OR REPLACE` and `REPLACE INTO` naming an existing `id` are refused with
+  the append-only message (including a research row anchoring a deployment, under the repo's
+  `connect()` with `foreign_keys=ON`), while a plain INSERT and an INSERT with an explicit new `id`
+  are accepted; a set containing a backslash (a JSON-escaped token such as `["demo\u005fdata"]`)
+  is refused as non-canonical. The object count stays 141.
 - Migration: the §3 synthetic cases; idempotence; other columns byte-identical; a second
   `migrate()` with a still-NULL classifiable row (inserted via `insert_unrecorded`) leaves it NULL
   and does not abort; a v48 registry migrates to v49 (column, four triggers, version).
 - Predicate: no deployment; research NULL; research relaxed; certificate id missing, not an int,
-  a `bool`, another strategy's, another deployment's, NULL, relaxed; both clean.
+  a `bool`, another strategy's, another deployment's, NULL, relaxed; certificate id not the
+  deployment's newest forward row; both clean.
 - Ceremony: issuance refused writes no `live_challenges` row and emits the code; completion
   refused leaves the pending challenge unconsumed and never calls `ssh-keygen`
   (`live_gate.verify_signature` armed to raise); a valid human signature over a fresh challenge
   is still refused when either row is relaxed or unrecorded (the CLI will not issue a challenge
   for such a world, so the test creates the pending challenge with `live_gate.issue_challenge`
   directly, or records a newer relaxed certificate after a clean issuance); an injected verifier (CLI
-  monkeypatch seam and `forward_certificate_verifier=`) cannot skip the predicate; the issued
-  challenge shows `research_gate_id`, `deployment_id` and both empty sets; the envelope is
+  monkeypatch seam and `forward_certificate_verifier=`) cannot skip the predicate, and one returning
+  an older clean certificate id while the deployment's newest certificate is relaxed is refused
+  (readiness probe D); the issued challenge shows `research_gate_id`, `deployment_id` and both
+  empty sets; the envelope is
   `{"ok": false, "error": <message>, "code": "live_qualification_relaxed", "retryable": false}`.
 - AC10: both edges × agent, human, system refused with the §6 message and no stage row; the
   `paper -> candidate` back-step and every other raw edge unchanged; a structural test scans
   `algua/` and requires `transitions.py` to be the only production caller of `.apply_transition(`
   and `{store/gate.py, store/forward_gate.py, store/deployment.py, store/crud.py}` the only callers
-  of `._apply_transition_locked(`.
+  of `._apply_transition_locked(`, and that the only statements in `algua/` writing
+  `strategies.stage` are those three SQL stage writers: `mergeback_intake.py:238`
+  (`idea → backtested`), `store/base.py:125` (the CAS) and `db/core.py:75` (the `shortlisted`
+  rename), so a future direct write into `candidate`/`forward_tested` fails the test.
 - AC8: §8.
 
 Mutation checks (break, see a named test fail, restore byte for byte): each flag predicate in
 `research_relaxations`; `>=` → `>` (the at-default case); moving one forward field to the other
-direction list; each of the four statements of each recorded trigger; each immutability trigger;
-the §3 one-time guard; the `relaxations_json IS NULL` clause of the classification UPDATE; the
-human / unknown-provider / missing-LCB rules; each predicate branch (steps 1-4); the
-`q.relaxations` refusal; removing the issuance call; removing the completion call; moving the
-predicate inside the default verifier; each `_GATE_COMMAND_EDGES` entry; the `errors.py` registry
-entry.
+direction list; each of the five statements of each recorded trigger, including the append-only
+statement; the backslash clause of each canonical test; each immutability trigger; the §3
+one-time guard; the `relaxations_json IS NULL` clause of the classification UPDATE; the human /
+unknown-provider / missing-LCB rules; each predicate branch (steps 1-4); drop the newest-row
+condition (step 4); the `q.relaxations` refusal; removing the issuance call; removing the
+completion call; moving the predicate inside the default verifier; each `_GATE_COMMAND_EDGES`
+entry; the `errors.py` registry entry.
 
 ## 11. Known churn
 
 Tests (fixture churn only, unless named): every `record_gate_evaluation` caller passes
-`relaxations_json` (25 sites, incl. `tests/_gate_row_helpers.py:23`, `tests/_frozen_paper_world.py:280`);
+`relaxations_json` (26 test call sites, incl. `tests/_gate_row_helpers.py:23`,
+`tests/_frozen_paper_world.py:280`, plus `scripts/seed_runs_dev.py:426`); the research `gate_row`
+builder `_make_gate_row` (`test_registry_store.py:1212`), which feeds 18 direct
+`record_gate_with_fdr_and_maybe_promote` calls, adds `relaxations_json`;
 `record_forward_gate_evaluation` / `record_forward_pass_and_promote` callers and their `gate_row`
 dicts (`test_forward_certificate.py`, `test_registry_store.py` ×5, `test_shortlist_gate.py`); `run_gate` callers pass `relaxations=()`
 (`test_promotion.py` ×11, `research/test_dsr_dispersion_floor.py` ×6); raw INSERTs into the gate
@@ -700,8 +760,11 @@ tables that run after `migrate()` add the column (`test_forward_certificate.py:1
 `registry/test_novel_family_seed_524.py:491`, `test_cli_registry_gates.py:57,79`,
 `test_cli_merge_back.py:115`, `registry/test_gate_attempt_token.py:33`, and in
 `test_registry_db.py` / `test_db_migrations.py` only where the INSERT follows a v49 `migrate()`);
-the schema fingerprint and version in `test_registry_db.py`; `guard_agent_relaxations` import in
-`test_promotion.py:13`.
+the schema fingerprint and version in `test_registry_db.py`; the schema-version literal pins
+(48 → 49) `test_registry_db.py:894,918,983,1036,1041`, `test_frozen_evidence_schema.py:616`,
+`registry/test_runs_schema.py:38,39,66`, `registry/test_holdout_returns.py:17`,
+`registry/test_novel_family_seed_524.py:60` and `test_family_registry.py:58,69`;
+`guard_agent_relaxations` import in `test_promotion.py:13`.
 
 Raw forward edges (replace with `seed_stage` or the real gate command):
 `test_cli_registry.py:78,88`; `test_cli_live.py:97,865,1210,1433`; `test_cli_paper.py:78,760,1383,1639`;
@@ -727,5 +790,6 @@ Code and docs: `scripts/seed_runs_dev.py:426`; `CLAUDE.md` (the raw-shortlist se
 `:122-123`, the token-gated paragraph at `:203-204`, the go-live bullet); `docs/agent/operating.md`
 (live gate steps); `docs/agent/research-lifecycle.md` §6; `docs/architecture.md` (`:33-34` raw
 edge, the paper→live wall bullet); `docs/contracts/cli-error-envelope.md` (§5);
-`deploy/systemd/README.md` (v49 forward-only note); docstrings naming the deleted finders
+`deploy/systemd/README.md` (v49 forward-only note: the §2 roll-forward sequence and rollback
+runbook); docstrings naming the deleted finders
 (`store/forward_gate.py:143-144`, `store/gate.py:82,399`, `repository.py:593`).

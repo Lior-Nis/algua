@@ -37,7 +37,8 @@ set on every gate row, judges it once at go-live, and removes the two raw edges.
   intent: Every new gate row records its relaxation set, permanently.
   success: Every research and forward evaluation row written after v49, pass or fail, carries a
     canonical `relaxations_json` (`[]` when unrelaxed); the schema refuses a new row without one, a
-    malformed or out-of-vocabulary value, and any later change to it.
+    malformed, non-canonical or out-of-vocabulary value, and any later change to it, including a
+    rewrite of an existing row by `INSERT OR REPLACE` (both tables are append-only).
 - id: CAP-3
   intent: Rows written before v49 are classified once, conservatively.
   success: The v49 migration derives a set only where the row's own columns prove it (an agent row
@@ -48,7 +49,9 @@ set on every gate row, judges it once at go-live, and removes the two raw edges.
   intent: Go-live is refused unless both qualifying rows are unrelaxed.
   success: One function runs the certificate verifier and then the qualification predicate, at
     challenge issuance (before any `live_challenges` row) and at completion (before signature
-    verification or challenge consumption), for the injected and the default verifier alike. A
+    verification or challenge consumption), for the injected and the default verifier alike; it
+    judges the active deployment's newest forward row, so a verifier can neither skip it nor steer
+    it to an older certificate. A
     relaxed or unrecorded research gate or certificate refuses with the stable, non-retryable code
     `live_qualification_relaxed`, naming each relaxation and the row that carried it. A valid human
     signature does not override it; the issued challenge shows both rows' (empty) sets.
@@ -61,7 +64,8 @@ set on every gate row, judges it once at go-live, and removes the two raw edges.
   intent: The gate commands are the only ways into `candidate` and `forward_tested`.
   success: A raw `backtested -> candidate` or `paper -> forward_tested` transition is refused for
     every actor, human included; every other raw edge, including the `paper -> candidate` back-step,
-    is unchanged.
+    is unchanged. A structural test pins every production caller of the stage-writing store
+    primitives and every SQL statement that writes `strategies.stage`.
 
 ## Constraints
 
@@ -75,9 +79,15 @@ set on every gate row, judges it once at go-live, and removes the two raw edges.
 - A row's relaxation set is computed from the run's own inputs when the row is written; it is never
   derived later, except once, by the v49 migration, for rows that predate it.
 - Every new module is CODEOWNERS-protected and in the integrity-critical set; pinned modules are
-  carved, not grown; `algua/contracts` stays pure; the full root gate passes.
+  carved, not grown; the unpinned `db/migrate.py` gains only one import and one call and stays below
+  the 300-line ratchet floor; `algua/contracts` stays pure; the full root gate passes.
 - v49 is forward-only: v48 code cannot write a gate row on a v49 registry (the insert trigger
-  refuses it), which fails closed.
+  refuses it), which fails closed. It is deployed with the contract's roll-forward sequence (stop
+  the merge-back drain and research timers and let running units exit, migrate once, restart), so
+  no in-flight v48 promote burns a holdout whose row v49 then refuses.
+- Story 2.2 edits the same go-live and transition code; whichever story merges second rebases and
+  keeps the companion's §9 ordering (the raw-edge refusal directly after the intake refusal, the
+  predicate in `_validate_live_gate` before 2.2's lock and drain).
 
 ## Non-goals
 
