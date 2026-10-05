@@ -209,3 +209,32 @@ def test_only_transitions_reaches_the_store_transition_and_none_injects_a_select
     assert _algua_calls(lambda c: isinstance(c.func, ast.Attribute)
                         and c.func.attr == "apply_transition") == ["algua/registry/transitions.py"]
     assert _algua_calls(lambda c: any(k.arg == "exit_guard_selector" for k in c.keywords)) == []
+
+
+def test_no_store_internal_transition_revokes_an_allocation():
+    """The other half of the §1 structural pin: the drain runs only through ``apply_transition``, so
+    every other caller of the store's ``_apply_transition_locked`` (intake, research and forward
+    promotion) must never shed an allocation. It passes ``revoke_allocation`` only as a literal
+    ``False`` or omits it, and the default stays ``False``."""
+    import inspect
+
+    from algua.registry.store.base import TransitionMixin
+
+    params = inspect.signature(TransitionMixin._apply_transition_locked).parameters
+    assert params["revoke_allocation"].default is False
+    offenders = []
+    for path in sorted((REPO / "algua").rglob("*.py")):
+        if path.relative_to(REPO).as_posix() == "algua/registry/store/crud.py":
+            continue  # apply_transition: the drained revoke path itself
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "_apply_transition_locked"):
+                continue
+            for kw in node.keywords:
+                if kw.arg == "revoke_allocation" and not (
+                        isinstance(kw.value, ast.Constant) and kw.value.value is False):
+                    offenders.append(f"{path.relative_to(REPO)}:{node.lineno}")
+            if any(kw.arg is None for kw in node.keywords) or len(node.args) > 10:
+                offenders.append(f"{path.relative_to(REPO)}:{node.lineno} (opaque arguments)")
+    assert offenders == []
