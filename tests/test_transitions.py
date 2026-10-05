@@ -29,6 +29,7 @@ def test_bench_to_dormant_requires_reason(tmp_path):
         transition_strategy(repo, "s1", Stage.DORMANT, Actor.AGENT, reason="")
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_bench_to_dormant_with_reason_succeeds(tmp_path):
     repo = _paper_strategy(tmp_path)
     rec = transition_strategy(repo, "s1", Stage.DORMANT, Actor.AGENT,
@@ -49,6 +50,7 @@ def _live_strategy(tmp_path):
     return repo, conn
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_live_to_dormant_rejected_when_not_flat(tmp_path):
     repo, conn = _live_strategy(tmp_path)
     conn.execute(
@@ -60,6 +62,7 @@ def test_live_to_dormant_rejected_when_not_flat(tmp_path):
         transition_strategy(repo, "s1", Stage.DORMANT, Actor.AGENT, reason="bench")
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_live_to_dormant_flat_succeeds_and_revokes_allocation(tmp_path):
     repo, conn = _live_strategy(tmp_path)
     with conn:

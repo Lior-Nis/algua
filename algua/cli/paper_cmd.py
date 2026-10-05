@@ -23,13 +23,7 @@ from algua.cli._common import (
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.cli.lane_refresh import build_cycle_plan, lane_symbols, refresh_lane_snapshot
-from algua.cli.paper_venue import (
-    ingest_paper_venue,
-    live_strategy_flat,
-    paper_broker_net,
-    paper_scoped_cancel,
-    recover_stranded,
-)
+from algua.cli.paper_venue import live_strategy_flat, paper_broker_net, paper_scoped_cancel
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
 from algua.contracts.types import OrderIntent
@@ -69,6 +63,7 @@ from algua.execution.order_state import (
 from algua.execution.peaks import rebase_all_peaks, rebase_strategy_peak
 from algua.execution.sim_broker import SimBroker
 from algua.execution.tick_clock import tick_clock
+from algua.execution.venue_sync import ingest_paper_venue, recover_stranded
 from algua.live.frozen_dispatch import FrozenPlanner, FrozenTarget, FrozenTenantFailure
 from algua.live.frozen_wire import WireIdentity
 from algua.live.live_loop import (

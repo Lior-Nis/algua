@@ -328,8 +328,8 @@ class CrudMixin(TransitionMixin):
 
         FILLED positions are not the only orphan risk: a resting (submitted-but-unfilled) order left
         behind at the venue can fill AFTER the exit and orphan a position the source lane's run-all
-        no longer iterates. When the caller injects an ``exit_guard`` (the broker-backed drain,
-        wired for the LIVE lane, #497 F2/H1), its ``cancel_and_ingest`` already ran before the lock;
+        no longer iterates. When the caller injects an ``exit_guard`` (the broker-backed drain both
+        lanes select, #497 F2/H1, Story 2.2), its ``cancel_and_ingest`` already ran before the lock;
         we re-list the strategy's STILL-open orders UNDER the lock so a cancel that failed to remove
         one (a non-cancelable/partial state) blocks the revoke+CAS rather than orphaning it.
 

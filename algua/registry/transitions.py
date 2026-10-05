@@ -19,6 +19,9 @@ ApprovalVerifier = Callable[
 # it instead of recomputing, so the certificate and approval checks can never drift (#124 GATE-2).
 ForwardCertificateVerifier = Callable[
     [StrategyRepository, str, int, ArtifactIdentity], dict[str, Any]]
+# (repo, name, source, target) -> the source lane's exit drain for an edge in _REVOKE_ON_EXIT
+# (Story 2.2). Default: `lane_exit.select_exit_guard`, so no caller can forget the drain.
+ExitGuardSelector = Callable[[StrategyRepository, str, Stage, Stage], ExitLaneGuard]
 
 # Every book-exit / lane-crossing edge that must SHED the strategy's capital reservation as part of
 # the transition (#497). Leaving a strategy allocated after it leaves its operating book orphans the
@@ -41,7 +44,7 @@ def transition_strategy(
     reason: str | None = None,
     approval_verifier: ApprovalVerifier | None = None,
     forward_certificate_verifier: ForwardCertificateVerifier | None = None,
-    exit_guard: ExitLaneGuard | None = None,
+    exit_guard_selector: ExitGuardSelector | None = None,
 ) -> StrategyRecord:
     target = Stage(to)
     transition_actor = Actor(actor)
@@ -91,9 +94,13 @@ def transition_strategy(
         if transition_actor is not Actor.HUMAN:
             consume_forward_gate_id = _validate_forward_gate(
                 repo=repo, strategy_id=rec.id, identity=identity)
-    from algua.operator.deployment_lock import deployment_retirement_lock
+    from algua.operator.deployment_lock import operator_transition_lock
 
-    with deployment_retirement_lock(rec.stage, target):
+    with operator_transition_lock(rec.stage, target):
+        # Selected inside the lock and after every validation, from `rec.stage` -- the stage the
+        # store's compare-and-swap checks -- so the drain's lane is the lane the exit commits from.
+        guard = ((exit_guard_selector or _default_exit_guard_selector())(
+            repo, name, rec.stage, target) if revoke_allocation else None)
         return repo.apply_transition(
             rec=rec,
             to=target,
@@ -106,10 +113,7 @@ def transition_strategy(
             consume_forward_gate_id=consume_forward_gate_id,
             revoke_allocation=revoke_allocation,
             live_authorization=live_authorization,
-            # The source-lane open-order drain only applies to a book-exit edge that sheds the
-            # allocation (#497 F2/H1); forwarding it on any other edge would trip the store-layer
-            # "exit_guard is only valid on a revoke_allocation transition" guard.
-            exit_guard=exit_guard if revoke_allocation else None,
+            exit_guard=guard,
         )
 
 
@@ -228,6 +232,13 @@ def _default_approval_verifier() -> ApprovalVerifier:
     from algua.registry.approvals import has_valid_approval
 
     return has_valid_approval
+
+
+def _default_exit_guard_selector() -> ExitGuardSelector:
+    """Both lanes' exit drains, built lazily through the module attribute (the test seam)."""
+    from algua.execution import lane_exit
+
+    return lane_exit.select_exit_guard
 
 
 def _default_forward_certificate_verifier() -> ForwardCertificateVerifier:

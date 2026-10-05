@@ -343,12 +343,9 @@ class _AlpacaBroker:
                 # A trim below Alpaca's min notional must SKIP, not post a sub-$1 order the venue
                 # rejects (a BrokerError would abort the whole run-all cycle) — codex C2 review.
                 return "skipped"
-        # Quantize DOWN (ROUND_FLOOR), never up: a risk-reserved BUY amount was granted against
-        # book-level headroom (#389); rounding the submitted notional UP to cents could push the
-        # actual gross a fraction of a cent PAST a book cap the accumulator believes is exactly met
-        # (Codex #389 GATE-2). Flooring guarantees submitted notional <= reserved amount. A buy in
-        # [MIN_NOTIONAL, MIN_NOTIONAL+0.01) floors to MIN_NOTIONAL, so it never drops below the
-        # venue minimum the guard above already enforced.
+        # Quantize DOWN: rounding a risk-reserved BUY (#389) up to cents could push gross a cent
+        # past a book cap the accumulator believes is exactly met (Codex #389 GATE-2). A buy in
+        # [MIN_NOTIONAL, +0.01) floors to MIN_NOTIONAL, still at least the venue minimum.
         notional = format(
             Decimal(str(amount)).quantize(Decimal("0.01"), rounding=ROUND_FLOOR), "f"
         )
@@ -395,8 +392,11 @@ class _AlpacaBroker:
         """All OPEN orders on the account, up to Alpaca's 500-per-call maximum (its default is 50).
         Each carries `id` and `client_order_id`; the caller scopes cancellation by the latter."""
         rows = self._read(self._get("/v2/orders?status=open&limit=500"), "/v2/orders")
-        if isinstance(rows, list) and len(rows) >= 500:  # a full page may hide a tenant's orders
-            raise BrokerError(f"alpaca /v2/orders: {len(rows)} open orders fill the page; refusing")
+        # Fail closed on a full page (it may hide a tenant's orders) and on any order without an id
+        # or client_order_id: ownership filtering would silently drop it as "not ours".
+        if not (isinstance(rows, list) and len(rows) < 500 and all(
+                isinstance(r, dict) and r.get("id") and r.get("client_order_id") for r in rows)):
+            raise BrokerError(f"alpaca /v2/orders: malformed, or would fill the page: {rows!r:.9}")
         return rows
 
     def get_order_by_client_order_id(self, client_order_id: str) -> dict[str, Any] | None:

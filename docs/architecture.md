@@ -199,7 +199,11 @@ both key on the slug.
   certificate.
 - **Lane parity** — paper is the rehearsal for live, so both lanes must enforce the same invariants.
   `tests/test_lane_parity.py` asserts it structurally, because a fix reaching one lane and not the
-  other is silent (that is exactly what happened in #559/#601).
+  other is silent (that is exactly what happened in #559/#601). Every book exit of either lane
+  drains the strategy's own resting orders before it sheds its allocation:
+  `transition_strategy` selects the source lane's guard itself through
+  `execution/lane_exit.select_exit_guard` (`paper_exit_drain.PaperExitGuard` or `LiveExitGuard`),
+  so no caller can forget it (#685).
 - **CODEOWNERS is executable** — `operator/diff_policy.py` derives the autonomous merge-back's
   denylist from it, so a module missing from CODEOWNERS is one an agent can merge unreviewed.
   `tests/test_repo_hygiene.py` pins the integrity-critical set.

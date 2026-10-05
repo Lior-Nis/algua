@@ -55,6 +55,7 @@ def _seed_paper_fill(conn: sqlite3.Connection, name: str) -> None:
 
 # --- flat exits from the PAPER lane (paper-venue ledger governs flatness) -------------------------
 
+@pytest.mark.usefixtures("empty_exit_venues")
 @pytest.mark.parametrize(
     ("source", "target", "actor", "reason"),
     [
@@ -77,6 +78,7 @@ def test_paper_lane_exit_revokes_allocation(tmp_path, source, target, actor, rea
     assert allocations.active_allocation(conn, sid) is None
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_paper_to_dormant_flat_check_uses_paper_ledger(tmp_path):
     # A paper-lane exit must consult the PAPER (paper-venue) ledger for flatness, NOT the live one.
     repo, conn = _repo(tmp_path)
@@ -93,6 +95,7 @@ def test_paper_to_dormant_flat_check_uses_paper_ledger(tmp_path):
     assert allocations.active_allocation(conn, sid) is not None
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_paper_exit_flatness_ignores_live_ledger(tmp_path):
     # A stray LIVE fill for a paper-stage strategy must NOT block a paper-lane exit — the check is
     # scoped to the SOURCE lane's ledger.
@@ -109,6 +112,7 @@ def test_paper_exit_flatness_ignores_live_ledger(tmp_path):
 
 # --- exits from the LIVE lane (live ledger governs flatness) --------------------------------------
 
+@pytest.mark.usefixtures("empty_exit_venues")
 @pytest.mark.parametrize(
     ("target", "reason"),
     [(Stage.PAPER, None), (Stage.RETIRED, None), (Stage.DORMANT, "bench")],
@@ -125,6 +129,7 @@ def test_live_lane_exit_revokes_when_flat(tmp_path, target, reason):
     assert allocations.active_allocation(conn, sid) is None
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 @pytest.mark.parametrize(
     ("target", "reason"),
     [(Stage.PAPER, None), (Stage.RETIRED, None), (Stage.DORMANT, "bench")],
@@ -144,11 +149,12 @@ def test_live_lane_exit_blocked_when_not_flat(tmp_path, target, reason):
     assert allocations.active_allocation(conn, sid) is not None
 
 
-# --- source-lane open-order drain (exit_guard, #497 F2/H1) ----------------------------------------
+# --- source-lane open-order drain (exit_guard_selector, #497 F2/H1) -------------------------------
 
 class _FakeExitGuard:
-    """A stand-in ExitLaneGuard: records that cancel_and_ingest ran and reports a canned set of
-    still-open order ids under the lock (what the CLI's LiveExitGuard returns from the broker)."""
+    """A stand-in ExitLaneGuard, injected through ``exit_guard_selector``: records that
+    cancel_and_ingest ran and reports a canned set of still-open order ids under the lock (what a
+    real lane guard returns from the broker)."""
 
     def __init__(self, open_ids: list[str], on_ingest=None) -> None:
         self._open_ids = open_ids
@@ -175,7 +181,7 @@ def test_exit_guard_blocks_on_residual_open_order(tmp_path):
 
     with pytest.raises(TransitionError, match="open live order"):
         transition_strategy(repo, "s1", Stage.DORMANT, Actor.HUMAN, reason="bench",
-                            exit_guard=guard)
+                            exit_guard_selector=lambda *_a: guard)
 
     assert guard.cancel_and_ingest_calls == 1  # the pre-lock cancel/ingest ceremony ran
     # Atomic: stage + allocation both survive the blocked exit.
@@ -191,7 +197,8 @@ def test_exit_guard_permits_when_drained_flat(tmp_path):
     _seed_alloc(conn, sid)
     guard = _FakeExitGuard(open_ids=[])
 
-    rec = transition_strategy(repo, "s1", Stage.RETIRED, Actor.HUMAN, exit_guard=guard)
+    rec = transition_strategy(repo, "s1", Stage.RETIRED, Actor.HUMAN,
+                              exit_guard_selector=lambda *_a: guard)
 
     assert guard.cancel_and_ingest_calls == 1
     assert rec.stage is Stage.RETIRED
@@ -210,7 +217,7 @@ def test_exit_guard_ingest_captured_fill_blocks_via_positions(tmp_path):
 
     with pytest.raises(TransitionError, match="open live positions"):
         transition_strategy(repo, "s1", Stage.DORMANT, Actor.HUMAN, reason="bench",
-                            exit_guard=guard)
+                            exit_guard_selector=lambda *_a: guard)
 
     assert repo.get("s1").stage is Stage.LIVE
     assert allocations.active_allocation(conn, sid) is not None
@@ -284,6 +291,7 @@ def test_authorization_off_live_edge_rejected(tmp_path):
 
 # --- go-live end-to-end paper-slice shed (full signed ceremony) -----------------------------------
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_go_live_sheds_paper_slice_end_to_end(tmp_path, monkeypatch):
     """Full two-step signed go-live: a strategy allocated in the paper book while forward_tested is
     SHED (allocation revoked) when it reaches live (#497)."""

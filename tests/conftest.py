@@ -1,7 +1,8 @@
 """Suite-wide isolation for developer-environment surfaces a test must never inherit.
 
-Three leaks, all caused by a test resolving a real, developer-machine surface by default when
-pytest runs from the repo root.
+Four leaks, all caused by a test resolving a real, developer-machine surface by default when
+pytest runs from the repo root. The fourth, real Alpaca HTTP, is documented on its fixture,
+``_no_real_alpaca_http``, at the end of this file.
 
 **1. The knowledge vault (write leak).** ``Settings.knowledge_dir`` defaults to the RELATIVE path
 ``kb`` — the developer's actual Obsidian vault. The gate commands sync the vault as a side effect
@@ -34,9 +35,18 @@ remembering it.
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 import pytest
+import requests
 
 from algua.config.settings import Settings
+
+# ``empty_exit_venues`` (Story 2.2 §8): an explicit, opt-in fixture -- never autouse. A test that
+# drives an allocation-shedding transition names it to get empty fake venues for both lanes' exit
+# drains; one that forgets meets the real drain and, at worst, the Alpaca guard at the end of this
+# file.
+pytest_plugins = ("tests._exit_drain",)
 
 
 @pytest.fixture(autouse=True)
@@ -105,3 +115,41 @@ def _isolated_registries():
     for registry, snapshot in snapshots:
         registry.clear()
         registry.update(snapshot)
+
+
+def _is_alpaca_host(url: object) -> bool:
+    """True for ``alpaca.markets`` and every ``*.alpaca.markets`` host (paper, live and data)."""
+    host = (urlsplit(str(url)).hostname or "").lower()
+    return host == "alpaca.markets" or host.endswith(".alpaca.markets")
+
+
+@pytest.fixture(autouse=True)
+def _no_real_alpaca_http(monkeypatch):
+    """**4. Real Alpaca HTTP (network leak, Story 2.2 §8).** Every paper-lane and live-lane book
+    exit now drains its resting orders through a default selector, so a test that sets dummy Alpaca
+    credentials and forgets the explicit ``empty_exit_venues`` fixture would build a real broker
+    and send HTTPS to Alpaca. ``requests.Session.request`` is the one function every real request
+    passes through (``requests.get/post/delete`` delegate to it on a fresh session), whatever the
+    verb or the lane, so it is wrapped here: an Alpaca host is recorded and refused with an
+    ``AssertionError`` before anything is sent; every other host goes to the original unchanged.
+
+    A raise alone can be swallowed (the exit drain audits a step exception into a ``BrokerError``,
+    and the CLI catch-all turns any exception into an envelope), so a test that only asserts a
+    refusal would still pass. Teardown therefore fails the test, listing every recorded request.
+    There is no opt-out. Yields the record so the self-test can read and clear it."""
+    recorded: list[str] = []
+    original = requests.Session.request
+
+    def guarded(self, method, url, *args, **kwargs):
+        if _is_alpaca_host(url):
+            call = f"{str(method).upper()} {url}"
+            recorded.append(call)
+            raise AssertionError(f"real Alpaca HTTP in a test: {call}")
+        return original(self, method, url, *args, **kwargs)
+
+    guarded._algua_alpaca_guard = True  # read by the self-test (tests are not type-checked)
+    monkeypatch.setattr(requests.Session, "request", guarded)
+    yield recorded
+    if recorded:
+        pytest.fail("real Alpaca HTTP attempted in a test (refused, nothing sent): "
+                    f"{recorded}", pytrace=False)

@@ -55,8 +55,9 @@ BUDGET: dict[str, int] = {
     "algua/cli/data_cmd.py": 410,
     "algua/cli/live_cmd.py": 749,
     "algua/cli/operator_cmd.py": 334,
-    "algua/cli/paper_cmd.py": 1409,
-    "algua/cli/registry_cmd.py": 446,
+    "algua/cli/paper_cmd.py": 1382,
+    # Story 2.2: the live exit-drain selection moved to execution/lane_exit.select_exit_guard.
+    "algua/cli/registry_cmd.py": 380,
     # +39 for #560: ExecutionContract.target_gross_utilization plus its domain guards. The field
     # and guards are ~8 lines; the rest is the comment deriving the 0.95 default from an explicit
     # between-tick move policy (u <= 1/(1+r)), sizing 5% as a stress allowance against measured

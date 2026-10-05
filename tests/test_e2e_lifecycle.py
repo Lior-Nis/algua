@@ -172,6 +172,7 @@ def _to_paper_e2e(capsys):
     assert _stage(capsys) == "paper"
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_e2e_paper_to_dormant_to_retired(capsys):
     """paper -> dormant -> retired: both transitions succeed and stages are reported correctly."""
     _to_paper_e2e(capsys)
@@ -203,6 +204,7 @@ def test_e2e_paper_to_dormant_requires_reason(capsys):
     assert _stage(capsys) == "paper"
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_e2e_dormant_recovers_to_paper(capsys):
     """A dormant strategy can be reactivated back to paper by any actor."""
     _to_paper_e2e(capsys)

@@ -116,6 +116,7 @@ def test_paper_run_rejects_non_paper_stage():
 
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_still_paper_allocated_reflects_stage_and_allocation(monkeypatch):
     # #497 F3: the submit-time guard is True only for an ALLOCATED paper-lane tenant, and flips to
     # False the moment the strategy leaves the book (a lane-exit atomically revokes the slice) — so
@@ -148,6 +149,7 @@ def test_still_paper_allocated_reflects_stage_and_allocation(monkeypatch):
         assert _still_paper_allocated(conn, "cross_sectional_momentum") is False
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_dormant_strategy_not_run_by_paper_lane():
     """A dormant strategy is rejected by `paper run` with a non-zero exit.
 

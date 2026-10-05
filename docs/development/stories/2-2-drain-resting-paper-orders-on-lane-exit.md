@@ -4,7 +4,7 @@ baseline_commit: e875b6d
 
 # Story 2.2: Drain a strategy's resting paper orders on every paper-lane exit
 
-Status: ready-for-dev
+Status: review
 
 Prepared: 2026-10-04. Baseline: `e875b6d` (main after PR #686). Epic: 2.
 Requirements: FR13 (safe unattended paper operation), FR1 (the `forward_tested -> live` edge is a
@@ -97,14 +97,14 @@ whole-account loss breaker).
 
 ## Tasks / subtasks
 
-- [ ] Contract and readiness: entry-point inventory of paper-source exits (today only
+- [x] Contract and readiness: entry-point inventory of paper-source exits (today only
       `registry transition`; `transition_strategy`'s other caller, `evaluation/backtest_run.py:105`,
       moves only to `backtested`) (AC1–AC3).
-- [ ] Paper guard, test-first: cancel, ingest, under-lock re-list (AC1–AC2, AC5).
-- [ ] Fail-closed construction and audit (AC3).
-- [ ] Move guard selection out of `registry_cmd.py`; structural lane test (AC6–AC7).
-- [ ] Sibling-safety and live-unchanged regression tests (AC4, AC6).
-- [ ] Mutation checks, full gate, independent review (AC8).
+- [x] Paper guard, test-first: cancel, ingest, under-lock re-list (AC1–AC2, AC5).
+- [x] Fail-closed construction and audit (AC3).
+- [x] Move guard selection out of `registry_cmd.py`; structural lane test (AC6–AC7).
+- [x] Sibling-safety and live-unchanged regression tests (AC4, AC6).
+- [x] Mutation checks, full gate, independent review (AC8).
 
 ## Dev notes
 
@@ -207,6 +207,58 @@ uv run lint-imports
 
 ### Agent Model Used
 
+Claude Opus 5.5 (implementation, readiness, acceptance audit); Codex (independent review).
+
+### Review Findings
+
+Review round 1 (2026-10-05): Codex independent review (restored per Epic 1 retrospective action A12;
+the first attempt hit "model at capacity", the retry completed) plus a BMAD Acceptance Auditor. No
+blocker or major from the auditor; all eight ACs met.
+
+- [x] [Review][Patch] An HTTP-200 empty JSON object iterated as "no open orders", letting the scoped
+  cancel and the drain pass blind; `list_open_orders` now refuses any non-list body
+  [algua/execution/alpaca_broker.py]
+- [x] [Review][Patch] Codex: an open order listed without `id` or `client_order_id` was dropped by the
+  ownership filter as "not ours"; the page now fails closed (adapter and end-to-end drain tests)
+  [algua/execution/alpaca_broker.py]
+- [x] [Review][Patch] Auditor: the structural pin covered only the single `apply_transition` caller;
+  it now also pins that no store-internal `_apply_transition_locked` caller sheds an allocation
+  [tests/test_lane_parity.py]
+- [x] [Review][Patch] Codex: the test guard's marker used a `type: ignore` [tests/conftest.py]
+- [x] [Review][Dismiss] Auditor: T3b/T6/T7 assert stage, allocation, kill switch and no open
+  transaction rather than every row; the refusal rolls back atomically, T18 covers the challenge and
+  the autouse guard catches any stray HTTP call
+
 ### Completion Notes
 
+- Every paper-lane exit (`paper -> dormant|retired|candidate`, `forward_tested -> retired|live`)
+  selects the paper exit drain inside `transition_strategy`; the live lane's guard moved verbatim
+  from the CLI into `lane_exit.select_exit_guard` and behaves byte-identically.
+- The drain records fills, skips the cancel while a material position remains, cancels only the
+  strategy's own orders (audit row before each DELETE), re-lists, records fills again without
+  advancing the shared fill cursor, and settles every order it ever cancelled against the venue's
+  `filled_qty`; under the lock it refuses while an own order is open or a cancelled order's fill is
+  unpublished. Every paper-lane exit takes `operator.lock`; a refused go-live leaves its challenge
+  unconsumed.
+- An autouse test guard refuses any `*.alpaca.markets` request; the full suite was unchanged by it.
+- Accepted deviations (auditor): a `TYPE_CHECKING`-only import in `lane_exit.py`; the clock-unusable
+  `BrokerError` wording; `pytest_plugins` registration of the opt-in fixture; no T19 "no recorded
+  price" case (impossible: fills carry `price NOT NULL CHECK > 0`); the upper-cased HTTP method in
+  the guard message; T15's replaced `None`-selector test.
+- Mutation checks: 23 implementation mutants, the auditor's 16-mutant rerun and 3 review-fix mutants,
+  all caught and restored byte-identical.
+
 ### File List
+
+Production: algua/execution/{paper_exit_drain,venue_sync,lane_exit,alpaca_broker}.py;
+algua/operator/deployment_lock.py; algua/registry/transitions.py; algua/registry/store/crud.py
+(docstring); algua/cli/{registry_cmd,paper_venue,paper_cmd}.py; CODEOWNERS. Docs: CLAUDE.md,
+docs/architecture.md, deploy/systemd/README.md. Tests: tests/{_exit_drain,test_paper_exit_drain,
+test_paper_exit_golive,test_paper_exit_lock,test_venue_sync,test_no_real_alpaca_http}.py, the
+autouse guard in tests/conftest.py, and updates to the 13 churn files, test_lane_parity.py,
+test_registry_live_exit_guard.py, test_alpaca_broker.py, test_repo_hygiene.py and
+test_module_size_ratchet.py.
+
+### Change Log
+
+- 2026-10-05: Contract and readiness (PR #692); implemented; review round 1 applied; moved to review.

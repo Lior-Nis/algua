@@ -518,6 +518,7 @@ def _bench_and_return(name: str) -> None:
     assert back.exit_code == 0, back.output
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_intake_readmits_an_unallocated_paper_tenant(monkeypatch):
     """A strategy returned from `dormant` sits at stage paper with no slice. The next intake must
     re-admit it — otherwise it can never trade again without a human running `paper allocate`."""
@@ -540,6 +541,7 @@ def test_intake_readmits_an_unallocated_paper_tenant(monkeypatch):
     assert _has_allocation(_S1) and _capital_of(_S1) == 20_000.0
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_readmission_precedes_a_fresh_candidate_when_the_cap_binds(monkeypatch):
     """At a cap of 1, the returning book tenant wins the slot: it was admitted to the book before
     the candidate existed, and a strategy the operator explicitly returned to `paper` must not be
@@ -562,6 +564,7 @@ def test_readmission_precedes_a_fresh_candidate_when_the_cap_binds(monkeypatch):
     assert _stage_of(_S2).value == "candidate" and not _has_allocation(_S2)
 
 
+@pytest.mark.usefixtures("empty_exit_venues")
 def test_readmission_is_refused_when_the_book_is_already_full(monkeypatch):
     """A full book binds re-admission exactly as it binds admission — the returning tenant is
     reported queued, never funded past the count cap."""

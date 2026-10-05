@@ -14,10 +14,10 @@ import pytest
 from typer.testing import CliRunner
 
 from algua.cli.main import app
-from algua.cli.paper_venue import ingest_paper_venue
 from algua.config.settings import get_settings
 from algua.execution.alpaca_broker import AccountState, TickSnapshot
 from algua.execution.live_ledger import LedgerKind, fill_cursor, paper_believed_positions
+from algua.execution.venue_sync import ingest_paper_venue
 from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
 from tests._deployment_helpers import force_legacy_strategy

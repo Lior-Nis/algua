@@ -70,6 +70,11 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
 - `uv run algua registry list [--stage S]` — list strategies.
 - `uv run algua registry show <name>` — strategy + transition history.
 - `uv run algua registry transition <name> --to S --actor agent --reason "..."` — advance stage.
+  A paper-lane exit (`paper -> candidate|dormant|retired`, `forward_tested -> retired|live`)
+  drains the strategy's own resting paper orders first, so it needs the paper credentials and a
+  reachable paper venue, and takes `operator.lock`: run it from the operator's checkout (the main
+  checkout) so it excludes the paper timer. A refusal right after cancellation, or for a fill the
+  venue has not published yet, clears on retry.
 - `uv run algua paper promote <name>` — gate `paper -> forward_tested` on ≥63 broker-clocked
   daily return observations (≥90% session coverage), realized Sharpe ≥ max(0.5×holdout, 0.3),
   vol/drawdown bounds, clean integrity + account hygiene, evidence ≤5 sessions stale; relaxation
