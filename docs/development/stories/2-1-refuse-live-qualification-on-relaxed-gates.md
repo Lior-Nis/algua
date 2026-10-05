@@ -4,7 +4,7 @@ baseline_commit: e875b6d
 
 # Story 2.1: Refuse live qualification built on relaxed gates
 
-Status: backlog
+Status: ready-for-dev
 
 Prepared: 2026-10-04. Baseline: `e875b6d` (main after PR #686). Epic: 2.
 Requirements: FR14 (signed-relaxation policy), FR8 (live-wall preconditions), NFR2, NFR4–NFR6,

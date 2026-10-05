@@ -85,7 +85,7 @@ set on every gate row, judges it once at go-live, and removes the two raw edges.
   refuses it), which fails closed. It is deployed with the contract's roll-forward sequence (stop
   the merge-back drain and research timers and let running units exit, migrate once, restart), so
   no in-flight v48 promote burns a holdout whose row v49 then refuses.
-- Story 2.2 edits the same go-live and transition code; whichever story merges second rebases and
+- Story 2.2 edits the same go-live and transition code and merges first; this story rebases and
   keeps the companion's §9 ordering (the raw-edge refusal directly after the intake refusal, the
   predicate in `_validate_live_gate` before 2.2's lock and drain).
 

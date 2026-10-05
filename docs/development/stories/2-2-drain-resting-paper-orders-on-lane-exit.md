@@ -4,15 +4,17 @@ baseline_commit: e875b6d
 
 # Story 2.2: Drain a strategy's resting paper orders on every paper-lane exit
 
-Status: backlog
+Status: ready-for-dev
 
 Prepared: 2026-10-04. Baseline: `e875b6d` (main after PR #686). Epic: 2.
 Requirements: FR13 (safe unattended paper operation), FR1 (the `forward_tested -> live` edge is a
 paper-lane exit), NFR2, NFR4–NFR6. Issue: [#685](https://github.com/Lior-Nis/algua/issues/685).
 Depends on: Story 1.4's merged code (PR #686), not on Story 1.4's operational exit.
-Readiness: design-complete (the fix is the one #685 specifies); run the contract-first readiness
-step ("Contract and readiness first" in [story delivery](../../agent/story-delivery.md)) before
-code.
+Readiness: READY WITH CONDITIONS
+([readiness report, 2026-10-05](../implementation-readiness-report-2026-10-05-story-2-2.md)); all
+conditions applied to the contract on 2026-10-05 (M1–M3, m1–m11; see the decision log's
+"Readiness corrections" entry). Status stays `backlog` until the docs PR carrying the corrected
+contract merges.
 
 ## Story
 
@@ -77,7 +79,9 @@ whole-account loss breaker).
    order ids. The positions check (with the Story 1.4 dust rule) runs as today.
 3. **Fail closed.** Missing paper credentials, a failed open-order read, a failed cancel or a failed
    ingest refuses the exit. It never falls back to the positions-only check. The refusal is audited
-   (`paper_exit_drain_unavailable` or `paper_exit_drain_failed`) with an actionable message.
+   (`paper_exit_drain_unavailable` or `paper_exit_drain_failed`) with an actionable message, except a
+   re-list failure under the write lock, which rolls back and is reported by the envelope (amended
+   2026-10-05, readiness m2; contract §4).
 4. **Sibling safety.** A sibling's resting order on the shared paper account survives the exit
    (test). The account-wide `cancel_open_orders` is never called on this path.
 5. **Race coverage.** A test fills the strategy's order between cancel and ingest: the fill lands in
@@ -104,33 +108,57 @@ whole-account loss breaker).
 
 ## Dev notes
 
-- Placement (settled by the contract, §2 and §6). `ingest_paper_venue` and `recover_stranded` move
-  to a new `algua/execution/venue_sync.py`. They reach only the ledger and the audit log, so no new
-  package edge. `PaperExitGuard` and the one selector for both lanes, `select_exit_guard`, live in
-  `algua/execution/lane_exit.py`. `transition_strategy` calls the selector itself, through a lazy
-  default like `_default_forward_certificate_verifier`, so every caller gets the drain and
-  `registry_cmd.py` passes nothing. The `exit_guard` parameter becomes `exit_guard_selector`.
+- Placement (settled by the contract, §2, §3.1 and §6).
+  - `ingest_paper_venue` and `recover_stranded` move to a new `algua/execution/venue_sync.py`. It
+    also gains the drain's `ingest_paper_venue_keep_cursor`. These functions reach only the ledger and
+    the audit log, so no new package edge.
+  - `PaperExitDrainBroker`, `PaperExitGuard` and `build_paper_drain_broker` live in a new
+    `algua/execution/paper_exit_drain.py`. `algua/contracts/types.py` is at its ratchet pin and is
+    not edited, and `lane_exit.py` would pass 300 lines with the guard in it.
+  - The one selector for both lanes, `select_exit_guard`, lives in `algua/execution/lane_exit.py`.
+    `transition_strategy` calls it itself, through a lazy default like
+    `_default_forward_certificate_verifier`, so every caller gets the drain and `registry_cmd.py`
+    passes nothing.
+  - The `exit_guard` parameter becomes `exit_guard_selector`.
 - The broker-time `until` comes from `tick_clock(broker.clock)`, as in the paper flatten
   (`algua/cli/paper_cmd.py:1304`), but the exit refuses `tick_clock`'s local-clock fallback (contract
-  §3.2).
+  §3.2). The drain's ingests never advance the shared paper fill cursor: they re-store the cursor
+  they read (contract §3.2).
 - `ExitLaneGuard.cancel_and_ingest` runs outside the transaction and commits its own ingest. It stays
   outside the `try`/`BEGIN IMMEDIATE`, exactly as the live path does (`store/crud.py:292-300`). The
   store is not edited, apart from one docstring.
 - Refinements of the acceptance criteria, all in the contract:
   - AC1: the guard syncs the venue first and skips the cancel when the ledger holds a material
     position, so a premature exit leaves resting liquidation offsets in place.
-  - AC1, AC2: it re-reads the strategy's open orders after the cancel and syncs again afterwards;
-    an order still open at that read refuses the exit under the lock.
-  - AC3: drain failures before the lock are audited and raise `BrokerError` (`broker_error`);
-    missing credentials raise `TransitionError` (`wrong_stage`). A re-list failure under the lock
-    rolls back unaudited, because the audit append commits.
-  - The guard also writes a `paper_exit_drain_cancelled` audit row.
-  - Every paper-lane exit, go-live included, takes `operator.lock`.
+  - AC1, AC2: it re-reads the strategy's open orders after the cancel, re-listing up to 3 more times
+    at 1-second intervals while a cancelled order is still listed (`pending_cancel`), and syncs again
+    afterwards. An order still open at the last read refuses the exit under the lock.
+  - AC1, AC5: after the final sync it settles every order any drain has asked the venue to cancel
+    for the strategy, comparing the venue's `filled_qty` (by-coid lookup) with the ledger's fills for
+    that order. A fill the venue has executed but not yet published refuses the exit, on every retry,
+    until the ledger holds it. So AC5's race is covered whether the venue publishes the fill at once
+    or late.
+  - AC3: drain failures before the lock are audited and raise `BrokerError` (`broker_error`),
+    including a failed or 404 order lookup in the settle step. Missing credentials raise
+    `TransitionError` (`wrong_stage`). A re-list failure under the lock rolls back unaudited, because
+    the audit append commits; AC3 is amended to say so.
+  - Before each cancel is sent, the guard commits a `paper_exit_drain_cancel_requested` audit row
+    whose reason is the broker order id. These rows are the settle step's durable record.
+  - Every paper-lane exit, go-live included, takes `operator.lock`. It excludes the paper timer only
+    when run from the operator's checkout. A go-live refused for a held lock leaves its challenge
+    unconsumed; if the challenge expires, the human issues a new one.
+  - AC6: live messages and audit actions are unchanged. Live selection now runs after validation
+    and inside the lock, so a live exit refused by validation or a held lock no longer writes a
+    `live_exit_drain_*` row (contract §2.4).
+- Test isolation: an autouse guard in `tests/conftest.py` refuses HTTP to any `*.alpaca.markets`
+  host and fails the test, so a test that forgets the explicit fake-venue fixture cannot reach the
+  network (contract §8).
 - Corrected references: `_assert_flat_for_bench` is `store/crud.py:319-353`; `LiveExitGuard` is
   `lane_exit.py:43-72`; the protocol is `contracts/types.py:401-417`.
 - Coordination with Story 2.1: both edit `transitions.py` (unpinned, 277 lines, and the ratchet
   forbids it reaching 300) and `registry_cmd.py`. This story budgets `transitions.py` to 290 lines
-  and frees about 60 lines in `registry_cmd.py`.
+  and frees about 60 lines in `registry_cmd.py`. **This story merges first.** Story 2.1 rebases onto
+  it (contract §6).
 - Story 1.4 operator: production still holds one legacy tenant at `paper`,
   `liquidity_stable_quality_momentum` (registry copy, 2026-10-05). It is kill-switched with a
   resting UNH sell offset. If this story merges first, its retirement drains through the guard:
@@ -141,9 +169,20 @@ whole-account loss breaker).
 
 ### Test matrix
 
-Each paper-source edge with and without a resting order; sibling order survives; fill between cancel
-and ingest; non-cancelable order; credentials missing; read, cancel and ingest failures; live exits
-unchanged; non-revoking edges unguarded; structural parity test.
+The contract's T1–T20 cover:
+
+- each paper-source edge with and without a resting order;
+- a sibling order surviving;
+- a fill between cancel and ingest, published at once or late (refused until ingested, then the exit
+  commits or is refused on positions);
+- the drain never moving the shared cursor;
+- a non-cancelable order and a `pending_cancel` that clears;
+- missing credentials;
+- clock, ingest, read, cancel, re-check and settle failures;
+- live exits unchanged, with the two timing pins;
+- non-revoking edges staying unguarded;
+- the structural parity test;
+- the suite-wide Alpaca-host guard.
 
 ## Owner decisions
 
