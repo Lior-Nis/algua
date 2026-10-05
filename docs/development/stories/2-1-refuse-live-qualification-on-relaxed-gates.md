@@ -79,6 +79,15 @@ the certificate wall, there is no in-band waiver); change the signed go-live pay
 enable frozen go-live (it stays `frozen_live_unsupported` until Story 2.3); touch capital,
 allocations or live activation; give agents any new authority.
 
+## Normative contract
+
+The [Story 2.1 machine contract](../specs/spec-story-2-1-unrelaxed-live-qualification/SPEC.md)
+and its [field-level companion](../specs/spec-story-2-1-unrelaxed-live-qualification/live-qualification-contract.md)
+are normative. The companion's §2 (exact DDL, triggers and migration order) is this story's
+protected schema review and its §7 is the entry-point inventory. Implementers and reviewers must
+read both and the [decision log](../specs/spec-story-2-1-unrelaxed-live-qualification/.decision-log.md),
+which records the calls the acceptance criteria left open.
+
 ## Acceptance criteria
 
 1. **Closed relaxation vocabulary.** One protected module defines a closed vocabulary and two pure
@@ -166,11 +175,35 @@ allocations or live activation; give agents any new authority.
 | `algua/registry/store/forward_gate.py:18-129` | One INSERT behind both record paths | Write the column |
 | `algua/registry/forward_promotion.py:47-70` | Guard computes the relaxed list for agents only | Extract a pure `forward_relaxations`; guard reuses it |
 | `algua/registry/forward_promotion.py:221-267` | `gate_row` and the two record paths | Carry `relaxations_json` |
-| `algua/registry/live_certificate.py:83-99` | Selects the certificate row | Return its id in the summary |
-| `algua/registry/transitions.py:116-157`, `algua/cli/registry_cmd.py:215-217` | Certificate check at completion and issuance | Both call one `verify_live_qualification` that runs the verifier, then the predicate |
+| `algua/registry/live_certificate.py:83-99` | Selects the certificate row | No change: the summary already returns the row `id` (`:186`), which the predicate reads |
+| `algua/registry/transitions.py:116-157`, `algua/cli/registry_cmd.py:216-217` | Certificate check at completion and issuance | Both call one `verify_live_qualification` that runs the verifier, then the predicate |
+| `algua/registry/transitions.py:36-113` | Raw forward edges consume agent tokens; humans pass freely | Refuse both forward edges for every actor; delete the unreachable token branches and helpers (contract §6) |
 
-`registry_cmd.py` has two lines of headroom under its 446 pin; replace the issuance call rather than
-adding one. The legacy-cohort branch (`live_certificate.py:91-95`) stops authorizing go-live.
+The companion (§4–§6, §9) is authoritative where it is more specific than this table: it adds the
+carves (`capture_gate_fail_experience` to `gate_fail_capture.py`, `guard_agent_relaxations` to
+`relaxations.py`), deletes the two `find_consumable_*` finders whose only callers §6 removes, and
+lowers every touched pin to its new size. `registry_cmd.py` has two lines of headroom under its 446
+pin; replace the issuance call rather than adding one. The legacy-cohort branch
+(`live_certificate.py:91-95`) stops authorizing go-live because the predicate reads a strategy
+without an active deployment as `unrecorded`; the branch itself goes with the legacy tick paths
+(the Story 1.4 follow-up).
+
+### Contract decisions beyond the acceptance-criteria text
+
+Recorded in the decision log; the owner may revisit the first two like the `--demo` call.
+
+- Every human research row records `agent_walls_waived`: a human run skips the agent-only walls
+  (reproducible source, cost floor, feature lookback, gated universe, seeded family path) with no
+  flag. A human who wants a live-eligible research gate runs `research promote --actor agent`.
+- `--demo` records `demo_data`; `--new-family` records `new_family` only for a human (an agent's is
+  ignored by the code).
+- A non-finite threshold is a relaxation; the forward agent guard reuses the same function, so an
+  agent's `NaN` forward threshold is now refused at preflight (finite inputs: byte-identical).
+- Human forward rows written before v49 stay `unrecorded` (their confidence is recorded nowhere);
+  agent forward rows need the LCB check to be classified.
+- The raw-edge refusal is a plain `TransitionError` (`wrong_stage`), like the intake refusal; the
+  `paper -> candidate` back-step stays.
+- `cli/registry_cmd.py` and the new modules become CODEOWNERS-protected and integrity-critical.
 
 ### Traps
 

@@ -46,6 +46,15 @@ The building blocks exist: `owned_open_order_ids(..., kind=LedgerKind.PAPER)`
 (`algua/cli/paper_venue.py:63-79`), and the live guard's shape (`LiveExitGuard`,
 `algua/execution/lane_exit.py:43-68`; protocol `algua/contracts/types.py:401-416`).
 
+## Normative contract
+
+The [Story 2.2 machine contract](../specs/spec-story-2-2-paper-exit-drain/SPEC.md) and its
+[field-level companion](../specs/spec-story-2-2-paper-exit-drain/paper-exit-drain-contract.md) are
+normative. They hold the entry-point inventory and settle the guarded edges (go-live included), where
+selection happens, the guard's algorithm, its clock and cursor, the operator lock, every message,
+audit action and code, placement, protection and the tests. Implementers and reviewers must read
+both; where they refine an acceptance criterion, the Dev notes below say so.
+
 ## Scope and authority
 
 In scope: a paper `ExitLaneGuard` wired into every paper-source book exit reachable from
@@ -95,16 +104,40 @@ whole-account loss breaker).
 
 ## Dev notes
 
-- Placement. `ingest_paper_venue` and `paper_scoped_cancel` live in the CLI helper
-  `algua/cli/paper_venue.py` (not a command module, so `registry_cmd.py` may import it). Either
-  build the paper guard beside them, or move them down to `algua/execution/` beside `LiveExitGuard`
-  if that adds no new import edge. Either way, keep one guard-selection function for both lanes.
-- `ingest_paper_venue` takes the broker-time `until`; resolve it with the same
-  `tick_clock(broker.clock)` the paper flatten uses (`algua/cli/paper_cmd.py:1304`).
-- `ExitLaneGuard.cancel_and_ingest` runs outside the transaction and commits its own ingest. Keep it
-  outside the `try`/`BEGIN IMMEDIATE` exactly as the live path does (`store/crud.py:291-303`).
-- If this merges before the last legacy tenant retires (Story 1.4, AC7), that retirement will drain
-  through this guard. That is the intended, safer behavior; tell the Story 1.4 operator.
+- Placement (settled by the contract, §2 and §6). `ingest_paper_venue` and `recover_stranded` move
+  to a new `algua/execution/venue_sync.py`. They reach only the ledger and the audit log, so no new
+  package edge. `PaperExitGuard` and the one selector for both lanes, `select_exit_guard`, live in
+  `algua/execution/lane_exit.py`. `transition_strategy` calls the selector itself, through a lazy
+  default like `_default_forward_certificate_verifier`, so every caller gets the drain and
+  `registry_cmd.py` passes nothing. The `exit_guard` parameter becomes `exit_guard_selector`.
+- The broker-time `until` comes from `tick_clock(broker.clock)`, as in the paper flatten
+  (`algua/cli/paper_cmd.py:1304`), but the exit refuses `tick_clock`'s local-clock fallback (contract
+  §3.2).
+- `ExitLaneGuard.cancel_and_ingest` runs outside the transaction and commits its own ingest. It stays
+  outside the `try`/`BEGIN IMMEDIATE`, exactly as the live path does (`store/crud.py:292-300`). The
+  store is not edited, apart from one docstring.
+- Refinements of the acceptance criteria, all in the contract:
+  - AC1: the guard syncs the venue first and skips the cancel when the ledger holds a material
+    position, so a premature exit leaves resting liquidation offsets in place.
+  - AC1, AC2: it re-reads the strategy's open orders after the cancel and syncs again afterwards;
+    an order still open at that read refuses the exit under the lock.
+  - AC3: drain failures before the lock are audited and raise `BrokerError` (`broker_error`);
+    missing credentials raise `TransitionError` (`wrong_stage`). A re-list failure under the lock
+    rolls back unaudited, because the audit append commits.
+  - The guard also writes a `paper_exit_drain_cancelled` audit row.
+  - Every paper-lane exit, go-live included, takes `operator.lock`.
+- Corrected references: `_assert_flat_for_bench` is `store/crud.py:319-353`; `LiveExitGuard` is
+  `lane_exit.py:43-72`; the protocol is `contracts/types.py:401-417`.
+- Coordination with Story 2.1: both edit `transitions.py` (unpinned, 277 lines, and the ratchet
+  forbids it reaching 300) and `registry_cmd.py`. This story budgets `transitions.py` to 290 lines
+  and frees about 60 lines in `registry_cmd.py`.
+- Story 1.4 operator: production still holds one legacy tenant at `paper`,
+  `liquidity_stable_quality_momentum` (registry copy, 2026-10-05). It is kill-switched with a
+  resting UNH sell offset. If this story merges first, its retirement drains through the guard:
+  - before the offset fills, the retirement is refused on positions and the offset stays resting;
+  - if the offset fills in full, the remaining residual is dust and the retirement commits.
+
+  It needs the paper credentials the box already has.
 
 ### Test matrix
 
