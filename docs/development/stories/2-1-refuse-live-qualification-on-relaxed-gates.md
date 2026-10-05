@@ -4,16 +4,19 @@ baseline_commit: e875b6d
 
 # Story 2.1: Refuse live qualification built on relaxed gates
 
-Status: backlog
+Status: ready-for-dev
 
 Prepared: 2026-10-04. Baseline: `e875b6d` (main after PR #686). Epic: 2.
 Requirements: FR14 (signed-relaxation policy), FR8 (live-wall preconditions), NFR2, NFR4–NFR6,
 NFR8.
 Owner decision: [#624, comment of 2026-10-04, item 2](https://github.com/Lior-Nis/algua/issues/624).
 Depends on: Stories 1.2 and 1.3d (done). No Epic 2 predecessor.
-Readiness: design-complete. The contract-first readiness step ("Contract and readiness first" in
-[story delivery](../../agent/story-delivery.md): field-level DDL companion, entry-point inventory,
-readiness report) still runs before code; it verifies this story and needs no new decision.
+Readiness: 2026-10-05,
+[implementation readiness report](../implementation-readiness-report-2026-10-05-story-2-1.md):
+READY WITH CONDITIONS (0 blockers, 1 major, 7 minor, 6 notes). All conditions (M1, m1–m7) are
+applied to the contract, and the notes are recorded, in the decision log entry "2026-10-05 —
+Readiness corrections". No further full review is required. Status stays `backlog` until the
+contract PR merges.
 
 ## Story
 
@@ -78,6 +81,15 @@ relaxation for research or paper; add any flag, actor or signature that waives t
 the certificate wall, there is no in-band waiver); change the signed go-live payload (Story 2.3);
 enable frozen go-live (it stays `frozen_live_unsupported` until Story 2.3); touch capital,
 allocations or live activation; give agents any new authority.
+
+## Normative contract
+
+The [Story 2.1 machine contract](../specs/spec-story-2-1-unrelaxed-live-qualification/SPEC.md)
+and its [field-level companion](../specs/spec-story-2-1-unrelaxed-live-qualification/live-qualification-contract.md)
+are normative. The companion's §2 (exact DDL, triggers and migration order) is this story's
+protected schema review and its §7 is the entry-point inventory. Implementers and reviewers must
+read both and the [decision log](../specs/spec-story-2-1-unrelaxed-live-qualification/.decision-log.md),
+which records the calls the acceptance criteria left open.
 
 ## Acceptance criteria
 
@@ -166,16 +178,42 @@ allocations or live activation; give agents any new authority.
 | `algua/registry/store/forward_gate.py:18-129` | One INSERT behind both record paths | Write the column |
 | `algua/registry/forward_promotion.py:47-70` | Guard computes the relaxed list for agents only | Extract a pure `forward_relaxations`; guard reuses it |
 | `algua/registry/forward_promotion.py:221-267` | `gate_row` and the two record paths | Carry `relaxations_json` |
-| `algua/registry/live_certificate.py:83-99` | Selects the certificate row | Return its id in the summary |
-| `algua/registry/transitions.py:116-157`, `algua/cli/registry_cmd.py:215-217` | Certificate check at completion and issuance | Both call one `verify_live_qualification` that runs the verifier, then the predicate |
+| `algua/registry/live_certificate.py:83-99` | Selects the certificate row | No change: the summary already returns the row `id` (`:186`), which the predicate reads and requires to be the deployment's newest forward row (contract §5 step 4) |
+| `algua/registry/transitions.py:116-157`, `algua/cli/registry_cmd.py:216-217` | Certificate check at completion and issuance | Both call one `verify_live_qualification` that runs the verifier, then the predicate |
+| `algua/registry/transitions.py:36-113` | Raw forward edges consume agent tokens; humans pass freely | Refuse both forward edges for every actor; delete the unreachable token branches and helpers (contract §6) |
 
-`registry_cmd.py` has two lines of headroom under its 446 pin; replace the issuance call rather than
-adding one. The legacy-cohort branch (`live_certificate.py:91-95`) stops authorizing go-live.
+The companion (§4–§6, §9) is authoritative where it is more specific than this table: it adds the
+carves (`capture_gate_fail_experience` to `gate_fail_capture.py`, `guard_agent_relaxations` to
+`relaxations.py`), deletes the two `find_consumable_*` finders whose only callers §6 removes, and
+lowers every touched pin to its new size. `registry_cmd.py` has two lines of headroom under its 446
+pin; replace the issuance call rather than adding one. The legacy-cohort branch
+(`live_certificate.py:91-95`) stops authorizing go-live because the predicate reads a strategy
+without an active deployment as `unrecorded`; the branch itself goes with the legacy tick paths
+(the Story 1.4 follow-up).
+
+### Contract decisions beyond the acceptance-criteria text
+
+Recorded in the decision log; the owner may revisit the first two like the `--demo` call.
+
+- Every human research row records `agent_walls_waived`: a human run skips the agent-only walls
+  (reproducible source, cost floor, feature lookback, gated universe, seeded family path) with no
+  flag. A human who wants a live-eligible research gate runs `research promote --actor agent`.
+- `--demo` records `demo_data`; `--new-family` records `new_family` only for a human (an agent's is
+  ignored by the code).
+- A non-finite threshold is a relaxation; the forward agent guard reuses the same function, so an
+  agent's `NaN` forward threshold is now refused at preflight (finite inputs: byte-identical).
+- Human forward rows written before v49 stay `unrecorded` (their confidence is recorded nowhere);
+  agent forward rows need the LCB check to be classified.
+- The raw-edge refusal is a plain `TransitionError` (`wrong_stage`), like the intake refusal; the
+  `paper -> candidate` back-step stays.
+- `cli/registry_cmd.py` and the new modules become CODEOWNERS-protected and integrity-critical.
 
 ### Traps
 
 - Put the predicate after the certificate verifier, not inside it: `transition_strategy` accepts an
-  injected verifier, and tests already inject fakes.
+  injected verifier, and tests already inject fakes. The predicate judges the deployment's newest
+  forward row and refuses unless the verifier returned that id, so an injected verifier cannot steer
+  it to an older clean certificate (readiness m1).
 - `allow_holdout_reuse` is a relaxation when the flag is given, even if no overlap existed. The rule
   is "a relaxation flag was signed", not "a relaxation changed the outcome".
 - Advisory thresholds count. An agent may pass a looser `--min-holdout-sharpe` today; that row is
@@ -183,6 +221,17 @@ adding one. The legacy-cohort branch (`live_certificate.py:91-95`) stops authori
   at its protected default", not a new agent restriction.
 - Run the migration's UPDATE before creating the no-update trigger. SQLite cannot add `NOT NULL` to
   an existing table, so enforce "required on insert" with a trigger, as the v47/v48 contracts do.
+- Keep the v49 work out of `db/migrate.py`: it is 291 lines and unpinned, and the inline block
+  measured 303. `db/relaxations.py::apply_relaxation_schema` holds the ALTERs, the classification
+  and the triggers; `migrate()` gains one import and one call (readiness M1).
+- The recorded triggers open with an append-only check (`INSERT OR REPLACE` could otherwise rewrite
+  a relaxed set), and the canonical test refuses any backslash (readiness m2). Copy contract §2
+  verbatim.
+- Deploy v49 with the contract §2 roll-forward: stop the merge-back drain and research timers and
+  let running units exit, migrate once, restart. A v48 promote still running when v49 migrates
+  would burn its holdout and then have its row refused (readiness m3).
+- Story 2.2 edits the same transition and go-live code; whichever merges second rebases and keeps
+  contract §9's ordering (readiness m7).
 - Do not derive at runtime for new rows. The derivation exists only inside the one-time migration.
 
 ### Test matrix
@@ -190,9 +239,11 @@ adding one. The legacy-cohort branch (`live_certificate.py:91-95`) stops authori
 Vocabulary per flag and per threshold direction; tightening is not relaxing; every writer records;
 insert without the column and any update are refused; migration classifies agent, human and
 unparseable rows and is idempotent; predicate for relaxed research row, relaxed certificate,
-unrecorded row, no deployment and both clean; issuance writes no challenge on refusal; completion
-refuses before `ssh-keygen` runs and before consumption; a valid human signature is still refused;
-signed relaxed research and paper promotions behave as before.
+unrecorded row, no deployment and both clean; a certificate id that is not the deployment's newest
+forward row is refused; `INSERT OR REPLACE` over an existing row and a JSON-escaped token are
+refused; issuance writes no challenge on refusal; completion refuses before `ssh-keygen` runs and
+before consumption; a valid human signature is still refused; signed relaxed research and paper
+promotions behave as before.
 
 ## Owner decisions
 
