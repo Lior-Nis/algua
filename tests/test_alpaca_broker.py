@@ -577,13 +577,15 @@ def test_list_open_orders(monkeypatch):
     assert _broker().list_open_orders() == [{"id": "o1", "client_order_id": "c1"}]
 
 
-@pytest.mark.parametrize("body", [{}, {"orders": []}, None, "x"])
+@pytest.mark.parametrize("body", [
+    {}, {"orders": []}, None, "x", [{"id": "o1"}], [{"id": "o1", "client_order_id": None}],
+    [{"client_order_id": "c1"}], [{"id": "", "client_order_id": "c1"}], ["o1"]])
 def test_list_open_orders_refuses_a_body_that_is_not_a_list(monkeypatch, body):
     # An empty JSON object would otherwise iterate as "no open orders" and let a scoped cancel or
     # the paper exit drain pass without seeing the strategy's resting orders (fail closed instead).
     monkeypatch.setattr(ab, "requests", _FakeRequests(
         {"/v2/orders?status=open&limit=500": _FakeResp(200, body)}))
-    with pytest.raises(BrokerError, match="not a list"):
+    with pytest.raises(BrokerError, match="malformed"):
         _broker().list_open_orders()
 
 

@@ -622,7 +622,21 @@ def test_t7_real_broker_full_open_order_page_fails_at_open_orders(
     empty_exit_venues.paper = _real_broker(monkeypatch, _AlpacaHTTP(page))
     with pytest.raises(BrokerError) as exc:
         w.exit(Stage.RETIRED)
-    _failed(w, exc, "open_orders", "BrokerError: alpaca /v2/orders: not a list, or would fill "
+    _failed(w, exc, "open_orders", "BrokerError: alpaca /v2/orders: malformed, or would fill "
+                                   "the page: [{'id': '")
+
+
+def test_t7_real_broker_open_order_without_client_order_id_fails_at_open_orders(
+        world, empty_exit_venues, monkeypatch):
+    """Codex review: an open order the venue lists without a client_order_id would be dropped by the
+    ownership filter as "not ours", so a resting order could survive the exit. It fails closed."""
+    w = world()
+    w.own_order()
+    page = [{"id": "o1", "client_order_id": None, "symbol": "X"}]
+    empty_exit_venues.paper = _real_broker(monkeypatch, _AlpacaHTTP(page))
+    with pytest.raises(BrokerError) as exc:
+        w.exit(Stage.RETIRED)
+    _failed(w, exc, "open_orders", "BrokerError: alpaca /v2/orders: malformed, or would fill "
                                    "the page: [{'id': '")
 
 

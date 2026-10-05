@@ -147,7 +147,7 @@ def _no_real_alpaca_http(monkeypatch):
             raise AssertionError(f"real Alpaca HTTP in a test: {call}")
         return original(self, method, url, *args, **kwargs)
 
-    guarded._algua_alpaca_guard = True  # type: ignore[attr-defined]  # read by the self-test
+    guarded._algua_alpaca_guard = True  # read by the self-test (tests are not type-checked)
     monkeypatch.setattr(requests.Session, "request", guarded)
     yield recorded
     if recorded:
