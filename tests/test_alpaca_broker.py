@@ -577,6 +577,16 @@ def test_list_open_orders(monkeypatch):
     assert _broker().list_open_orders() == [{"id": "o1", "client_order_id": "c1"}]
 
 
+@pytest.mark.parametrize("body", [{}, {"orders": []}, None, "x"])
+def test_list_open_orders_refuses_a_body_that_is_not_a_list(monkeypatch, body):
+    # An empty JSON object would otherwise iterate as "no open orders" and let a scoped cancel or
+    # the paper exit drain pass without seeing the strategy's resting orders (fail closed instead).
+    monkeypatch.setattr(ab, "requests", _FakeRequests(
+        {"/v2/orders?status=open&limit=500": _FakeResp(200, body)}))
+    with pytest.raises(BrokerError, match="not a list"):
+        _broker().list_open_orders()
+
+
 def test_list_open_orders_refuses_a_full_page(monkeypatch):
     # Alpaca's default page is 50 and the call caps at 500: a full page may hide a tenant's older
     # resting orders from the scoped cancel, so it fails closed rather than cancel a partial list.

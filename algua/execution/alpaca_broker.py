@@ -395,8 +395,8 @@ class _AlpacaBroker:
         """All OPEN orders on the account, up to Alpaca's 500-per-call maximum (its default is 50).
         Each carries `id` and `client_order_id`; the caller scopes cancellation by the latter."""
         rows = self._read(self._get("/v2/orders?status=open&limit=500"), "/v2/orders")
-        if isinstance(rows, list) and len(rows) >= 500:  # a full page may hide a tenant's orders
-            raise BrokerError(f"alpaca /v2/orders: {len(rows)} open orders fill the page; refusing")
+        if not isinstance(rows, list) or len(rows) >= 500:  # malformed, or a full page hides orders
+            raise BrokerError(f"alpaca /v2/orders: not a list, or would fill the page: {rows!r:.9}")
         return rows
 
     def get_order_by_client_order_id(self, client_order_id: str) -> dict[str, Any] | None:

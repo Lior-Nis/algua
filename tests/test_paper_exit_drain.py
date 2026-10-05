@@ -622,8 +622,8 @@ def test_t7_real_broker_full_open_order_page_fails_at_open_orders(
     empty_exit_venues.paper = _real_broker(monkeypatch, _AlpacaHTTP(page))
     with pytest.raises(BrokerError) as exc:
         w.exit(Stage.RETIRED)
-    _failed(w, exc, "open_orders", "BrokerError: alpaca /v2/orders: 500 open orders fill the "
-                                   "page; refusing")
+    _failed(w, exc, "open_orders", "BrokerError: alpaca /v2/orders: not a list, or would fill "
+                                   "the page: [{'id': '")
 
 
 def test_t7_real_broker_cancel_with_a_server_error_fails_at_cancel(
