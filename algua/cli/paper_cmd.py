@@ -36,6 +36,7 @@ from algua.execution.alpaca_broker import (
     AlpacaPaperBroker,
     posted_notional,
 )
+from algua.execution.book_breaker_halt import enforce_book_loss_breaker
 from algua.execution.broker_factory import BrokerKind, build_broker, maybe_broker
 from algua.execution.errors import BrokerError
 from algua.execution.flatten import flatten_strategy
@@ -714,8 +715,7 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
         audit_append(conn, actor="system", action="trade_tick_halted", reason=str(exc),
                      strategy=name)
         log.info("tick_halted", extra={"fields": {"strategy": name, "lane": "paper"}})
-        return {"ok": False, "strategy": name, **breach_payload(str(exc), strategy=name,
-                                                                halted=True)}
+        return breach_payload(str(exc), strategy=name, halted=True)
     except RiskBreach as exc:
         trip_for_breach(conn, name, exc)
         log.error("breach", extra={"fields": {"strategy": name, "lane": "paper",
@@ -911,13 +911,13 @@ def run_all(
 
     CONCURRENCY: shares the mutable paper account with ``trade-tick``/liquidation — not safe
     concurrently; serialized by operator discipline only (an advisory lock is a filed follow-up)."""
+    if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
+        raise ValueError("--max-drawdown must be in (0, 1]")
     if bool(snapshot) == refresh:
         raise ValueError("pass exactly one of --snapshot <id> or --refresh")
     if refresh and (start is not None or end is not None):
         raise ValueError("--refresh derives the cycle window (end = today, start from the "
                          "strategies' history need); --start/--end are not accepted")
-    if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
-        raise ValueError("--max-drawdown must be in (0, 1]")
     max_drawdown = resolve_drawdown_breaker(max_drawdown, disable_drawdown_breaker)
     start, end = resolve_wall_clock_window(start, end)
     configure_logging()
@@ -983,17 +983,13 @@ def run_all(
                           "skipped_unallocated": skipped_unallocated})
                     raise typer.Exit(1) from exc
 
-                # Lane bars refresh (#556): AFTER fill ingest (so ledger-held symbols are current),
-                # BEFORE the reconcile. Broker positions are read TWICE on purpose: this first
-                # read only feeds symbol DISCOVERY (orphan/residual marks get fetched too); the
-                # reconcile below takes its own fresh read AFTER the network round-trip, so a fill
-                # that lands during the refresh is judged by the reconcile (defer), never traded
-                # against a stale sample. A per-tenant plan fault is isolated like any setup
-                # error; EVERY tenant failing to plan is a failed cycle, not a benign no-op; a
-                # refresh failure fails the WHOLE cycle closed — the operator alerts, leaves the
-                # session marker unwritten, and the next fire retries. Never fall back to an older
-                # snapshot. The derived window (start from the deepest history floor) is the one
-                # the ticks read too.
+                # Lane bars refresh (#556): AFTER fill ingest, BEFORE the reconcile. Broker
+                # positions are read TWICE on purpose: this read only feeds symbol DISCOVERY; the
+                # reconcile below re-reads AFTER the network round-trip, so a fill landing during
+                # the refresh defers, never trades on a stale sample. A per-tenant plan fault is
+                # isolated like a setup error; EVERY tenant failing is a failed cycle; a refresh
+                # failure fails the WHOLE cycle closed (no marker, next fire retries, never an
+                # older snapshot). The derived window is the one the ticks read too.
                 snapshot_info: dict = {"id": snapshot, "refreshed": False,
                                        "start": start, "end": end}
                 if refresh:
@@ -1060,6 +1056,14 @@ def run_all(
                              "note": "reconcile pending; deferring trades this cycle"}))
                     return
 
+                # Whole-account loss breaker (#647; live's #390 twin): halt + flatten, no ticks.
+                trip = enforce_book_loss_breaker(conn, broker, lane="paper")
+                if trip is not None:
+                    counters.breaches += 1
+                    counters.flatten_failures += trip.flatten_error is not None
+                    emit({**trip.payload(), "reconcile": recon_payload, "strategies": results,
+                          "skipped_unallocated": skipped_unallocated, "snapshot": snapshot_info})
+                    raise typer.Exit(1)
                 # Whole-account buying-power pool: this cycle's buys can never exceed it; each
                 # strategy's reserve trims against the running pool, and a trim is audited.
                 pool = {"available": float(acct.buying_power)}
@@ -1080,11 +1084,9 @@ def run_all(
                 breached = False
                 for prec in tickable:
                     name, tenant = prec.name, preflight.tenants[prec.name]
-                    # Per-strategy fault isolation (#374/GATE-2): ONLY a pre-side-effect setup fault
-                    # is contained here (siblings still tick); any other exception is
-                    # book-integrity-critical and propagates RAW to abort the cycle. The raw
-                    # message is NEVER put in the envelope/audit — only the stable class code —
-                    # to avoid leaking credentials/paths.
+                    # Fault isolation (#374/GATE-2): ONLY a pre-side-effect setup fault is contained
+                    # (siblings still tick); anything else propagates RAW and aborts the cycle. Only
+                    # the stable class code reaches the envelope/audit, never the raw message.
                     try:
                         # The pre-tick gate re-check (a working-tree tenant re-loads as before) is
                         # also pre-side-effect setup: a failure isolates this tenant too.
@@ -1095,12 +1097,9 @@ def run_all(
                             raise
                         except StrategySetupError:
                             raise
-                        except global_halt.GlobalHaltActive:
-                            # Book-wide, not this tenant's fault: propagate RAW to abort the cycle —
-                            # never demote to a StrategySetupError that ticks siblings under a halt.
-                            raise
-                        except SYSTEMIC_SETUP_EXCEPTIONS:
-                            # A shared-infra fault is book-wide too: propagate RAW so the top-level
+                        except (global_halt.GlobalHaltActive,) + SYSTEMIC_SETUP_EXCEPTIONS:
+                            # Book-wide, not this tenant's fault (a halt, or shared infra like
+                            # sqlite3.Error): propagate RAW so the cycle aborts and the top-level
                             # db_unavailable/retryable signal survives (#374 GATE-2).
                             raise
                         except Exception as load_exc:  # noqa: BLE001 - pre-side-effect setup fault

@@ -24,6 +24,7 @@ from algua.evaluation.inputs import (
 )
 from algua.execution import live_reconcile
 from algua.execution.alpaca_broker import AlpacaLiveBroker
+from algua.execution.book_breaker_halt import enforce_book_loss_breaker
 from algua.execution.broker_factory import BrokerKind, build_broker
 from algua.execution.flatten import flatten_strategy
 from algua.execution.lane_exit import build_live_broker
@@ -76,7 +77,6 @@ from algua.registry.live_gate import (
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.universe_binding import SOURCE_CONFIG_LEGACY, resolve_operational_universe
 from algua.risk import global_halt, kill_switch
-from algua.risk.book_cycle import evaluate_book_loss_breaker as _evaluate_book_loss_breaker
 from algua.risk.breach import trip_for_breach
 from algua.risk.limits import RiskBreach
 from algua.strategies.loader import load_tradable_strategy
@@ -503,32 +503,13 @@ def run_all(
                 # BOOK-LEVEL LOSS CIRCUIT BREAKER (#390): whole-account equity vs high-water mark
                 # (drawdown) and the prior session close (daily loss); a breach halts + flattens
                 # the ENTIRE account (per-strategy breakers can't see a correlated book crash).
-                book_breach = _evaluate_book_loss_breaker(conn, broker)
-                if book_breach is not None:
+                trip = enforce_book_loss_breaker(conn, broker, lane="live")
+                if trip is not None:
                     counters.breaches += 1
-                    # Engage the persistent halt FIRST (fail-safe: no-trade even if the close then
-                    # errors), audit, THEN flatten the whole account (cancel-all + close-all —
-                    # reaches orphan/dormant/unverified holdings the per-strategy loop never would).
-                    global_halt.engage(conn, reason=book_breach.detail, actor="system")
-                    audit_append(conn, actor="system", action="book_circuit_breaker",
-                                 reason=f"{book_breach.kind}: {book_breach.detail}", strategy=None)
-                    log.error("book_circuit_breaker",
-                              extra={"fields": {"lane": "live", "kind": book_breach.kind}})
-                    payload = {"ok": False, "book_breach": {"kind": book_breach.kind,
-                                                            "detail": book_breach.detail},
-                               "global_halt": "set", "reconcile": recon_payload,
-                               "skipped": skipped,
-                               "skipped_unallocated": skipped_unallocated,
-                               "strategies": results, "snapshot": snapshot_info}
-                    try:
-                        broker.close_all_positions()
-                    except Exception as exc:  # noqa: BLE001 — surface + persist halt, never swallow
-                        counters.flatten_failures += 1
-                        log.error("book_flatten_failed",
-                                  extra={"fields": {"lane": "live"}}, exc_info=True)
-                        emit({**payload, "liquidation_submitted": False, "flatten_error": str(exc)})
-                        raise typer.Exit(1) from exc
-                    emit({**payload, "liquidation_submitted": True})
+                    counters.flatten_failures += trip.flatten_error is not None
+                    emit({**trip.payload(), "reconcile": recon_payload, "skipped": skipped,
+                          "skipped_unallocated": skipped_unallocated,
+                          "strategies": results, "snapshot": snapshot_info})
                     raise typer.Exit(1)
                 # BOOK-LEVEL aggregate risk (#389): one account-scoped exposure accumulator caps
                 # aggregate gross/net/concentration ACROSS strategies. BENIGNLY DEFER on a

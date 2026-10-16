@@ -125,7 +125,7 @@ def _permissive_book(monkeypatch):
         lambda *a, **k: (BookExposure(1e15, {}, BookRiskLimits()), None),
     )
     monkeypatch.setattr(
-        "algua.cli.live_cmd._evaluate_book_loss_breaker", lambda *a, **k: None
+        "algua.cli.live_cmd.enforce_book_loss_breaker", lambda *a, **k: None
     )
 
 
@@ -1797,7 +1797,7 @@ def test_run_all_book_stale_marks_halts_without_close_all(monkeypatch):
     _to_live(name)
     _seed_live_fills(name, {"AAA": 5.0})  # ledger matches the broker net so reconcile is clean
     monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
-    monkeypatch.setattr("algua.cli.live_cmd._evaluate_book_loss_breaker", lambda *a, **k: None)
+    monkeypatch.setattr("algua.cli.live_cmd.enforce_book_loss_breaker", lambda *a, **k: None)
 
     class _StaleBookBroker:
         def __init__(self):

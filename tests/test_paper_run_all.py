@@ -154,8 +154,12 @@ class _RunAllBroker:
         equity: float = 100_000.0,
         positions: dict | None = None,
         open_orders: list | None = None,
+        last_equity: float | None = None,
     ) -> None:
         self._equity = equity
+        # prior-session close: the whole-account breaker's daily baseline (#647); flat by default
+        self._last_equity = equity if last_equity is None else last_equity
+        self.closed_all = 0
         self._positions: dict = positions or {}
         self._open_orders: list = open_orders or []
         self.submitted: list = []          # (sym, qty, coid) from submit_offset
@@ -163,7 +167,11 @@ class _RunAllBroker:
 
     def account(self) -> AccountState:
         return AccountState(equity=self._equity, cash=self._equity,
-                            buying_power=self._equity, account_id="test-acct")
+                            buying_power=self._equity, account_id="test-acct",
+                            last_equity=self._last_equity)
+
+    def close_all_positions(self) -> None:
+        self.closed_all += 1
 
     def clock(self) -> str:
         return "2023-06-01T14:00:00+00:00"

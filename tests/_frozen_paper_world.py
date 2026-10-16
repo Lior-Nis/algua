@@ -142,7 +142,7 @@ class RecordingBroker:
 
     def account(self) -> AccountState:
         return AccountState(equity=self.equity, cash=self.equity, buying_power=self.equity,
-                            account_id=ACCOUNT_ID)
+                            account_id=ACCOUNT_ID, last_equity=self.equity)
 
     def clock(self) -> str:
         return "2026-01-02T14:00:00+00:00"

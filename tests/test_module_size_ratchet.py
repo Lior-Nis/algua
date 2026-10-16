@@ -53,9 +53,9 @@ BUDGET: dict[str, int] = {
     "algua/backtest/sweep.py": 461,
     "algua/backtest/walkforward.py": 347,
     "algua/cli/data_cmd.py": 410,
-    "algua/cli/live_cmd.py": 749,
+    "algua/cli/live_cmd.py": 730,
     "algua/cli/operator_cmd.py": 334,
-    "algua/cli/paper_cmd.py": 1382,
+    "algua/cli/paper_cmd.py": 1381,
     # Story 2.2: the live exit-drain selection moved to execution/lane_exit.select_exit_guard.
     "algua/cli/registry_cmd.py": 380,
     # +39 for #560: ExecutionContract.target_gross_utilization plus its domain guards. The field

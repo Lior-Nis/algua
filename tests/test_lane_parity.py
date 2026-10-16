@@ -238,3 +238,51 @@ def test_no_store_internal_transition_revokes_an_allocation():
             if any(kw.arg is None for kw in node.keywords) or len(node.args) > 10:
                 offenders.append(f"{path.relative_to(REPO)}:{node.lineno} (opaque arguments)")
     assert offenders == []
+
+
+# --- the whole-account loss breaker (#647) -----------------------------------------------------
+
+CYCLES = {
+    "live": (REPO / "algua/cli/live_cmd.py", "run_all"),
+    "paper": (REPO / "algua/cli/paper_cmd.py", "run_all"),
+}
+
+
+def _cycle_calls(lane: str) -> list[ast.Call]:
+    path, func = CYCLES[lane]
+    tree = ast.parse(path.read_text())
+    node = next(n for n in ast.walk(tree)
+                if isinstance(n, ast.FunctionDef) and n.name == func)
+    return [n for n in ast.walk(node) if isinstance(n, ast.Call)]
+
+
+def test_both_lane_cycles_run_the_whole_account_loss_breaker():
+    """`run-all` in BOTH lanes must call the one shared breaker, naming its OWN lane.
+
+    The paper lane shipped with no whole-account loss breaker while live had one (#647): this file
+    listed four invariants and the fifth was invisible. The breaker body now lives once in
+    `algua.execution.book_breaker_halt`; this pins that neither cycle can quietly drop the call or
+    point at the other lane's high-water mark.
+    """
+    for lane in CYCLES:
+        calls = [c for c in _cycle_calls(lane)
+                 if isinstance(c.func, ast.Name) and c.func.id == "enforce_book_loss_breaker"]
+        assert len(calls) == 1, (
+            f"{lane} run-all must call enforce_book_loss_breaker exactly once; found {len(calls)}")
+        lane_kw = [kw.value for kw in calls[0].keywords if kw.arg == "lane"]
+        assert len(lane_kw) == 1 and isinstance(lane_kw[0], ast.Constant), (
+            f"{lane}: the breaker call must pass a literal lane=")
+        assert lane_kw[0].value == lane, (
+            f"{lane} run-all passes lane={lane_kw[0].value!r}: it would ratchet and trip against "
+            f"the OTHER lane's account high-water mark")
+
+
+def test_no_lane_reimplements_the_breaker_trip_sequence():
+    """Halt-then-flatten lives in `book_breaker_halt` only; a cmd module re-spelling it drifts."""
+    for lane, (path, _) in CYCLES.items():
+        text = path.read_text()
+        assert "evaluate_book_loss_breaker" not in text, (
+            f"{lane}: call enforce_book_loss_breaker, not the bare evaluator (it would skip the "
+            f"halt/flatten)")
+        assert "book_circuit_breaker" not in text, (
+            f"{lane}: the breaker's audit/halt sequence belongs in book_breaker_halt")

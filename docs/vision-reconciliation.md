@@ -52,6 +52,10 @@ These findings are **flag-only** in this documentation change. Current controls 
    treatment, exact threshold boundary, outstanding-order/position handling and human-reviewed
    resumption; implement and test through safety review. Owner: Lior with the operating-kernel
    implementer, before experimental live acceptance. Do not silently change runtime settings.
+   Update (#647): `paper run-all` now runs the same breaker body as live
+   (`algua/execution/book_breaker_halt.py`), against its own per-lane high-water mark
+   (`paper_book_equity_peak`, schema v49). Thresholds are unchanged and the policy questions
+   above stay open.
 2. **Immutable execution — Important.**
    The planner seam and working-tree deployment/epoch slice are implemented, but a deployment
    descriptor is evidence, not recoverable executable content. Preserve the frozen decision/current
