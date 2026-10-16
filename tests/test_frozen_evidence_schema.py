@@ -552,6 +552,7 @@ _V48_OBJECTS = frozenset({
     "frozen_invocations_no_replace", "frozen_invocations_phase_b_follows_a",
     "tick_snapshots_one_tick_per_invocation", "tick_snapshots_frozen_link",
     "tick_snapshots_link_immutable",
+    "paper_book_equity_peak",  # v49 (#647), excluded so the v47 shape stays genuine
 })
 _LINK_COLUMN = ", frozen_invocation_id INTEGER REFERENCES frozen_invocations(id)"
 
@@ -613,7 +614,7 @@ def test_migration_from_v47_keeps_existing_ticks_unlinked_and_is_idempotent(tmp_
     migrate(fresh)
     for _ in range(2):
         migrate(conn)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 48
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 49
         assert _fingerprint(conn) == _fingerprint(fresh)
         rows = conn.execute("SELECT * FROM tick_snapshots ORDER BY id").fetchall()
         assert [tuple(r)[:-1] for r in rows] == before

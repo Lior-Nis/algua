@@ -40,7 +40,7 @@ from algua.execution.order_state import (
     clear_nav_peak,
     clear_peak_equity,
 )
-from algua.risk.book_equity import clear_book_peak
+from algua.risk.book_equity import LANE_PEAK_TABLES, clear_book_peak
 
 
 def rebase_strategy_peak(conn: sqlite3.Connection, name: str, stage: Stage) -> None:
@@ -62,4 +62,5 @@ def rebase_all_peaks(conn: sqlite3.Connection) -> None:
     """
     clear_all_peaks(conn)
     clear_all_nav_peaks(conn)
-    clear_book_peak(conn)
+    for lane in LANE_PEAK_TABLES:
+        clear_book_peak(conn, lane)
