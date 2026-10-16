@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 
 from algua.config.settings import get_settings
 from algua.live.frozen_dispatch import FrozenTenantFailure
+from algua.operator.checkout_guard import require_clean_main
 from algua.registry.frozen_tenant_errors import FrozenTenantError
 
 # Exception types that signal a SYSTEMIC / book-wide condition rather than one tenant's setup fault
@@ -159,5 +160,16 @@ def resolve_wall_clock_window(start: str | None, end: str | None) -> tuple[str, 
     end_iso = end or today.isoformat()
     start_iso = start or (today - timedelta(days=LIVE_WINDOW_LOOKBACK_DAYS)).isoformat()
     return start_iso, end_iso
+
+
+def resolve_operator_cycle_window(start: str | None, end: str | None) -> tuple[str, str]:
+    """``run-all``'s window resolution behind the clean-``main`` checkout guard (#687).
+
+    Raises ``CheckoutNotCleanMain`` (code ``checkout_not_clean_main``) before anything else runs
+    when the checkout is not a clean ``main``; applies to ``--refresh`` AND ``--snapshot`` replay.
+    Kept here (not in the cmd modules, which are size-pinned) so the guard cannot be forgotten by
+    a lane that already resolves its window."""
+    require_clean_main()
+    return resolve_wall_clock_window(start, end)
 
 

@@ -206,7 +206,11 @@ both key on the slug.
   so no caller can forget it (#685).
 - **CODEOWNERS is executable** — `operator/diff_policy.py` derives the autonomous merge-back's
   denylist from it, so a module missing from CODEOWNERS is one an agent can merge unreviewed.
-  `tests/test_repo_hygiene.py` pins the integrity-critical set.
+  `tests/test_repo_hygiene.py` pins the integrity-critical set. The root `CODEOWNERS` is the ONLY
+  CODEOWNERS file (GitHub reads one file, `.github/` first, so a second would shadow it);
+  `tests/test_codeowners_parity.py` fails if GitHub's file and the runtime denylist diverge (#648).
+  GitHub code-owner review is still only advisory for the sole owner/admin (see branch protection:
+  `required_approving_review_count: 0`, `enforce_admins: false`).
 
 ---
 
