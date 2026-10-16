@@ -15,6 +15,7 @@ from algua.execution.fleet_health import (
     fleet_status,
 )
 from algua.execution.order_state import tick_snapshot_series
+from algua.operator.checkout_guard import checkout_status
 from algua.registry.db import registry_conn
 from algua.registry.store import SqliteStrategyRepository
 from algua.risk import global_halt
@@ -84,8 +85,9 @@ def health() -> None:
     """Loop-liveness / heartbeat GATE for an external watchdog (#399). Runs the same fleet health
     rollup as ``fleet status`` and EXITS NON-ZERO iff any operator loop is dead/stalled/drifted/
     never-started (an operational strategy that is ``stale``/``drift``/``idle``/``halted``) OR the
-    account is globally halted OR a fleet row is corrupt. A dead operator loop is one of the most
-    dangerous silent failures — positions held with no risk-checking tick — so this is the signal a
+    account is globally halted OR a fleet row is corrupt OR the checkout is not a clean
+    ``main`` (#687). A dead operator loop is one of the most dangerous silent failures — positions
+    held with no risk-checking tick — so this is the signal a
     supervisor (systemd ``OnFailure=``, cron, k8s liveness) polls to distinguish 'market closed,
     correctly quiet' from 'loop dead, silently unmonitored'.
 
@@ -108,10 +110,12 @@ def health() -> None:
     by_health: dict[str, int] = {}
     for r in alerting:
         by_health[r["health"]] = by_health.get(r["health"], 0) + 1
-    ok = not alerting and not halted_globally
+    checkout = checkout_status()
+    ok = not alerting and not halted_globally and checkout["ok"]
     emit({
         "ok": ok,
         "global_halt": halted_globally,
+        "checkout": checkout,
         "alerting": alerting,
         "summary": {
             "total": len(rows),

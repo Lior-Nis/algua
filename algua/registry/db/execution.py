@@ -65,6 +65,13 @@ CREATE TABLE IF NOT EXISTS book_equity_peak (
     peak       REAL NOT NULL,
     updated_at TEXT NOT NULL
 );
+-- paper_book_equity_peak is the PAPER lane's own account-wide high-water mark (#647): the paper
+-- account is a different brokerage account from live, so it keeps its own row. Same lifecycle.
+CREATE TABLE IF NOT EXISTS paper_book_equity_peak (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    peak       REAL NOT NULL,
+    updated_at TEXT NOT NULL
+);
 -- Append-only per-tick operability record (equity + positions per completed tick); the equity
 -- time-series `paper show` and the future dashboard read. Permanent history — no pruning path yet
 -- (`trade-tick` is wall-clock-per-invocation, so growth is modest); add retention when it matters.

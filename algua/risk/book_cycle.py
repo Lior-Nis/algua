@@ -20,7 +20,7 @@ from algua.risk.book_breaker import BookBreach, BookBreakerLimits, evaluate_book
 from algua.risk.book_equity import update_book_peak
 
 
-def evaluate_book_loss_breaker(conn, broker):
+def evaluate_book_loss_breaker(conn, broker, lane: str = "live"):
     """Evaluate the book-level loss/drawdown circuit breaker (#390) for the whole account.
 
     Reads ONE ``broker.account()`` snapshot (equity + prior-session close). Returns a ``BookBreach``
@@ -52,5 +52,5 @@ def evaluate_book_loss_breaker(conn, broker):
         # Do NOT ratchet the peak on an unusable read; evaluate_book_breaker returns the
         # book_equity_unusable breach (peak value is irrelevant on this branch).
         return evaluate_book_breaker(equity, 0.0, last_equity, limits)
-    peak = update_book_peak(conn, equity)
+    peak = update_book_peak(conn, equity, lane)
     return evaluate_book_breaker(equity, peak, last_equity, limits)
