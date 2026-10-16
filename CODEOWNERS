@@ -5,6 +5,11 @@
 # the agent can't quietly weaken the live wall, the lifecycle, the anti-look-ahead engine,
 # or the promotion gate and have it reach main.
 #
+# SINGLE SOURCE OF TRUTH (#648): this root file is the ONLY CODEOWNERS file. GitHub resolves
+# .github/CODEOWNERS first (then root, then docs/) and ignores the others, so a second file
+# would silently hide every rule here from GitHub review. tests/test_codeowners_parity.py
+# fails if any other CODEOWNERS file exists or if GitHub's file differs from the runtime denylist.
+#
 # NOTE: this only binds once "Require review from Code Owners" is enabled in the GitHub
 # branch-protection settings for the default branch (a one-time repo setting).
 
@@ -104,6 +109,8 @@
 /algua/backtest/walkforward.py         @Lior-Nis   # holdout_window: the #192 single-use-holdout identity source (was engine.py, stage 7)
 /.github/                              @Lior-Nis   # CI/CD workflows — the agent must not silently weaken the opencode trigger/secret gate (#456)
 /CODEOWNERS                            @Lior-Nis   # self-protection: the guard cannot rewrite its own owners
+/.gitleaks.toml                        @Lior-Nis   # supply-chain scan config (issue #395): a PR must not weaken a scan in the change that ships it
+/.pip-audit-ignore.txt                 @Lior-Nis   # supply-chain scan allowlist (issue #395)
 /algua/portfolio/overlays.py           @Lior-Nis   # tighten-only overlay stage: invariants + policies, hashed into strategy identity
 /algua/portfolio/overlay_policies.py   @Lior-Nis   # bundled overlay policies (trailing_stop, regime_gate), carved out of overlays.py; hashed into strategy identity
 /algua/portfolio/overlay_validation.py @Lior-Nis   # shared OverlayError + param-domain helpers, carved out of overlays.py; hashed into strategy identity
