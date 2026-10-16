@@ -34,6 +34,7 @@ def _registry() -> list[tuple[type[BaseException], str]]:
     from algua.execution.errors import BrokerError
     from algua.execution.live_sizing import LiveSizingError
     from algua.live.live_loop import TickHalted
+    from algua.operator.checkout_guard import CheckoutNotCleanMain
     from algua.portfolio.construction import ConstructionError
     from algua.registry.allocations import AllocationError
     from algua.registry.artifact_errors import (
@@ -80,6 +81,7 @@ def _registry() -> list[tuple[type[BaseException], str]]:
         (BrokerError, "broker_error"),
         (BacktestError, "backtest_error"),
         (TickHalted, "tick_halted"),
+        (CheckoutNotCleanMain, "checkout_not_clean_main"),
         (ManifestLockReplacedError, "manifest_lock_replaced"),
         # --- stdlib ---
         (FileNotFoundError, "file_not_found"),

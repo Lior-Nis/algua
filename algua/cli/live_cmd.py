@@ -11,7 +11,7 @@ from algua.cli._common import (
     breach_payload,
     ok,
     resolve_drawdown_breaker,
-    resolve_wall_clock_window,
+    resolve_operator_cycle_window,
 )
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
@@ -349,7 +349,7 @@ def run_all(
         raise ValueError("--refresh derives the cycle window (end = today, start from the "
                          "strategies' history need); --start/--end are not accepted")
     max_drawdown = resolve_drawdown_breaker(max_drawdown, disable_drawdown_breaker)
-    start, end = resolve_wall_clock_window(start, end)
+    start, end = resolve_operator_cycle_window(start, end)
     configure_logging()
     counters = CycleCounters()
     # One correlation id per cycle; golden_signals flushes in `finally` so the rollup survives

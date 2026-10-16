@@ -153,3 +153,20 @@ def _no_real_alpaca_http(monkeypatch):
     if recorded:
         pytest.fail("real Alpaca HTTP attempted in a test (refused, nothing sent): "
                     f"{recorded}", pytrace=False)
+
+
+class _CleanMainProbe:
+    def branch(self) -> str:
+        return "main"
+
+    def tracked_dirty(self) -> bool:
+        return False
+
+
+@pytest.fixture(autouse=True)
+def _clean_main_checkout(monkeypatch):
+    """#687: the operator-lane checkout guard must not depend on the branch the SUITE runs on
+    (worktrees are never ``main``). Replaces the real git probe with a clean-main fake; guard
+    tests re-patch ``default_probe`` themselves. Test-only seam -- production has no bypass."""
+    from algua.operator import checkout_guard
+    monkeypatch.setattr(checkout_guard, "default_probe", lambda: _CleanMainProbe())
