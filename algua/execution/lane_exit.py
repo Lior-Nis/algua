@@ -10,7 +10,7 @@ directly (store.py stays behind the data wall) and no caller can forget the drai
 from __future__ import annotations
 
 import sqlite3
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from algua.audit.log import append as audit_append
 from algua.contracts.lifecycle import Stage, TransitionError
@@ -20,6 +20,7 @@ from algua.execution.alpaca_broker import AlpacaLiveBroker, AlpacaLiveDrainBroke
 from algua.execution.broker_factory import BrokerKind, build_broker, maybe_broker
 from algua.execution.live_ledger import (
     LedgerKind,
+    believed_positions,
     fill_cursor,
     ingest_activities,
     owned_open_order_ids,
@@ -56,11 +57,14 @@ class LiveExitGuard:
     outlive the strategy's departure from the live book (#497 F2/H1).
 
     ``cancel_and_ingest`` runs BEFORE the registry write lock (broker network calls + committing
-    ingests): cancel THIS strategy's own open live orders (scoped — never a sibling's), then ingest
-    the account activity feed so any just-filled order is reflected in the live ledger the
-    under-lock flatness check reads. ``owned_open_order_ids`` runs UNDER the lock to re-list any
-    order the cancel failed to remove (a non-cancelable/partial state), so it blocks the revoke+CAS
-    rather than orphaning a position."""
+    ingests), in the order Story 2.2 gave the paper drain (#690): ingest the activity feed first;
+    if the ledger then shows ANY live position, stop without cancelling (the store refuses the exit
+    on positions anyway, and a resting liquidation offset from ``live flatten`` must survive a
+    premature exit); otherwise cancel THIS strategy's own open live orders (scoped, never a
+    sibling's), and ingest AGAIN so a fill that landed around the cancel is in the
+    ledger the under-lock flatness check reads. ``owned_open_order_ids`` runs UNDER the lock to
+    re-list any order the cancel failed to remove (a non-cancelable/partial state), so it blocks the
+    revoke+CAS rather than orphaning a position."""
 
     def __init__(
         self, conn: sqlite3.Connection, broker: ExitDrainBroker, strategy: str
@@ -68,19 +72,35 @@ class LiveExitGuard:
         self._conn = conn
         self._broker = broker
         self._strategy = strategy
+        self._state: Literal["new", "skipped", "drained"] = "new"
 
-    def cancel_and_ingest(self) -> None:
-        for oid in owned_open_order_ids(
-            self._conn, self._broker, self._strategy, kind=LedgerKind.LIVE
-        ):
-            self._broker.cancel_order(oid)
+    def _ingest(self) -> None:
         cursor = fill_cursor(self._conn, LedgerKind.LIVE)
         ingest_activities(
             self._conn, self._broker.account_activities(after=cursor), LedgerKind.LIVE)
 
-    def owned_open_order_ids(self) -> list[str]:
+    def cancel_and_ingest(self) -> None:
+        self._ingest()
+        if believed_positions(self._conn, self._strategy, LedgerKind.LIVE):
+            self._state = "skipped"  # resting liquidation orders must survive a refused exit
+            return
+        for oid in self._open_orders():
+            self._broker.cancel_order(oid)
+        self._ingest()  # strictly after the cancels: a fill that raced one is now in the ledger
+        self._state = "drained"
+
+    def _open_orders(self) -> list[str]:
         return owned_open_order_ids(
             self._conn, self._broker, self._strategy, kind=LedgerKind.LIVE)
+
+    def owned_open_order_ids(self) -> list[str]:
+        if self._state == "new":
+            raise RuntimeError("live exit re-check ran before its drain")
+        if self._state == "skipped":
+            raise TransitionError(
+                f"{self._strategy} is not flat (open live positions when the exit drain ran); "
+                "flatten before this transition")
+        return self._open_orders()
 
 
 def select_exit_guard(

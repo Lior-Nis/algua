@@ -44,7 +44,7 @@ def test_keep_cursor_ingest_fetches_the_window_and_keeps_the_cursor_bytes(conn):
                      (CURSOR,))
     venue = _venue()
     venue_sync.ingest_paper_venue_keep_cursor(conn, venue, UNTIL)
-    assert venue.calls == [("activities", CURSOR, UNTIL)]
+    assert venue.calls == [("activities", "2026-03-02T13:30:00.123456+00:00", UNTIL)]
     assert believed_positions(conn, "s1", LedgerKind.PAPER) == {"AAPL": 2.0}
     assert _cursor(conn) == CURSOR
     venue_sync.ingest_paper_venue_keep_cursor(conn, venue, UNTIL)  # re-fetch is idempotent
@@ -65,3 +65,51 @@ def test_the_operators_ingest_still_advances_the_cursor_to_until(conn):
                      (CURSOR,))
     venue_sync.ingest_paper_venue(conn, _venue(), UNTIL)
     assert _cursor(conn) == UNTIL
+
+
+# --- #691: a late-published activity must not be skipped by the time cursor ----------------------
+
+def _seed_cursor(conn, value: str) -> None:
+    with conn:
+        conn.execute("INSERT INTO paper_venue_fill_cursor(name, cursor) VALUES ('activities', ?)",
+                     (value,))
+
+
+def test_ingest_rereads_a_lookback_window_before_the_cursor(conn):
+    """The window opens ``PAPER_INGEST_LOOKBACK`` before the stored cursor, so an activity timed
+    before the cursor but published after the previous read is still fetched (dedup by
+    activity_id makes the overlap free)."""
+    _seed_cursor(conn, CURSOR)
+    venue = _venue()
+    venue_sync.ingest_paper_venue(conn, venue, UNTIL)
+    ((_, after, until),) = venue.calls
+    assert until == UNTIL
+    assert after == "2026-03-02T13:30:00.123456+00:00"  # CURSOR - 30 min
+    assert _cursor(conn) == UNTIL
+
+
+def test_late_published_activity_is_ingested_on_the_next_sync(conn):
+    venue = FakePaperVenue()
+    _seed_cursor(conn, "2026-03-02T15:00:00+00:00")
+    venue_sync.ingest_paper_venue(conn, venue, "2026-03-02T15:10:00+00:00")  # feed empty
+    assert believed_positions(conn, "s1", LedgerKind.PAPER) == {}
+    # The venue now publishes a fill timed BEFORE the cursor that was just persisted.
+    venue.feed.append({"id": "late-1", "activity_type": "FILL", "side": "buy", "qty": "2",
+                       "price": "100", "symbol": "AAPL", "order_id": "boid-1",
+                       "transaction_time": "2026-03-02T15:05:00+00:00"})
+    venue_sync.ingest_paper_venue(conn, venue, "2026-03-02T15:20:00+00:00")
+    assert believed_positions(conn, "s1", LedgerKind.PAPER) == {"AAPL": 2.0}
+    venue_sync.ingest_paper_venue(conn, venue, "2026-03-02T15:30:00+00:00")  # overlap re-dedups
+    assert believed_positions(conn, "s1", LedgerKind.PAPER) == {"AAPL": 2.0}
+
+
+def test_far_past_sentinel_is_not_shifted(conn):
+    venue = _venue()
+    venue_sync.ingest_paper_venue(conn, venue, UNTIL)
+    assert venue.calls == [("activities", venue_sync._PAPER_CURSOR_FAR_PAST, UNTIL)]
+
+
+def test_unparseable_cursor_fails_closed(conn):
+    _seed_cursor(conn, "not-a-time")
+    with pytest.raises(ValueError):
+        venue_sync.ingest_paper_venue(conn, _venue(), UNTIL)
