@@ -12,6 +12,12 @@ from algua.operator.schedule import operator_run_lock
 from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
 from tests._deployment_helpers import force_legacy_strategy
+from tests._human_actor_helpers import (
+    _sign,
+    install_human_actor_anchor,
+    promote_signed,
+    scaffold_human_transition,
+)
 
 runner = CliRunner()
 
@@ -75,9 +81,9 @@ def test_transition_illegal_exits_nonzero():
 def _advance_to_paper(strategy: str) -> None:
     runner.invoke(app, ["registry", "add", strategy])
     # CANDIDATE via human: scaffolding to paper, not exercising the agent shortlist gate.
-    for stage, actor in (("backtested", "agent"), ("candidate", "human")):
-        runner.invoke(app, ["registry", "transition", strategy,
-                            "--to", stage, "--actor", actor])
+    runner.invoke(app, ["registry", "transition", strategy,
+                        "--to", "backtested", "--actor", "agent"])
+    scaffold_human_transition(strategy, "candidate")
     with connect(get_settings().db_path) as conn:
         migrate(conn)
         force_legacy_strategy(conn, SqliteStrategyRepository(conn).get(strategy).id)
@@ -85,8 +91,7 @@ def _advance_to_paper(strategy: str) -> None:
 
 def _advance_to_forward_tested(strategy: str) -> None:
     _advance_to_paper(strategy)
-    runner.invoke(app, ["registry", "transition", strategy,
-                        "--to", "forward_tested", "--actor", "human"])
+    scaffold_human_transition(strategy, "forward_tested")
 
 
 def _make_key(tmp_path, name="id"):
@@ -845,3 +850,73 @@ def test_grant_novel_mints_command_does_not_exist():
     # It is absent from the registry command surface / help.
     help_out = runner.invoke(app, ["registry", "--help"]).stdout
     assert "grant-novel-mints" not in help_out
+
+
+# ---------------------------------------------------------------------------
+# #682: raw human edges need the #329 signed human-actor challenge
+# ---------------------------------------------------------------------------
+
+def _stage_of(name):
+    return _json(runner.invoke(app, ["registry", "show", name]))["stage"]
+
+
+def _raw(name, to, *extra, actor="human", reason="r"):
+    return ["registry", "transition", name, "--to", to, "--actor", actor, "--reason", reason,
+            *extra]
+
+
+def test_bare_human_candidate_prints_challenge_and_does_not_transition(monkeypatch, tmp_path):
+    install_human_actor_anchor(monkeypatch, tmp_path)
+    runner.invoke(app, ["registry", "add", "cross_sectional_momentum"])
+    runner.invoke(app, _raw("cross_sectional_momentum", "backtested", actor="agent"))
+    out = json.loads(runner.invoke(app, _raw("cross_sectional_momentum", "candidate")).stdout)
+    assert out["action"] == "human_actor_challenge"
+    assert _stage_of("cross_sectional_momentum") == "backtested"
+
+
+def test_signed_human_candidate_transitions_and_signature_is_single_use(monkeypatch, tmp_path):
+    key = install_human_actor_anchor(monkeypatch, tmp_path)
+    name = "cross_sectional_momentum"
+    runner.invoke(app, ["registry", "add", name])
+    runner.invoke(app, _raw(name, "backtested", actor="agent"))
+    res = promote_signed(runner, app, _raw(name, "candidate"), key, tmp_path)
+    assert res.exit_code == 0, res.stdout
+    assert _stage_of(name) == "candidate"
+
+
+def test_signature_does_not_replay_onto_a_different_reason(monkeypatch, tmp_path):
+    key = install_human_actor_anchor(monkeypatch, tmp_path)
+    name = "cross_sectional_momentum"
+    runner.invoke(app, ["registry", "add", name])
+    runner.invoke(app, _raw(name, "backtested", actor="agent"))
+    first = json.loads(runner.invoke(app, _raw(name, "candidate", reason="a")).stdout)
+    sig = _sign(key, first["challenge"], tmp_path)
+    res = runner.invoke(app, _raw(name, "candidate", "--actor-signature", str(sig), reason="b"))
+    assert res.exit_code == 1
+    assert _stage_of(name) == "backtested"
+
+
+def test_bare_human_forward_tested_prints_challenge_and_signed_succeeds(monkeypatch, tmp_path):
+    key = install_human_actor_anchor(monkeypatch, tmp_path)
+    name = "cross_sectional_momentum"
+    runner.invoke(app, ["registry", "add", name])
+    runner.invoke(app, _raw(name, "backtested", actor="agent"))
+    scaffold_human_transition(name, "candidate")
+    with connect(get_settings().db_path) as conn:
+        migrate(conn)
+        force_legacy_strategy(conn, SqliteStrategyRepository(conn).get(name).id)
+    out = json.loads(runner.invoke(app, _raw(name, "forward_tested")).stdout)
+    assert out["action"] == "human_actor_challenge"
+    assert _stage_of(name) == "paper"
+    res = promote_signed(runner, app, _raw(name, "forward_tested"), key, tmp_path)
+    assert res.exit_code == 0, res.stdout
+    assert _stage_of(name) == "forward_tested"
+
+
+def test_agent_still_refused_on_raw_forward_edge(monkeypatch, tmp_path):
+    install_human_actor_anchor(monkeypatch, tmp_path)
+    name = "cross_sectional_momentum"
+    _advance_to_paper(name)
+    res = runner.invoke(app, _raw(name, "forward_tested", actor="agent"))
+    assert res.exit_code == 1
+    assert _stage_of(name) == "paper"

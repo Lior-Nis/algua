@@ -62,11 +62,29 @@ def test_human_token_not_consumable_by_agent(tmp_path, monkeypatch):
         transition_strategy(repo, "alpha", Stage.CANDIDATE, Actor.AGENT, "try")
 
 
-def test_human_shortlist_exempt(tmp_path):
+def test_human_shortlist_exempt_once_authenticated(tmp_path):
     repo = _repo(tmp_path)
     _backtested(repo)
-    assert transition_strategy(repo, "alpha", Stage.CANDIDATE, Actor.HUMAN, "manual").stage \
-        == Stage.CANDIDATE
+    assert transition_strategy(repo, "alpha", Stage.CANDIDATE, Actor.HUMAN, "manual",
+                               human_actor_authenticated=True).stage == Stage.CANDIDATE
+
+
+def test_bare_human_shortlist_refused(tmp_path):
+    # #682: a bare Actor.HUMAN (no authenticated-human assertion) unlocks nothing on the raw edge.
+    repo = _repo(tmp_path)
+    _backtested(repo)
+    with pytest.raises(TransitionError, match="authenticated human"):
+        transition_strategy(repo, "alpha", Stage.CANDIDATE, Actor.HUMAN, "manual")
+    assert repo.get("alpha").stage is Stage.BACKTESTED
+
+
+def test_bare_human_forward_tested_refused(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    _paper(repo)
+    monkeypatch.setattr("algua.registry.transitions._compute_hashes", lambda name: _FWD_IDENT)
+    with pytest.raises(TransitionError, match="authenticated human"):
+        transition_strategy(repo, "alpha", Stage.FORWARD_TESTED, Actor.HUMAN, "manual")
+    assert repo.get("alpha").stage is Stage.PAPER
 
 
 def test_token_for_strategy_a_not_consumable_by_strategy_b(tmp_path, monkeypatch):
@@ -145,8 +163,8 @@ def test_human_forward_tested_raw_pins_identity(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     _paper(repo)
     monkeypatch.setattr("algua.registry.transitions._compute_hashes", lambda name: _FWD_IDENT)
-    assert transition_strategy(repo, "alpha", Stage.FORWARD_TESTED, Actor.HUMAN, "manual").stage \
-        == Stage.FORWARD_TESTED
+    assert transition_strategy(repo, "alpha", Stage.FORWARD_TESTED, Actor.HUMAN, "manual",
+                               human_actor_authenticated=True).stage == Stage.FORWARD_TESTED
     last = repo.list_transitions("alpha")[-1]
     assert last["to_stage"] == "forward_tested"
     assert (last["code_hash"], last["config_hash"], last["dependency_hash"]) \

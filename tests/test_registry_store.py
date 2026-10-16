@@ -73,7 +73,8 @@ def repo(tmp_path):
 
 
 def _transition(repo, name, to, actor, reason=None):
-    return transition_strategy(repo, name, to, actor, reason)
+    # Test scaffolding: the raw human edges need an authenticated human (#682).
+    return transition_strategy(repo, name, to, actor, reason, human_actor_authenticated=True)
 
 
 def test_add_creates_idea_with_initial_transition(repo):

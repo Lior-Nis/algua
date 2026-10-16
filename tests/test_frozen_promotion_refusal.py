@@ -666,7 +666,8 @@ def test_transition_strategy_refuses_the_frozen_forward_edge_directly(monkeypatc
         calls = _checkout_spies(monkeypatch)
         with pytest.raises(TransitionError, match="forward_tested only through paper promote"):
             transition_strategy(
-                SqliteStrategyRepository(conn), NAME, Stage.FORWARD_TESTED, Actor.HUMAN, "raw")
+                SqliteStrategyRepository(conn), NAME, Stage.FORWARD_TESTED, Actor.HUMAN, "raw",
+                human_actor_authenticated=True)
         assert calls == []
         assert _live_snapshot(conn, sid) == before
 
@@ -768,12 +769,10 @@ def test_legacy_raw_forward_transition_still_pins_the_checkout_identity(monkeypa
         "algua.registry.transitions._compute_hashes",
         lambda name: hashed.append(name) or IDENTITY)
 
-    result = runner.invoke(app, [
-        "registry", "transition", "legacy_fwd", "--to", "forward_tested", "--actor", "human",
-        "--reason", "raw"])
+    from tests._human_actor_helpers import scaffold_human_transition
 
-    assert result.exit_code == 0, result.stdout
-    assert json.loads(result.stdout)["stage"] == "forward_tested"
+    scaffold_human_transition("legacy_fwd", "forward_tested", "raw")
+
     assert hashed == ["legacy_fwd"]
     with closing(_registry_conn()) as conn:
         row = conn.execute(

@@ -69,3 +69,17 @@ def promote_signed(runner: CliRunner, app, base_args: list[str], key: Path, tmp_
         return first
     sig = _sign(key, payload["challenge"], tmp_path)
     return runner.invoke(app, [*base_args, "--actor-signature", str(sig)])
+
+
+def scaffold_human_transition(name: str, to: str, reason: str = "test scaffold") -> None:
+    """Move ``name`` to ``to`` as a human through the registry service, marking the human actor as
+    already authenticated (#682). For TEST SETUP only: the raw human edges (backtested->candidate,
+    paper->forward_tested) refuse a bare human otherwise. Wall tests must not use it."""
+    from algua.contracts.lifecycle import Actor, Stage
+    from algua.registry.db import registry_conn
+    from algua.registry.store import SqliteStrategyRepository
+    from algua.registry.transitions import transition_strategy
+
+    with registry_conn() as conn:
+        transition_strategy(SqliteStrategyRepository(conn), name, Stage(to), Actor.HUMAN, reason,
+                            human_actor_authenticated=True)

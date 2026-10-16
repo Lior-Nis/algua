@@ -102,6 +102,9 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   /relaxation. A bare `--actor human` unlocks NOTHING. Enroll a human-actor key with `registry
   enroll-approver --namespace human-actor` (or `--namespace both` for a key that also does go-live);
   the anchor is `approvers/allowed_signers`, shared with the go-live gate under a distinct namespace.
+- Raw `registry transition --actor human` on `backtested -> candidate` and `paper -> forward_tested`
+  also needs the #329 signature (#682): run once to print a challenge, sign it, re-run with
+  `--actor-signature`. A bare `--actor human` unlocks nothing there; agents stay token-gated.
 - `uv run algua registry transition <name> --to live --actor human` — step 1 of go-live: prints a
   challenge (includes forward certificate summary). Sign it, then re-run with
   `--signature <file>.sig` to complete the transition. Requires a fresh, matching forward

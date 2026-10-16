@@ -46,7 +46,8 @@ def _move(repo, target: Stage, **kw: Any):
         extra = {"approval_verifier": lambda *a: True,
                  "forward_certificate_verifier": lambda *a: {}}
     reason = "bench" if target is Stage.DORMANT else None
-    return transition_strategy(repo, "s1", target, Actor.HUMAN, reason=reason, **extra, **kw)
+    return transition_strategy(repo, "s1", target, Actor.HUMAN, reason=reason,
+                               human_actor_authenticated=True, **extra, **kw)
 
 
 @pytest.fixture

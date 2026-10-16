@@ -16,6 +16,7 @@ from algua.registry import live_gate, transitions
 from algua.registry.approvals import compute_artifact_hashes, record_approval
 from algua.registry.db import registry_conn
 from algua.registry.gate_history import strategy_gate_history
+from algua.registry.human_actor import authenticate_raw_human_edge
 from algua.registry.kb_sync import sync_kb_doc
 from algua.registry.live_gate import ALLOWED_SIGNERS_PATH
 from algua.registry.repository import StrategyRecord
@@ -123,18 +124,16 @@ def transition(
     signature: str = typer.Option(
         None, "--signature",
         help="path to the SSH signature over the printed go-live challenge"),
+    actor_signature: str = typer.Option(
+        None, "--actor-signature", help="human-actor challenge signature (#329/#682)"),
 ) -> None:
-    """Advance a strategy's lifecycle stage. Going live is a two-step signed ceremony.
-
-    Run with no --signature to print a challenge, sign it with your enrolled key,
-    then re-run with --signature."""
+    """Advance a strategy's lifecycle stage. Going live is a two-step signed ceremony: run with
+    no --signature to print a challenge, sign it with your enrolled key, re-run with --signature."""
     target = Stage(to)
     with registry_conn() as conn:
         repo = SqliteStrategyRepository(conn)
-        # Inverted capital flow (#497): a strategy goes live UNALLOCATED. The human then
-        # `live allocate`s it at stage==live, and `live run-all` SKIPS an unallocated live
-        # strategy until then — so no unallocated live trading can occur and the pre-go-live
-        # allocation precondition is gone.
+        # Inverted capital flow (#497): a strategy goes live UNALLOCATED; `live run-all` SKIPS it
+        # until the human `live allocate`s it, so there is no pre-go-live allocation precondition.
         if target is Stage.LIVE and signature is None:
             if Actor(actor) is not Actor.HUMAN:
                 raise TransitionError("transition to live requires a human actor")
@@ -142,11 +141,10 @@ def transition(
             validate_transition(rec.stage, Stage.LIVE)  # reject non-paper before issuing
             transitions.refuse_frozen_deployment(repo, rec.id, Stage.LIVE)  # before hashing
             # The certificate check BEFORE any challenge is issued, so the human signs with
-            # the evidence in front of them (#124). Built via the same transitions helper the
-            # signature-completion wall uses — no duplicate logic. Module-attribute access on
-            # purpose: it is the one monkeypatch seam shared by both paths. ONE identity
-            # computation serves both the verifier and the challenge — no drift window
-            # between what the certificate was judged against and what gets signed (#124 GATE-2).
+            # the evidence in front of them (#124), via the same transitions helper the
+            # signature-completion wall uses (module-attribute access: the shared monkeypatch
+            # seam). ONE identity computation serves both the verifier and the challenge — no
+            # drift window between what was judged and what gets signed (#124 GATE-2).
             identity = compute_artifact_hashes(name)
             certificate = transitions._default_forward_certificate_verifier()(
                 repo, name, rec.id, identity)
@@ -162,6 +160,8 @@ def transition(
             }))
             return
 
+        authed = authenticate_raw_human_edge(
+            conn, repo, name, target, Actor(actor), reason, actor_signature)
         verifier = None
         approver: dict[str, str] = {}
         if target is Stage.LIVE:
@@ -183,15 +183,14 @@ def transition(
         # Every allocation-shedding edge drains its source lane's resting orders: the guard is
         # selected inside transition_strategy (Story 2.2), so this command passes nothing.
         rec = transition_strategy(repo, name, target, Actor(actor), reason,
-                                  approval_verifier=verifier)
+                                  approval_verifier=verifier, human_actor_authenticated=authed)
         if target is Stage.LIVE:
             # On the CLI live path the SSH signature IS the approval: the real wall is the
             # verify_and_consume signature check above + the live_authorizations row it writes,
             # re-verified against the trust anchor at trade time; approvals is audit-only.
             record_approval(repo, name, approver["id"])
-    # Re-sync the kb doc to the new stage (#331): best-effort, out-of-transaction — the
-    # `with registry_conn()` block above has already committed and closed. The go-live CHALLENGE
-    # path returns earlier (no stage change), so only real stage transitions reach here.
+    # Re-sync the kb doc to the new stage (#331): best-effort, after the commit above. The
+    # challenge paths return earlier (no stage change), so only real transitions reach here.
     sync_kb_doc(rec.name)
     emit(ok({"name": rec.name, "stage": rec.stage.value}))
 

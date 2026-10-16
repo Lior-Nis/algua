@@ -36,6 +36,11 @@ _REVOKE_ON_EXIT: frozenset[tuple[Stage, Stage]] = frozenset({
     (Stage.LIVE, Stage.PAPER), (Stage.LIVE, Stage.DORMANT), (Stage.LIVE, Stage.RETIRED)})
 
 
+# Raw edges whose human branch skips the agent gate token (#682).
+HUMAN_AUTH_EDGES: frozenset[tuple[Stage, Stage]] = frozenset({
+    (Stage.BACKTESTED, Stage.CANDIDATE), (Stage.PAPER, Stage.FORWARD_TESTED)})
+
+
 def transition_strategy(
     repo: StrategyRepository,
     name: str,
@@ -45,10 +50,16 @@ def transition_strategy(
     approval_verifier: ApprovalVerifier | None = None,
     forward_certificate_verifier: ForwardCertificateVerifier | None = None,
     exit_guard_selector: ExitGuardSelector | None = None,
+    human_actor_authenticated: bool = False,
 ) -> StrategyRecord:
     target = Stage(to)
     transition_actor = Actor(actor)
     rec = repo.get(name)
+    # #682: a bare Actor.HUMAN unlocks nothing on the token-exempt raw edges (#329 signature).
+    if (transition_actor is Actor.HUMAN and not human_actor_authenticated
+            and (rec.stage, target) in HUMAN_AUTH_EDGES):
+        raise TransitionError(f"{rec.stage.value} -> {target.value} as a human requires an "
+                              "authenticated human actor (--actor-signature, #329)")
     if rec.stage is Stage.CANDIDATE and target is Stage.PAPER:
         raise TransitionError(
             "candidate -> paper requires atomic deployment intake; run `algua paper intake`")

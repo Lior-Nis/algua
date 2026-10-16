@@ -44,13 +44,15 @@ def _advance_to_paper(repo, name):
     repo.add(name)
     transition_strategy(repo, name, Stage.BACKTESTED, Actor.AGENT)
     # CANDIDATE via human: scaffolding to a later stage, not exercising the agent shortlist gate.
-    transition_strategy(repo, name, Stage.CANDIDATE, Actor.HUMAN)
+    transition_strategy(repo, name, Stage.CANDIDATE, Actor.HUMAN,
+                        human_actor_authenticated=True)
     force_legacy_strategy(repo._conn, repo.get(name).id)
 
 
 def _advance_to_forward_tested(repo, name):
     _advance_to_paper(repo, name)
-    transition_strategy(repo, name, Stage.FORWARD_TESTED, Actor.HUMAN, "test setup")
+    transition_strategy(repo, name, Stage.FORWARD_TESTED, Actor.HUMAN, "test setup",
+                        human_actor_authenticated=True)
 
 
 def test_live_requires_approval(repo):

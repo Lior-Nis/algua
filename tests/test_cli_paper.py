@@ -20,7 +20,11 @@ from algua.risk import kill_switch
 from algua.risk.limits import RiskBreach
 from tests._deployment_helpers import force_legacy_strategy
 from tests._gate_row_helpers import seed_passing_gate
-from tests._human_actor_helpers import install_human_actor_anchor, promote_signed
+from tests._human_actor_helpers import (
+    install_human_actor_anchor,
+    promote_signed,
+    scaffold_human_transition,
+)
 
 runner = CliRunner()
 
@@ -1638,8 +1642,7 @@ def test_paper_promote_wrong_stage_refused(monkeypatch):
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     assert runner.invoke(app, ["backtest", "run", _NAME, "--demo", "--register",
                                "--start", "2022-01-01", "--end", "2023-12-31"]).exit_code == 0
-    assert runner.invoke(app, ["registry", "transition", _NAME, "--to", "candidate",
-                               "--actor", "human", "--reason", "ok"]).exit_code == 0
+    scaffold_human_transition(_NAME, "candidate", "ok")
     result = runner.invoke(app, ["paper", "promote", _NAME])
     assert result.exit_code == 1
     payload = json.loads(result.stdout)

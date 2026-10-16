@@ -7,12 +7,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from algua.contracts.lifecycle import Actor
+from algua.contracts.lifecycle import Actor, Stage
 from algua.registry.challenges import ChallengeSpec, build_payload, consume, find_pending, issue
 from algua.registry.live_gate import ALLOWED_SIGNERS_PATH, verify_signature
 
 if TYPE_CHECKING:
-    from algua.registry.repository import ArtifactIdentity
+    from algua.registry.repository import ArtifactIdentity, StrategyRepository
 
 # Human-actor authentication (#329). A bare `--actor human` CLI string is forgeable: any agent
 # driving the identical CLI can pass it to unlock every human-only relaxation below the live wall
@@ -248,3 +248,29 @@ def authenticate_actor(
                   "then re-run this command with --actor-signature <file>.sig"),
               })
         raise typer.Exit() from None
+
+
+def authenticate_raw_human_edge(
+    conn: sqlite3.Connection, repo: StrategyRepository, name: str, target: Stage, actor: Actor,
+    reason: str | None, actor_signature: str | None,
+) -> bool:
+    """#682: authenticate a human on the raw ``registry transition`` edges that skip a gate token
+    (``transitions.HUMAN_AUTH_EDGES``). Returns True iff the human was authenticated; False when
+    the edge needs no assertion (non-human actor, go-live, or any other edge). Unsigned, it
+    prints a challenge and exits. The run_context binds the target and the reason."""
+    from algua.registry import transitions
+    from algua.registry.approvals import compute_artifact_hashes
+
+    if actor is not Actor.HUMAN or target is Stage.LIVE:
+        return False
+    rec = repo.get(name)
+    if (rec.stage, target) not in transitions.HUMAN_AUTH_EDGES:
+        return False
+    if rec.stage is Stage.PAPER:  # a frozen deployment never takes the raw forward edge
+        transitions.refuse_frozen_deployment(repo, rec.id, target)
+    authenticate_actor(
+        conn, command="registry transition", name=name, rec=rec, stage_to=target.value,
+        declared_actor=actor, actor_signature=actor_signature,
+        identity=lambda: compute_artifact_hashes(name),
+        run_context=canonical_run_context({"to": target.value, "reason": reason}))
+    return True
