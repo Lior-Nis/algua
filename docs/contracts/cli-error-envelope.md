@@ -98,6 +98,7 @@ raised before it was bound to a deployment; no `trade-tick` or `run-all` path em
 | `BacktestError` | `backtest_error` |
 | `TickHalted` | `tick_halted` |
 | `ManifestLockReplacedError` | `manifest_lock_replaced` |
+| `CheckoutNotCleanMain` | `checkout_not_clean_main` (#687: `paper run-all` / `live run-all` / `paper trade-tick` refuse a checkout that is not a clean `main`, for `--refresh` and `--snapshot` alike; `fleet health` reports it as `checkout`) |
 | `FileNotFoundError` | `file_not_found` |
 | `sqlite3.OperationalError` | `db_unavailable` |
 | any other `ValueError` | `invalid_input` |
