@@ -648,8 +648,8 @@ def test_registry_transition_to_forward_tested_refuses_a_frozen_deployment_first
 
     assert result.exit_code == 1, result.stdout
     payload = json.loads(result.stdout)
-    assert payload["code"] == "wrong_stage"
-    assert "reach forward_tested only through paper promote" in payload["error"]
+    assert payload["code"] == "raw_edge_refused"
+    assert "`algua paper promote` is the only path" in payload["error"]
     assert payload["retryable"] is False
     assert calls == []
     with closing(_registry_conn()) as conn:
@@ -768,12 +768,10 @@ def test_legacy_raw_forward_transition_still_pins_the_checkout_identity(monkeypa
         "algua.registry.transitions._compute_hashes",
         lambda name: hashed.append(name) or IDENTITY)
 
-    result = runner.invoke(app, [
-        "registry", "transition", "legacy_fwd", "--to", "forward_tested", "--actor", "human",
-        "--reason", "raw"])
+    from tests._human_actor_helpers import scaffold_transition
 
-    assert result.exit_code == 0, result.stdout
-    assert json.loads(result.stdout)["stage"] == "forward_tested"
+    scaffold_transition("legacy_fwd", "forward_tested", "raw")
+
     assert hashed == ["legacy_fwd"]
     with closing(_registry_conn()) as conn:
         row = conn.execute(

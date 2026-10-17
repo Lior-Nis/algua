@@ -33,6 +33,7 @@ from algua.risk import global_halt
 from algua.risk.limits import RiskBreach
 from tests._deployment_helpers import force_legacy_strategy
 from tests._gate_row_helpers import seed_passing_gate
+from tests._human_actor_helpers import scaffold_transition
 
 runner = CliRunner()
 
@@ -90,8 +91,7 @@ def _second_strategy():
 def _to_paper(name: str) -> None:
     assert runner.invoke(app, ["backtest", "run", name, "--demo", "--register",
                                "--start", "2022-01-01", "--end", "2023-12-31"]).exit_code == 0
-    assert runner.invoke(app, ["registry", "transition", name, "--to", "candidate",
-                               "--actor", "human", "--reason", "ok"]).exit_code == 0
+    scaffold_transition(name, "candidate", "ok")
     # #559: the tick binds to the newest passing gate row; a legacy (universe_name NULL) row
     # preserves the pre-binding behaviour (tick on CONFIG.universe via config_legacy).
     seed_passing_gate(name)

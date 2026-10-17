@@ -18,6 +18,7 @@ from algua.registry.db import registry_conn
 from algua.registry.gate_history import strategy_gate_history
 from algua.registry.kb_sync import sync_kb_doc
 from algua.registry.live_gate import ALLOWED_SIGNERS_PATH
+from algua.registry.raw_edge import refuse_raw_edge
 from algua.registry.repository import StrategyRecord
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
@@ -131,10 +132,9 @@ def transition(
     target = Stage(to)
     with registry_conn() as conn:
         repo = SqliteStrategyRepository(conn)
-        # Inverted capital flow (#497): a strategy goes live UNALLOCATED. The human then
-        # `live allocate`s it at stage==live, and `live run-all` SKIPS an unallocated live
-        # strategy until then — so no unallocated live trading can occur and the pre-go-live
-        # allocation precondition is gone.
+        refuse_raw_edge(repo.get(name).stage, target)  # #682: promote commands only
+        # Inverted capital flow (#497): a strategy goes live UNALLOCATED; `live run-all` SKIPS it
+        # until the human `live allocate`s it, so there is no pre-go-live allocation precondition.
         if target is Stage.LIVE and signature is None:
             if Actor(actor) is not Actor.HUMAN:
                 raise TransitionError("transition to live requires a human actor")

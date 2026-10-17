@@ -20,6 +20,7 @@ from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
 from tests._deployment_helpers import force_legacy_strategy
 from tests._gate_row_helpers import seed_passing_gate
+from tests._human_actor_helpers import scaffold_transition
 
 runner = CliRunner()
 
@@ -31,8 +32,7 @@ _END = "2023-06-01"
 def _to_paper() -> None:
     assert runner.invoke(app, ["backtest", "run", _NAME, "--demo", "--register",
                                "--start", "2022-01-01", "--end", "2023-12-31"]).exit_code == 0
-    assert runner.invoke(app, ["registry", "transition", _NAME, "--to", "candidate",
-                               "--actor", "human", "--reason", "ok"]).exit_code == 0
+    scaffold_transition(_NAME, "candidate", "ok")
     with connect(get_settings().db_path) as conn:
         migrate(conn)
         force_legacy_strategy(conn, SqliteStrategyRepository(conn).get(_NAME).id)

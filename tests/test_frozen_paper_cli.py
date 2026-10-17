@@ -562,8 +562,8 @@ def test_raw_forward_and_go_live_transitions_never_import_the_checkout_module(wo
     live = runner.invoke(app, ["registry", "transition", TENANT, "--to", "live",
                                "--actor", "human"])
 
-    assert json.loads(forward.stdout)["code"] == "wrong_stage"
-    assert "reach forward_tested only through paper promote" in json.loads(forward.stdout)["error"]
+    assert json.loads(forward.stdout)["code"] == "raw_edge_refused"
+    assert "`algua paper promote` is the only path" in json.loads(forward.stdout)["error"]
     assert json.loads(live.stdout)["code"] == "frozen_live_unsupported"
     assert (forward.exit_code, live.exit_code) == (1, 1)
     assert world.rows(history, tenant_id) == before
