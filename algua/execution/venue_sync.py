@@ -8,6 +8,7 @@ the shared paper fill cursor; the drain uses ``ingest_paper_venue_keep_cursor``,
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime, timedelta
 
 from algua.audit.log import append as audit_append
 from algua.contracts.types import ActivityWindowBroker, OrderLookupBroker
@@ -19,6 +20,23 @@ from algua.execution.live_ledger import (
 )
 
 _PAPER_CURSOR_FAR_PAST = "1970-01-01T00:00:00Z"
+#: How far before the stored cursor each sync re-opens its window (#691). The cursor is the broker
+#: clock at the previous read, but Alpaca can publish a fill's activity after that read with a
+#: ``transaction_time`` before it; re-reading this overlap (free: ingest de-duplicates by activity
+#: id) catches a feed lag up to this long.
+PAPER_INGEST_LOOKBACK = timedelta(minutes=30)
+
+
+def _window_start(cursor: str | None) -> str:
+    """The ``after`` bound of a paper sync window: the cursor minus ``PAPER_INGEST_LOOKBACK``. The
+    far-past sentinel (no cursor yet) is returned unshifted. An unparseable cursor raises
+    ``ValueError`` (fail closed) rather than silently re-reading from a guessed point."""
+    if not cursor or cursor == _PAPER_CURSOR_FAR_PAST:
+        return _PAPER_CURSOR_FAR_PAST
+    parsed = datetime.fromisoformat(cursor)
+    if parsed.tzinfo is None:
+        raise ValueError(f"paper fill cursor {cursor!r} carries no timezone")
+    return (parsed - PAPER_INGEST_LOOKBACK).astimezone(UTC).isoformat()
 
 
 def recover_stranded(
@@ -42,11 +60,12 @@ def ingest_paper_venue(
     conn: sqlite3.Connection, broker: ActivityWindowBroker, until: str
 ) -> None:
     """Exhaustively ingest the paper venue's activities into paper_venue_fills, fail-closed.
-    Cursor is a broker-time high-water: fetch (cursor, until] (raises on a partial page), dedup by
-    activity_id, persist `until` as the new cursor in the SAME transaction. The caller resolves
-    `until` itself (never calls broker.clock() here), so a clock failure stays in its hands."""
+    Cursor is a broker-time high-water: fetch (cursor - PAPER_INGEST_LOOKBACK, until] (raises on a
+    partial page; the overlap catches a late-published activity, #691), dedup by activity_id,
+    persist `until` as the new cursor in the SAME transaction. The caller resolves `until` itself
+    (never calls broker.clock() here), so a clock failure stays in its hands."""
     after = fill_cursor(conn, LedgerKind.PAPER) or _PAPER_CURSOR_FAR_PAST
-    acts = broker.account_activities_window(after, until)
+    acts = broker.account_activities_window(_window_start(after), until)
     ingest_activities(conn, acts, LedgerKind.PAPER, cursor_value=until)
 
 
@@ -61,5 +80,5 @@ def ingest_paper_venue_keep_cursor(
     late, with a ``transaction_time`` before this ``until``, is still inside the next sync's window.
     Never pass ``cursor_value=None`` here: that stores an activity id, the live ledger's form."""
     after = fill_cursor(conn, LedgerKind.PAPER) or _PAPER_CURSOR_FAR_PAST
-    acts = broker.account_activities_window(after, until)
+    acts = broker.account_activities_window(_window_start(after), until)
     ingest_activities(conn, acts, LedgerKind.PAPER, cursor_value=after)
