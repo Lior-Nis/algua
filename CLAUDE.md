@@ -123,9 +123,10 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   mechanics live in the #529 spec). The **FORWARD gate is the harsh threshold** (its Sharpe bar is
   0.5× the holdout Sharpe recorded here, so overfit inflation self-punishes).
   A passing run is the ONLY way an agent reaches `candidate`
-  — there is no
-  raw `registry transition --to candidate` shortcut for an agent (`--allow-non-pit`,
-  `--allow-holdout-reuse`, `--n-combos`, and the raw shortlist transition are all human-only).
+  — `registry transition`
+  REFUSES `backtested -> candidate` and `paper -> forward_tested` for EVERY actor
+  (code `raw_edge_refused`, #682); the promote commands are the only paths (`--allow-non-pit`,
+  `--allow-holdout-reuse` and `--n-combos` are human-only).
   **Family governance (#222, #524):** at preflight, the strategy is empirically classified into a
   family via code-ancestry + factor-lineage + return-correlation clustering; MERGE verdict → assign
   into the incumbent family (inherits its breadth); PARENTAGE → new family but inherits the
@@ -206,7 +207,8 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
 its allocation. Unlike `retired` (the terminal tombstone), a `dormant` strategy can climb back out.
 For an agent, BOTH the `backtested -> candidate` edge (research promote) AND the
 `paper -> forward_tested` edge (paper promote) are token-gated: each requires a fresh passing
-run that mints an identity-matched, single-use gate token, not a raw `registry transition`.
+run that mints an identity-matched, single-use gate token; the raw `registry transition` refuses
+both edges for every actor (#682).
 
 ## Quality gates before committing
 `uv run pytest -q && uv run ruff check . && uv run mypy algua && uv run lint-imports`

@@ -69,3 +69,16 @@ def promote_signed(runner: CliRunner, app, base_args: list[str], key: Path, tmp_
         return first
     sig = _sign(key, payload["challenge"], tmp_path)
     return runner.invoke(app, [*base_args, "--actor-signature", str(sig)])
+
+
+def scaffold_transition(name: str, to: str, reason: str = "test scaffold") -> None:
+    """TEST SETUP ONLY: move ``name`` to ``to`` as a human through the registry service. The raw
+    ``registry transition`` CLI refuses ``backtested -> candidate`` and ``paper -> forward_tested``
+    for every actor (#682), so fixtures that need those stages go through the service instead."""
+    from algua.contracts.lifecycle import Actor, Stage
+    from algua.registry.db import registry_conn
+    from algua.registry.store import SqliteStrategyRepository
+    from algua.registry.transitions import transition_strategy
+
+    with registry_conn() as conn:
+        transition_strategy(SqliteStrategyRepository(conn), name, Stage(to), Actor.HUMAN, reason)

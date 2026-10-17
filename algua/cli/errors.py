@@ -50,6 +50,7 @@ def _registry() -> list[tuple[type[BaseException], str]]:
     )
     from algua.registry.idea_attempts import ClaimTokenMismatch
     from algua.registry.live_gate import LiveAuthorizationError, SignatureError
+    from algua.registry.raw_edge import RawEdgeRefused
     from algua.risk.limits import RiskBreach
 
     # Most-specific first. ValueError/LookupError subclasses precede the generic buckets so a
@@ -65,6 +66,7 @@ def _registry() -> list[tuple[type[BaseException], str]]:
         (FrozenDescriptorConflict, "frozen_descriptor_conflict"),
         (AllocationError, "allocation_error"),
         (ClaimTokenMismatch, "claim_token_mismatch"),
+        (RawEdgeRefused, "raw_edge_refused"),
         (TransitionError, "wrong_stage"),
         (ProviderError, "provider_error"),
         (ConstructionError, "construction_error"),

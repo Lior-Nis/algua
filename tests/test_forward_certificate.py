@@ -19,6 +19,7 @@ from algua.registry.transitions import transition_strategy
 from algua.research.forward_gates import CERTIFICATE_FRESH_SESSIONS
 from algua.risk import global_halt, kill_switch
 from tests._deployment_helpers import force_legacy_strategy
+from tests._human_actor_helpers import scaffold_transition
 
 # Friday 2026-06-12 (June 2026 weekdays: Jun 1-5 and Jun 8-12).
 NOW = datetime(2026, 6, 12, 21, 0, tzinfo=UTC)
@@ -506,17 +507,16 @@ CERT_SUMMARY = {"id": 7, "created_at": "2026-06-10T20:00:00+00:00", "realized_sh
 
 def _cli_to_forward_tested(runner, app, name):
     runner.invoke(app, ["registry", "add", name])
-    for stage, actor in (("backtested", "agent"), ("candidate", "human")):
-        r = runner.invoke(app, ["registry", "transition", name, "--to", stage, "--actor", actor])
-        assert r.exit_code == 0, r.stdout
+    r = runner.invoke(
+        app, ["registry", "transition", name, "--to", "backtested", "--actor", "agent"])
+    assert r.exit_code == 0, r.stdout
+    scaffold_transition(name, "candidate")
     from algua.config.settings import get_settings
 
     with connect(get_settings().db_path) as db:
         migrate(db)
         force_legacy_strategy(db, SqliteStrategyRepository(db).get(name).id)
-    r = runner.invoke(
-        app, ["registry", "transition", name, "--to", "forward_tested", "--actor", "human"])
-    assert r.exit_code == 0, r.stdout
+    scaffold_transition(name, "forward_tested")
 
 
 @pytest.fixture

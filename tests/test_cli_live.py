@@ -11,6 +11,7 @@ from algua.data.refresh import RefreshError
 from algua.execution.live_ledger import LedgerKind
 from tests._deployment_helpers import force_legacy_strategy
 from tests._gate_row_helpers import seed_passing_gate
+from tests._human_actor_helpers import scaffold_transition
 
 runner = CliRunner()
 
@@ -94,9 +95,7 @@ def _to_live(name="cross_sectional_momentum", allocate=True):
     # CONFIG.universe, preserving what these tick tests already assume.
     seed_passing_gate(name)
     # CANDIDATE via human: scaffolding to live, not exercising the agent shortlist gate.
-    for to, actor in (("candidate", "human"),):
-        runner.invoke(app, ["registry", "transition", name, "--to", to, "--actor", actor,
-                            "--reason", "x"])
+    scaffold_transition(name, "candidate", "x")
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
         sid = SqliteStrategyRepository(conn).get(name).id
@@ -865,10 +864,10 @@ def test_live_allocate_rejects_dormant(monkeypatch):
     monkeypatch.setattr("algua.cli.live_cmd._live_account_equity", _boom)
     # register a strategy and drive it to paper via the legal chain
     assert runner.invoke(app, ["registry", "add", "s1"]).exit_code == 0
-    for to, actor in (("backtested", "human"), ("candidate", "human")):
-        r = runner.invoke(app, ["registry", "transition", "s1", "--to", to,
-                                "--actor", actor, "--reason", "x"])
-        assert r.exit_code == 0, r.stdout
+    r = runner.invoke(app, ["registry", "transition", "s1", "--to", "backtested",
+                            "--actor", "agent", "--reason", "x"])
+    assert r.exit_code == 0, r.stdout
+    scaffold_transition("s1", "candidate", "x")
     # move to dormant directly via the python API (paper -> dormant, any actor, requires reason)
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
@@ -1210,9 +1209,9 @@ def test_live_flatten_non_live_stage_refused_no_trip(monkeypatch):
     # and the DB kill-switch must NOT be written (no cross-lane DoS).
     name = "paper_only"
     assert runner.invoke(app, ["registry", "add", name]).exit_code == 0
-    for to, actor in (("backtested", "human"), ("candidate", "human")):
-        assert runner.invoke(app, ["registry", "transition", name, "--to", to,
-                                   "--actor", actor, "--reason", "x"]).exit_code == 0
+    assert runner.invoke(app, ["registry", "transition", name, "--to", "backtested",
+                               "--actor", "agent", "--reason", "x"]).exit_code == 0
+    scaffold_transition(name, "candidate", "x")
     from algua.config.settings import get_settings
     from algua.registry.db import connect, migrate
     from algua.registry.store import SqliteStrategyRepository
@@ -1433,9 +1432,9 @@ def test_live_flatten_rejects_non_live(monkeypatch):
     name = "paper_only"
     assert runner.invoke(app, ["registry", "add", name]).exit_code == 0
     # Bring to paper (via backtested -> candidate -> paper)
-    for to, actor in (("backtested", "human"), ("candidate", "human")):
-        assert runner.invoke(app, ["registry", "transition", name, "--to", to,
-                                   "--actor", actor, "--reason", "x"]).exit_code == 0
+    assert runner.invoke(app, ["registry", "transition", name, "--to", "backtested",
+                               "--actor", "agent", "--reason", "x"]).exit_code == 0
+    scaffold_transition(name, "candidate", "x")
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
         from algua.registry.store import SqliteStrategyRepository

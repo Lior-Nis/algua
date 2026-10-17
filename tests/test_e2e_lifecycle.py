@@ -22,7 +22,7 @@ from algua.config.settings import get_settings
 from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
 from tests._deployment_helpers import force_legacy_strategy
-from tests._human_actor_helpers import _sign, install_human_actor_anchor
+from tests._human_actor_helpers import _sign, install_human_actor_anchor, scaffold_transition
 
 STRATEGY = "cross_sectional_momentum"
 
@@ -137,9 +137,7 @@ def test_full_research_lifecycle_to_shortlist_and_live_wall(capsys):
     assert _stage(capsys) == "paper"
 
     # paper -> forward_tested: a human must advance to forward_tested before the live gate.
-    code, payload = _run(capsys, "registry", "transition", STRATEGY,
-                         "--to", "forward_tested", "--actor", "human", "--reason", "e2e fwd test")
-    assert code == 0, payload
+    scaffold_transition(STRATEGY, "forward_tested", "e2e fwd test")
     assert _stage(capsys) == "forward_tested"
 
     # forward_tested -> live by an agent is the hard wall: fails, stage stays forward_tested.
@@ -165,9 +163,7 @@ def _to_paper_e2e(capsys):
     code, payload = _run(capsys, "registry", "transition", STRATEGY,
                          "--to", "backtested", "--actor", "human", "--reason", "e2e setup")
     assert code == 0, payload
-    code, payload = _run(capsys, "registry", "transition", STRATEGY,
-                         "--to", "candidate", "--actor", "human", "--reason", "e2e setup")
-    assert code == 0, payload
+    scaffold_transition(STRATEGY, "candidate", "e2e setup")
     _force_legacy_paper()
     assert _stage(capsys) == "paper"
 

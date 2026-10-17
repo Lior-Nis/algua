@@ -12,6 +12,7 @@ from algua.operator.schedule import operator_run_lock
 from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
 from tests._deployment_helpers import force_legacy_strategy
+from tests._human_actor_helpers import scaffold_transition
 
 runner = CliRunner()
 
@@ -75,9 +76,9 @@ def test_transition_illegal_exits_nonzero():
 def _advance_to_paper(strategy: str) -> None:
     runner.invoke(app, ["registry", "add", strategy])
     # CANDIDATE via human: scaffolding to paper, not exercising the agent shortlist gate.
-    for stage, actor in (("backtested", "agent"), ("candidate", "human")):
-        runner.invoke(app, ["registry", "transition", strategy,
-                            "--to", stage, "--actor", actor])
+    runner.invoke(
+        app, ["registry", "transition", strategy, "--to", "backtested", "--actor", "agent"])
+    scaffold_transition(strategy, "candidate")
     with connect(get_settings().db_path) as conn:
         migrate(conn)
         force_legacy_strategy(conn, SqliteStrategyRepository(conn).get(strategy).id)
@@ -85,8 +86,7 @@ def _advance_to_paper(strategy: str) -> None:
 
 def _advance_to_forward_tested(strategy: str) -> None:
     _advance_to_paper(strategy)
-    runner.invoke(app, ["registry", "transition", strategy,
-                        "--to", "forward_tested", "--actor", "human"])
+    scaffold_transition(strategy, "forward_tested")
 
 
 def _make_key(tmp_path, name="id"):
@@ -845,3 +845,50 @@ def test_grant_novel_mints_command_does_not_exist():
     # It is absent from the registry command surface / help.
     help_out = runner.invoke(app, ["registry", "--help"]).stdout
     assert "grant-novel-mints" not in help_out
+
+
+# ---------------------------------------------------------------------------
+# #682: the raw shortlist / forward edges are refused for EVERY actor
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("actor", ["human", "agent", "system"])
+def test_raw_backtested_to_candidate_refused_for_every_actor(actor):
+    runner.invoke(app, ["registry", "add", "alpha"])
+    runner.invoke(
+        app, ["registry", "transition", "alpha", "--to", "backtested", "--actor", "agent"])
+    result = runner.invoke(
+        app, ["registry", "transition", "alpha", "--to", "candidate", "--actor", actor])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["code"] == "raw_edge_refused"
+    assert "research promote" in payload["error"]
+    assert _json(runner.invoke(app, ["registry", "show", "alpha"]))["stage"] == "backtested"
+
+
+@pytest.mark.parametrize("actor", ["human", "agent", "system"])
+def test_raw_paper_to_forward_tested_refused_for_every_actor(actor):
+    _advance_to_paper("alpha")
+    result = runner.invoke(
+        app, ["registry", "transition", "alpha", "--to", "forward_tested", "--actor", actor])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["code"] == "raw_edge_refused"
+    assert "paper promote" in payload["error"]
+    assert _json(runner.invoke(app, ["registry", "show", "alpha"]))["stage"] == "paper"
+
+
+def test_transition_has_no_signature_option_for_the_raw_edges():
+    result = runner.invoke(app, ["registry", "transition", "--help"])
+    assert "--actor-signature" not in result.stdout
+
+
+def test_raw_edge_refusal_is_scoped_to_the_two_edges():
+    from algua.contracts.lifecycle import Stage
+    from algua.registry.raw_edge import RAW_REFUSED_EDGES
+
+    assert set(RAW_REFUSED_EDGES) == {
+        (Stage.BACKTESTED, Stage.CANDIDATE), (Stage.PAPER, Stage.FORWARD_TESTED)}
+    runner.invoke(app, ["registry", "add", "alpha"])  # other edges are untouched
+    result = runner.invoke(
+        app, ["registry", "transition", "alpha", "--to", "backtested", "--actor", "agent"])
+    assert result.exit_code == 0, result.stdout

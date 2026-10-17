@@ -20,7 +20,11 @@ from algua.risk import kill_switch
 from algua.risk.limits import RiskBreach
 from tests._deployment_helpers import force_legacy_strategy
 from tests._gate_row_helpers import seed_passing_gate
-from tests._human_actor_helpers import install_human_actor_anchor, promote_signed
+from tests._human_actor_helpers import (
+    install_human_actor_anchor,
+    promote_signed,
+    scaffold_transition,
+)
 
 runner = CliRunner()
 
@@ -75,8 +79,7 @@ def _isolated(monkeypatch, tmp_path):
 def _to_paper(name="cross_sectional_momentum"):
     assert runner.invoke(app, ["backtest", "run", name, "--demo", "--register",
                                "--start", "2022-01-01", "--end", "2023-12-31"]).exit_code == 0
-    assert runner.invoke(app, ["registry", "transition", name, "--to", "candidate",
-                               "--actor", "human", "--reason", "ok"]).exit_code == 0
+    scaffold_transition(name, "candidate", "ok")
     # #559: the tick binds to the newest passing gate row; a legacy (universe_name NULL) row
     # preserves the pre-binding behaviour (tick on CONFIG.universe via config_legacy).
     seed_passing_gate(name)
@@ -758,10 +761,7 @@ def test_paper_flatten_allowed_at_forward_tested_stage(monkeypatch, tmp_path):
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     name = "cross_sectional_momentum"
     _to_paper()
-    assert runner.invoke(
-        app, ["registry", "transition", name, "--to", "forward_tested",
-              "--actor", "human", "--reason", "gate passed"]
-    ).exit_code == 0
+    scaffold_transition(name, "forward_tested", "gate passed")
     # seed a paper-venue fill so paper_believed_positions returns something to offset
     _seed_paper_venue_fill(tmp_path / "p.db", name, "AAA")
     broker = _FlattenBroker()
@@ -1381,10 +1381,7 @@ def test_trade_tick_allowed_at_forward_tested_stage(monkeypatch):
 
     name = "cross_sectional_momentum"
     # advance to forward_tested via a human transition
-    assert runner.invoke(
-        app, ["registry", "transition", name, "--to", "forward_tested",
-              "--actor", "human", "--reason", "gate passed"]
-    ).exit_code == 0
+    scaffold_transition(name, "forward_tested", "gate passed")
 
     fake_result = TickResult(
         decision_ts=datetime(2026, 6, 11, 14, 0, 0, tzinfo=UTC),
@@ -1638,8 +1635,7 @@ def test_paper_promote_wrong_stage_refused(monkeypatch):
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     assert runner.invoke(app, ["backtest", "run", _NAME, "--demo", "--register",
                                "--start", "2022-01-01", "--end", "2023-12-31"]).exit_code == 0
-    assert runner.invoke(app, ["registry", "transition", _NAME, "--to", "candidate",
-                               "--actor", "human", "--reason", "ok"]).exit_code == 0
+    scaffold_transition(_NAME, "candidate", "ok")
     result = runner.invoke(app, ["paper", "promote", _NAME])
     assert result.exit_code == 1
     payload = json.loads(result.stdout)
