@@ -251,7 +251,7 @@ def test_repository_lock_has_canonical_identities() -> None:
         for wheel in package.get("wheels", [])
     ]
 
-    assert len(locked) == 1785
+    assert len(locked) == 1824
     assert sorted(wheels) == sorted(locked)  # keyed by each exact raw URL
     assert all(planner_environment_lock.wheel_url_identity(url) == url for url in locked)
 
