@@ -563,7 +563,7 @@ def merge_back(
                 return SqliteStrategyRepository(conn).gate_exists_by_token(strategy, attempt_token)
 
         def intake() -> dict:
-            # Paper equity is read READ-ONLY before the txn (no trading); the doc sync runs after it.
+            # Paper equity is read READ-ONLY before the txn (no trading); the doc sync runs after.
             equity = float(_alpaca_broker_from_settings().account().equity)
             with registry_conn() as conn:
                 result = run_intake(conn, equity=equity, max_concurrent=max_concurrent,
