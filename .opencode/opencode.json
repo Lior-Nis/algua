@@ -5,7 +5,7 @@
 
   "// model": "Default only. Per-loop choices below are what actually run; see .opencode/agents/.",
   "model": "openai/gpt-6-astra",
-  "small_model": "openai/gpt-5.3-codex-spark",
+  "small_model": "openai/gpt-5.6-sol-fast",
 
   "instructions": ["AGENTS.md"],
 
@@ -43,7 +43,7 @@
     "VERIFIED against the operator's ChatGPT/Codex subscription on 2026-09-13, because the account",
     "does NOT serve every model opencode lists: gpt-5.4 and gpt-5.4-mini both return",
     "\"not supported when using Codex with a ChatGPT account\". Working: gpt-6-astra, gpt-5.6-sol,",
-    "gpt-5.6-sol-fast, gpt-5.3-codex-spark. Re-test before naming a new one here."
+    "gpt-5.6-sol-fast. gpt-5.3-codex-spark worked on 2026-09-13 but was rejected by 2026-10-16: forage ran 3 days on it and silently produced nothing. Re-test before naming a model here."
   ],
 
   "// agent": [
@@ -68,6 +68,6 @@
     "author":    { "model": "openai/gpt-6-astra",              "variant": "high" },
     "interpret": { "model": "openai/gpt-5.6-sol",             "variant": "high" },
     "leap":      { "model": "openai/gpt-6-astra",             "variant": "high" },
-    "forage":    { "model": "openai/gpt-5.3-codex-spark" }
+    "forage":    { "model": "openai/gpt-5.6-sol-fast" }
   }
 }
