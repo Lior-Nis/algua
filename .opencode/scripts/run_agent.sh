@@ -143,7 +143,16 @@ LOGFILE="${LOGFILE:-${WORKDIR}/agent.log}"
 
 # Terminal provider failures. These never resolve by waiting, so the watchdog below kills the run
 # the moment one appears rather than letting it burn the whole --timeout doing nothing.
-FATAL_RE='Monthly usage limit reached|usage limit|quota exceeded|Token refresh failed|AI_RetryError|insufficient_quota|401 Unauthorized'
+FATAL_RE='Monthly usage limit reached|usage limit|quota exceeded|Token refresh failed|AI_RetryError|insufficient_quota|401 Unauthorized|is not supported when using Codex with a ChatGPT account'
+
+# A provider REJECTION the runtime reports without failing. On 2026-10-16 the subscription stopped
+# serving the forage model: opencode logged a primary-agent `stream error ... AI_APICallError: Bad
+# Request` and still exited 0 within a second -- before the watchdog's first poll, and with rc 0 so
+# the rc-gated check below never looked. Forage then ran clean and empty for 3 days and starved the
+# idea pool. Anchored to opencode's own ERROR line for the PRIMARY stream (small=false; the title
+# agent's small=true errors are not fatal) and to non-retryable 4xx text, so a retried 5xx that
+# recovers cannot flip a good run.
+REJECT_RE='level=ERROR .*message="stream error" .*small=false .*AI_APICallError: (Bad Request|Unauthorized|Forbidden|Not Found)'
 
 "${FULL[@]}" >"$LOGFILE" 2>&1 &
 AGENT_PID=$!
@@ -168,6 +177,10 @@ kill "$WATCHDOG_PID" 2>/dev/null; wait "$WATCHDOG_PID" 2>/dev/null
 # A run the watchdog killed is a PROVIDER failure, not a timeout and not a model verdict. Report it
 # as 3 so a driver can tell "the provider is down" from "the agent ran and produced nothing".
 if [ "$rc" -ne 0 ] && grep -qE "$FATAL_RE" "$LOGFILE" 2>/dev/null; then
+  rc=3
+fi
+if [ "$rc" -eq 0 ] && grep -qE "$REJECT_RE" "$LOGFILE" 2>/dev/null; then
+  echo "run_agent.sh: the provider rejected the primary agent's request but the runtime exited 0; reporting failure" >>"$LOGFILE"
   rc=3
 fi
 cat "$LOGFILE"

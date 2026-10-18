@@ -215,3 +215,57 @@ def test_provider_block_is_detected_by_exit_code_not_by_scanning_ids():
             f"{driver.name} still matches a bare 429; ids contain those digits")
     assert checked == 3, (
         f"expected the three agent drivers to detect provider blocks, saw {checked}")
+
+
+# --- A provider rejection the runtime does not fail on (2026-10-16 forage outage) -------------
+
+# The exact lines opencode wrote when the subscription stopped serving the forage model.
+_REJECTED = (
+    'timestamp=2026-10-18T03:00:03.056Z level=ERROR run=2f82410a message="stream error" '
+    'providerID=openai modelID=m session.id=s small=false agent=forage mode=primary '
+    'error.error="AI_APICallError: Bad Request"\n'
+    'Error: Bad Request: {"detail":"The model is not supported when using Codex with a ChatGPT '
+    'account."}\n'
+)
+_TITLE_ONLY = (  # the title agent's own small=true failure is NOT a failed run
+    'timestamp=t level=ERROR run=r message="stream error" providerID=openai modelID=m '
+    'session.id=s small=true agent=title mode=primary error.error="AI_APICallError: Bad Request"\n'
+    "all good\n"
+)
+
+
+def _run_seam(
+    tmp_path: Path, runtime_output: str, runtime_rc: int = 0,
+) -> subprocess.CompletedProcess[str]:
+    import os
+    import stat
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "opencode"
+    fake.write_text(
+        "#!/usr/bin/env bash\ncat <<'EOF'\n" + runtime_output + f"EOF\nexit {runtime_rc}\n")
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    work = tmp_path / "work"
+    work.mkdir()
+    return subprocess.run(
+        [str(SEAM), "--mode", "forage", "--workdir", str(work), "--prompt-file", str(CONFIG),
+         "--log", str(tmp_path / "agent.log"), "--timeout", "60s"],
+        cwd=REPO, capture_output=True, text=True,
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+             "ALGUA_AGENT_SANDBOX": "none"},
+    )
+
+
+def test_a_rejected_primary_stream_fails_the_run_even_when_the_runtime_exits_zero(tmp_path: Path):
+    proc = _run_seam(tmp_path, _REJECTED, runtime_rc=0)
+    assert proc.returncode == 3, proc.stdout + proc.stderr
+
+
+def test_a_clean_run_still_exits_zero(tmp_path: Path):
+    proc = _run_seam(tmp_path, "did the work\n", runtime_rc=0)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_a_title_agent_error_alone_does_not_fail_the_run(tmp_path: Path):
+    proc = _run_seam(tmp_path, _TITLE_ONLY, runtime_rc=0)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
