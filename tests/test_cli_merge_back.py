@@ -155,7 +155,8 @@ def _wire(monkeypatch, *, gate: bool, git: _FakeGit, promote_calls: list,
             " VALUES (?,?,?,?)",
             (rec.id, 20_000.0, datetime.now(UTC).isoformat(), "agent"))
         conn.commit()
-        return {"admitted": [{"strategy": _STRAT, "capital": 20_000.0}], "queued": []}
+        return {"admitted": [{"strategy": _STRAT, "capital": 20_000.0}], "readmitted": [],
+                "queued": []}
 
     monkeypatch.setattr(paper_cmd, "run_intake", _fake_intake)
 
@@ -199,6 +200,8 @@ def test_green_gate_and_promote_allocates(monkeypatch):
     git = _FakeGit()
     promote_calls: list = []
     _wire(monkeypatch, gate=True, git=git, promote_calls=promote_calls)
+    synced: list[str] = []
+    monkeypatch.setattr("algua.registry.kb_sync.sync_kb_doc", synced.append)
 
     result = _invoke()
     assert result.exit_code == 0, result.output
@@ -207,6 +210,9 @@ def test_green_gate_and_promote_allocates(monkeypatch):
     assert payload["status"] == "promoted_allocated"
     assert payload["merged"] is True and payload["promoted"] is True
     assert payload["reverted"] is False
+    # Intake moved candidate -> paper in its own txn: the vault doc must follow (doctor's required
+    # knowledge_base check failed after the first real merge-back without this).
+    assert synced == [_STRAT]
     assert payload["attempt_token"] and payload["gate_id"]
     # Merge committed (bound to the gate-blessed tree sha) + pushed (remote CAS), never reverted.
     assert ("begin", "TIP") in git.calls and ("commit", _GATED_TREE) in git.calls

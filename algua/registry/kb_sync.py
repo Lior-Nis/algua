@@ -43,3 +43,13 @@ def sync_kb_doc(name: str) -> None:
         )
     except Exception as exc:  # noqa: BLE001 — vault curation must never break a promotion
         print(f"warning: kb doc sync for {name!r} failed: {exc}", file=sys.stderr)
+
+
+def sync_admitted(payload: dict) -> dict:
+    """Re-sync the kb doc of every strategy a ``run_intake`` result admitted or re-admitted, then
+    return the payload unchanged. ``run_intake`` moves candidate -> paper inside the caller's
+    registry transaction, so the vault doc cannot be synced there; call this AFTER that connection
+    has closed (same out-of-transaction rule as ``sync_kb_doc``, which this reuses)."""
+    for entry in (*payload["admitted"], *payload["readmitted"]):
+        sync_kb_doc(entry["strategy"])
+    return payload

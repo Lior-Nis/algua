@@ -106,7 +106,7 @@ from algua.registry.frozen_runtime import (
 from algua.registry.gating import load_gated_strategy
 from algua.registry.human_actor import authenticate_actor, canonical_run_context
 from algua.registry.intake import run_intake
-from algua.registry.kb_sync import sync_kb_doc
+from algua.registry.kb_sync import sync_admitted, sync_kb_doc
 from algua.registry.paper_runtime import still_paper_allocated as _still_paper_allocated
 from algua.registry.promote_run import promote_task
 from algua.registry.repository import StrategyNotFound
@@ -342,7 +342,7 @@ def intake(
     equity = float(_alpaca_broker_from_settings().account().equity)  # broker read BEFORE any txn
     with registry_conn() as conn:
         payload = run_intake(conn, equity=equity, max_concurrent=max_concurrent, actor=actor_enum)
-    emit(ok(payload))
+    emit(ok(sync_admitted(payload)))
 
 
 @paper_app.command('allocate')
@@ -563,12 +563,12 @@ def merge_back(
                 return SqliteStrategyRepository(conn).gate_exists_by_token(strategy, attempt_token)
 
         def intake() -> dict:
-            # Read paper equity READ-ONLY BEFORE opening the intake txn (no trading), then run the
-            # shared FIFO admit over its OWN short-lived registry_conn.
+            # Paper equity is read READ-ONLY before the txn (no trading); the doc sync runs after it.
             equity = float(_alpaca_broker_from_settings().account().equity)
             with registry_conn() as conn:
-                return run_intake(conn, equity=equity, max_concurrent=max_concurrent,
-                                   actor=actor_enum)
+                result = run_intake(conn, equity=equity, max_concurrent=max_concurrent,
+                                    actor=actor_enum)
+            return sync_admitted(result)
 
         def target_allocated(name: str) -> bool:
             # Did intake allocate THIS strategy (now paper WITH an active allocation)? FIFO intake

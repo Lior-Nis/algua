@@ -249,6 +249,30 @@ def test_intake_admits_all_candidates_when_book_empty(monkeypatch):
         assert _has_allocation(name)
 
 
+def _doc_stage(name: str) -> str | None:
+    from algua.config.settings import get_settings
+    from algua.knowledge.sync import strategy_doc_path
+    for line in strategy_doc_path(get_settings(), name).read_text().splitlines():
+        if line.startswith("stage:"):
+            return line.split(":", 1)[1].strip()
+    return None
+
+
+def test_intake_resyncs_the_kb_doc_of_every_admitted_strategy(monkeypatch):
+    """Intake moves candidate -> paper in its own transaction; the vault doc must follow it, or
+    `doctor`'s required knowledge_base check fails ('doc stage candidate != registry paper') after
+    every autonomous merge-back (observed with high52_proximity, 2026-10-18)."""
+    _to_candidate(_S1)
+    assert _doc_stage(_S1) != "paper"
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _FakeBroker(100_000.0))
+
+    result = runner.invoke(app, ["paper", "intake", "--max-concurrent", "5"])
+
+    assert result.exit_code == 0, result.output
+    assert _doc_stage(_S1) == "paper"
+
+
 # ---------------------------------------------------------------------------
 # Test 2: the concurrency cap binds — only the FIFO-first candidate is admitted
 # ---------------------------------------------------------------------------
