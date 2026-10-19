@@ -17,6 +17,11 @@ def attach_json(name: str, value: Any) -> None:
     )
 
 
+def attach_comparison(name: str, expected: Any, actual: Any) -> None:
+    """Attach expected and actual values together so the report remains reviewable on success."""
+    attach_json(name, {"expected": expected, "actual": actual})
+
+
 def attach_frame(name: str, frame: pd.DataFrame) -> None:
     """Attach a bounded scenario DataFrame as inspectable CSV."""
     allure.attach(

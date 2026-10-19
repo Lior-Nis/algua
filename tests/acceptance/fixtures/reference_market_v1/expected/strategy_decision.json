@@ -1,0 +1,17 @@
+{
+  "excluded_symbols": {
+    "GOOGL": "insufficient 60-bar history"
+  },
+  "scores": {
+    "AAPL": 0.6,
+    "AMZN": -0.3,
+    "MSFT": 0.0,
+    "NVDA": 0.3
+  },
+  "target_gross": 0.95,
+  "target_weights": {
+    "AAPL": 0.31666666666666665,
+    "MSFT": 0.31666666666666665,
+    "NVDA": 0.31666666666666665
+  }
+}
