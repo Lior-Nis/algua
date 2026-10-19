@@ -1,0 +1,48 @@
+{
+  "decision_session": "2026-03-27T00:00:00+00:00",
+  "execution_session": "2026-03-30T00:00:00+00:00",
+  "available_symbols": [
+    "AAPL",
+    "AMZN",
+    "GOOGL",
+    "MSFT",
+    "NVDA"
+  ],
+  "backtest_target_weights": {
+    "AAPL": 0.31666666666666665,
+    "AMZN": 0.0,
+    "GOOGL": 0.0,
+    "MSFT": 0.31666666666666665,
+    "NVDA": 0.31666666666666665
+  },
+  "paper_target_weights": {
+    "AAPL": 0.31666666666666665,
+    "AMZN": 0.0,
+    "GOOGL": 0.0,
+    "MSFT": 0.31666666666666665,
+    "NVDA": 0.31666666666666665
+  },
+  "paper_order_intents": [
+    {
+      "symbol": "AAPL",
+      "side": "buy",
+      "target_weight": 0.31666666666666665,
+      "decision_session": "2026-03-27T00:00:00+00:00"
+    },
+    {
+      "symbol": "MSFT",
+      "side": "buy",
+      "target_weight": 0.31666666666666665,
+      "decision_session": "2026-03-27T00:00:00+00:00"
+    },
+    {
+      "symbol": "NVDA",
+      "side": "buy",
+      "target_weight": 0.31666666666666665,
+      "decision_session": "2026-03-27T00:00:00+00:00"
+    }
+  ],
+  "paper_fill_sessions": [
+    "2026-03-30T00:00:00+00:00"
+  ]
+}

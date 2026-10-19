@@ -17,7 +17,8 @@ uv run algua doctor
 ## Human-reviewable acceptance dashboard
 
 The focused acceptance suite presents fixed inputs, actual outputs, and expected-versus-actual
-evidence for data ingestion, strategy decisions, and delayed backtest execution:
+evidence for data ingestion, strategy decisions, delayed backtest execution, and backtest/paper
+decision parity:
 
 ```bash
 npm install
