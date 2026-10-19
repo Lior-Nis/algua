@@ -213,6 +213,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "allure-pytest" },
     { name = "import-linter" },
     { name = "mypy" },
     { name = "pytest" },
@@ -237,10 +238,37 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "allure-pytest", specifier = ">=2.16.2" },
     { name = "import-linter", specifier = ">=2.0" },
     { name = "mypy", specifier = ">=1.10" },
     { name = "pytest", specifier = ">=8.2" },
     { name = "ruff", specifier = ">=0.5" },
+]
+
+[[package]]
+name = "allure-pytest"
+version = "2.16.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "allure-python-commons" },
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/12/e1/bf366fd5e97ac0d94584bbb5fdc0476741de8262ca401ac12b720451d7cf/allure_pytest-2.16.2.tar.gz", hash = "sha256:19912ee41c298e080ea4dbffaa3a2cbbc9ca93da14a664056192fc4609ec8eed", size = 17768, upload-time = "2026-09-29T14:06:31.457Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ba/57/29f41ee6f00e4d860f260b10d4672ffa781e97effe7d5c6c47fc1664c47b/allure_pytest-2.16.2-py3-none-any.whl", hash = "sha256:b16790e2f3749ffb2d3737ba443ba2eede8efba5226978847358fe2fd3e31303", size = 12496, upload-time = "2026-09-29T14:06:30.613Z" },
+]
+
+[[package]]
+name = "allure-python-commons"
+version = "2.16.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "attrs" },
+    { name = "pluggy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/84/91/2da69e393261aa9486d5c41543df4013a199d27911e27ec8de9da95e62d6/allure_python_commons-2.16.2.tar.gz", hash = "sha256:2df87131ae5cbd941e656a56261000189862ebcb71e4c4435879ee2a7c07daa1", size = 15780, upload-time = "2026-09-29T14:06:22.96Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8f/9c/9fdf49dd9652ae7bfade74e811a961b8461797a3325a6ba35652f3206013/allure_python_commons-2.16.2-py3-none-any.whl", hash = "sha256:0445f2745dfa8af70da1d3261cde2c83d44e7278c105f113ed050b61252f79bd", size = 16932, upload-time = "2026-09-29T14:06:21.875Z" },
 ]
 
 [[package]]

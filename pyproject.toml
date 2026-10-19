@@ -33,6 +33,7 @@ dev = [
     "ruff>=0.5",
     "mypy>=1.10",
     "import-linter>=2.0",
+    "allure-pytest>=2.16.2",
 ]
 
 [build-system]
@@ -62,6 +63,9 @@ warn_unused_ignores = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "acceptance: human-reviewable production-seam scenarios",
+]
 
 [tool.importlinter]
 root_package = "algua"
