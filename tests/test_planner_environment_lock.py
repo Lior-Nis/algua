@@ -251,7 +251,9 @@ def test_repository_lock_has_canonical_identities() -> None:
         for wheel in package.get("wheels", [])
     ]
 
-    assert len(locked) == 1900
+    # The acceptance dashboard adds the pure-Python allure-pytest and
+    # allure-python-commons wheels on top of the patched aiohttp lock.
+    assert len(locked) == 1902
     assert sorted(wheels) == sorted(locked)  # keyed by each exact raw URL
     assert all(planner_environment_lock.wheel_url_identity(url) == url for url in locked)
 
