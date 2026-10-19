@@ -1,0 +1,74 @@
+{
+  "decision_session": "2026-03-27T00:00:00+00:00",
+  "target_weights": {
+    "AAPL": 0.31666666666666665,
+    "MSFT": 0.31666666666666665,
+    "NVDA": 0.31666666666666665
+  },
+  "submitted_orders": [
+    {
+      "symbol": "AAPL",
+      "side": "buy",
+      "target_weight": 0.31666666666666665,
+      "client_order_id": "cross_sectional_momentum-2026-03-27-AAPL",
+      "broker_order_id": "paper-order-AAPL"
+    },
+    {
+      "symbol": "MSFT",
+      "side": "buy",
+      "target_weight": 0.31666666666666665,
+      "client_order_id": "cross_sectional_momentum-2026-03-27-MSFT",
+      "broker_order_id": "paper-order-MSFT"
+    },
+    {
+      "symbol": "NVDA",
+      "side": "buy",
+      "target_weight": 0.31666666666666665,
+      "client_order_id": "cross_sectional_momentum-2026-03-27-NVDA",
+      "broker_order_id": "paper-order-NVDA"
+    }
+  ],
+  "venue_fills": [
+    {
+      "id": "tick-fill-001",
+      "activity_type": "FILL",
+      "side": "buy",
+      "qty": "10.0",
+      "price": "100.00",
+      "symbol": "AAPL",
+      "order_id": "paper-order-AAPL",
+      "transaction_time": "2026-03-27T20:01:00Z"
+    },
+    {
+      "id": "tick-fill-002",
+      "activity_type": "FILL",
+      "side": "buy",
+      "qty": "10.0",
+      "price": "100.00",
+      "symbol": "MSFT",
+      "order_id": "paper-order-MSFT",
+      "transaction_time": "2026-03-27T20:01:00Z"
+    },
+    {
+      "id": "tick-fill-003",
+      "activity_type": "FILL",
+      "side": "buy",
+      "qty": "10.0",
+      "price": "100.00",
+      "symbol": "NVDA",
+      "order_id": "paper-order-NVDA",
+      "transaction_time": "2026-03-27T20:01:00Z"
+    }
+  ],
+  "persisted_positions": {
+    "AAPL": 10.0,
+    "MSFT": 10.0,
+    "NVDA": 10.0
+  },
+  "fill_cursor": "2026-03-27T20:02:00+00:00",
+  "reconciliation": {
+    "clean": true,
+    "halt": false,
+    "mismatches": []
+  }
+}
