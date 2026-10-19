@@ -40,6 +40,10 @@ The dashboard contains:
   named rejection reasons and proving that neither produces an intent.
 - `RISK-03`: a planner breach through the operational breach handler, showing the persistent kill
   switch and corresponding audit record.
+- `BROKER-01`: a deterministic ordinary Alpaca rejection through the public paper-broker adapter,
+  showing the exact submitted body and proving that no broker order ID is returned.
+- `BROKER-02`: duplicate client-order IDs through the same adapter, showing recovery of an active
+  venue order and the explicit skip of a duplicate whose venue order is already dead.
 
 Files under `fixtures/reference_market_v1/expected/` are approved examples, not snapshots to update
 automatically. Change them only after a human has reviewed the attached input and actual output and

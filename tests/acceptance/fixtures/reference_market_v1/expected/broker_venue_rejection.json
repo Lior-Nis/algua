@@ -1,0 +1,23 @@
+{
+  "submitted_order": {
+    "symbol": "AAPL",
+    "notional": "5000.00",
+    "side": "buy",
+    "type": "market",
+    "time_in_force": "day",
+    "client_order_id": "acceptance-20260327-AAPL"
+  },
+  "venue_response": {
+    "status_code": 422,
+    "body": {
+      "code": 40310000,
+      "message": "insufficient buying power"
+    }
+  },
+  "adapter_outcome": {
+    "status": "rejected",
+    "error_type": "BrokerError",
+    "error": "alpaca 422 on /v2/orders: {\"code\":40310000,\"message\":\"insufficient buying power\"}",
+    "returned_order_id": null
+  }
+}
