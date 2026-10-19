@@ -8,6 +8,7 @@ from typing import Any
 
 import allure
 import pytest
+from requests import ReadTimeout
 
 from algua.contracts.types import OrderIntent, Side
 from algua.execution import alpaca_broker
@@ -57,6 +58,21 @@ class _DuplicateVenue(_RejectingVenue):
     def get(self, url: str, **_kwargs: Any) -> _VenueResponse:
         self.lookups.append(url.rsplit("/", maxsplit=1)[-1])
         return _VenueResponse(200, self.existing_order)
+
+
+class _TimeoutThenDuplicateVenue(_DuplicateVenue):
+    def __init__(self, existing_order: dict[str, Any]) -> None:
+        super().__init__(existing_order)
+        self.attempts = 0
+
+    def post(self, _url: str, **kwargs: Any) -> _VenueResponse:
+        self.attempts += 1
+        if self.attempts == 1:
+            body = kwargs.get("json")
+            assert isinstance(body, dict)
+            self.posted.append(body)
+            raise ReadTimeout("response timed out after the venue accepted the order")
+        return super().post(_url, **kwargs)
 
 
 def _broker() -> AlpacaPaperBroker:
@@ -177,5 +193,51 @@ def test_broker_02_duplicate_id_distinguishes_active_from_dead_order(
         },
     )
     attach_comparison("Expected vs actual duplicate recovery", expected, actual)
+
+    assert actual == expected
+
+
+@pytest.mark.acceptance
+@allure.parent_suite("Algua acceptance")
+@allure.suite("Broker boundary")
+@allure.title("BROKER-03 — a timeout after acceptance recovers the landed order without doubling")
+def test_broker_03_timeout_after_acceptance_recovers_existing_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = json.loads(
+        (FIXTURE_ROOT / "expected" / "broker_timeout_recovery.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    client_order_id = "acceptance-timeout-AAPL"
+    existing_order = {
+        "id": "venue-order-timeout-recovery",
+        "client_order_id": client_order_id,
+        "symbol": "AAPL",
+        "side": "buy",
+        "status": "accepted",
+    }
+    venue = _TimeoutThenDuplicateVenue(existing_order)
+    monkeypatch.setattr(alpaca_broker, "requests", venue)
+
+    result = _broker().submit_sized(_intent(), _snapshot(), client_order_id)
+    actual = {
+        "first_attempt": "response timed out after venue acceptance",
+        "retry_response": {
+            "status_code": 422,
+            "message": "client_order_id must be unique",
+        },
+        "submitted_client_order_ids": [
+            body["client_order_id"] for body in venue.posted
+        ],
+        "recovered_order": existing_order,
+        "adapter_result": result,
+    }
+
+    attach_json("Given — ambiguous timeout then duplicate response", {
+        "first_attempt": actual["first_attempt"],
+        "retry_response": actual["retry_response"],
+    })
+    attach_comparison("Expected vs actual timeout recovery", expected, actual)
 
     assert actual == expected

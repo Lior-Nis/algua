@@ -1,0 +1,19 @@
+{
+  "first_attempt": "response timed out after venue acceptance",
+  "retry_response": {
+    "status_code": 422,
+    "message": "client_order_id must be unique"
+  },
+  "submitted_client_order_ids": [
+    "acceptance-timeout-AAPL",
+    "acceptance-timeout-AAPL"
+  ],
+  "recovered_order": {
+    "id": "venue-order-timeout-recovery",
+    "client_order_id": "acceptance-timeout-AAPL",
+    "symbol": "AAPL",
+    "side": "buy",
+    "status": "accepted"
+  },
+  "adapter_result": "venue-order-timeout-recovery"
+}
