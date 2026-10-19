@@ -5,46 +5,13 @@ import json
 from pathlib import Path
 
 import allure
-import pandas as pd
 import pytest
 
-from algua.data.schema import BAR_COLUMNS, validate_bars
 from algua.strategies.loader import load_strategy
 from tests.acceptance.evidence import attach_comparison, attach_frame, attach_json
+from tests.acceptance.reference_market import decision_bars
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "reference_market_v1"
-
-
-def _decision_bars() -> pd.DataFrame:
-    """Literal, inspectable paths: +60%, +30%, flat, -30%, and one short-history name."""
-    sessions = pd.bdate_range("2026-01-02", periods=61, tz="UTC", name="timestamp")
-    paths = {
-        "AAPL": [100.0 + i for i in range(61)],
-        "NVDA": [100.0 + 0.5 * i for i in range(61)],
-        "MSFT": [100.0] * 61,
-        "AMZN": [100.0 - 0.5 * i for i in range(61)],
-        "GOOGL": [None] * 30 + [80.0 + i for i in range(31)],
-    }
-    rows: list[dict[str, object]] = []
-    for symbol, closes in paths.items():
-        for timestamp, close in zip(sessions, closes, strict=True):
-            if close is None:
-                continue
-            rows.append(
-                {
-                    "timestamp": timestamp,
-                    "symbol": symbol,
-                    "open": close,
-                    "high": close,
-                    "low": close,
-                    "close": close,
-                    "adj_close": close,
-                    "volume": 1_000.0,
-                }
-            )
-    frame = pd.DataFrame(rows).sort_values(["timestamp", "symbol"]).set_index("timestamp")
-    return validate_bars(frame[BAR_COLUMNS], timeframe="1d")
-
 
 @pytest.mark.acceptance
 @allure.parent_suite("Algua acceptance")
@@ -54,7 +21,7 @@ def test_strat_01_obvious_paths_produce_approved_scores_and_weights() -> None:
     expected = json.loads(
         (FIXTURE_ROOT / "expected" / "strategy_decision.json").read_text(encoding="utf-8")
     )
-    bars = _decision_bars()
+    bars = decision_bars()
     strategy = load_strategy("cross_sectional_momentum", reload=True)
 
     scores = strategy.signal(bars)

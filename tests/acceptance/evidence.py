@@ -1,6 +1,7 @@
 """Small Allure attachment helpers for human-reviewable acceptance evidence."""
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
@@ -29,3 +30,9 @@ def attach_frame(name: str, frame: pd.DataFrame) -> None:
         name=name,
         attachment_type=allure.attachment_type.CSV,
     )
+
+
+def stable_frame_hash(frame: pd.DataFrame) -> str:
+    """Return a compact LEAN-style regression identity for a reviewable tabular result."""
+    payload = frame.to_csv(index=False, lineterminator="\n").encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
