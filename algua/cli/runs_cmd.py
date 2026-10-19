@@ -16,6 +16,7 @@ from algua.cli.errors import json_errors
 from algua.registry.db import registry_conn
 from algua.registry.run_views import run_detail_payload, run_list_payload, run_series_payload
 from algua.registry.store import SqliteStrategyRepository
+from algua.registry.strategy_board import strategy_board_payload
 
 #: `runs series` payload-size guardrail (#349 lesson): this is the one command whose output can
 #: carry a per-bar backtest return vector through a subprocess pipe that gets JSON-parsed. Cap the
@@ -49,6 +50,22 @@ def runs_list(
         repo = SqliteStrategyRepository(conn)
         payload = run_list_payload(
             repo, kind=kind, strategy=strategy, family=family, sort=sort, limit=limit)
+    emit(ok(payload))
+
+
+@runs_app.command("board")
+@json_errors
+def runs_board() -> None:
+    """The research strategy board: one row per registered strategy, joined to that identity's
+    latest gate run (newest by `created_at`, then run id — never the best), or `null` when it has
+    none.
+
+    Pure read, scalars only (no return series, gate decision or lineage). Lifecycle order is a
+    display order, never a ranking: the board must not feed a promotion decision.
+    """
+    with registry_conn() as conn:
+        repo = SqliteStrategyRepository(conn)
+        payload = strategy_board_payload(repo)
     emit(ok(payload))
 
 

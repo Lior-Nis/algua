@@ -294,6 +294,11 @@ def create_app() -> FastAPI:
             args.append(f"--sort={validate_sort(sort)}")
         return await run_cli(*args, ttl_s=60.0)
 
+    @app.get("/api/strategy-board")
+    async def strategy_board() -> dict[str, Any]:
+        # Read-only strategy board: takes no parameters, so nothing user-controlled reaches argv.
+        return await run_cli("runs", "board", ttl_s=60.0)
+
     @app.get("/api/runs/series")
     async def runs_series(ids: str) -> dict[str, Any]:
         """Registered BEFORE `/api/runs/{run_id}` so the literal path segment "series" is never
