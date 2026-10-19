@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ApiError, useFetch } from '../api'
+import type { UseFetchResult } from '../api'
 import { num, pct } from '../format'
 import type { ApiEnvelope, StrategyBoardGate, StrategyBoardPayload, StrategyBoardRow } from '../types'
 import PassMark from './PassMark'
@@ -43,7 +44,7 @@ function nullableFinite(v: unknown): boolean {
   return v === null || finite(v) !== null
 }
 
-function isBoardPayload(value: unknown): value is StrategyBoardPayload {
+export function isBoardPayload(value: unknown): value is StrategyBoardPayload {
   if (value === null || typeof value !== 'object') return false
   const candidate = value as Record<string, unknown>
   if (candidate.schema_version !== SCHEMA_VERSION || !Array.isArray(candidate.rows)) return false
@@ -114,8 +115,17 @@ export function orderBoardRows(
  */
 export default function StrategyBoard() {
   const query = useFetch<ApiEnvelope<StrategyBoardPayload>>('/api/strategy-board')
+  return <StrategyBoardView query={query} />
+}
+
+export function StrategyBoardView({
+  query,
+}: {
+  query: UseFetchResult<ApiEnvelope<StrategyBoardPayload>>
+}) {
   const [stage, setStage] = useState<string | null>(null)
   const [sortKey, setSortKey] = useState<MetricKey | null>(null)
+  const [controlsOpen, setControlsOpen] = useState(false)
 
   const board = isBoardPayload(query.data?.data) ? query.data.data : undefined
 
@@ -174,49 +184,65 @@ export default function StrategyBoard() {
       </div>
       <div className="dim-note">oos = holdout sample · wf = walk-forward windows</div>
 
-      <div className="chip-row" style={{ margin: '8px 0' }} role="group" aria-label="strategy stage">
-        <button
-          type="button"
-          className={activeStage === null ? 'filter-chip active' : 'filter-chip'}
-          aria-pressed={activeStage === null}
-          onClick={() => setStage(null)}
-        >
-          all <span className="num">{board.count}</span>
-        </button>
-        {stages.map((s) => (
-          <button
-            key={s}
-            type="button"
-            className={s === activeStage ? 'filter-chip active' : 'filter-chip'}
-            aria-pressed={s === activeStage}
-            onClick={() => setStage(s === activeStage ? null : s)}
-          >
-            {s} <span className="num">{board.rows.filter((r) => r.stage === s).length}</span>
-          </button>
-        ))}
-      </div>
+      <button
+        type="button"
+        className="board-controls-toggle"
+        aria-expanded={controlsOpen}
+        aria-controls="board-controls"
+        onClick={() => setControlsOpen((open) => !open)}
+      >
+        <span>board controls</span>
+        <span className="num">{activeStage === null ? 'all stages' : activeStage}</span>
+        <span className="num">{sortOption?.label ?? 'lifecycle'}</span>
+      </button>
 
-      <div className="chip-row" style={{ marginBottom: 8 }} role="group" aria-label="comparison order">
-        <button
-          type="button"
-          className={sortKey === null ? 'filter-chip active' : 'filter-chip'}
-          aria-pressed={sortKey === null}
-          onClick={() => setSortKey(null)}
-        >
-          lifecycle
-        </button>
-        {SORT_OPTIONS.map((opt) => (
+      {controlsOpen && (
+        <div id="board-controls" className="board-controls-panel">
+          <div className="chip-row" role="group" aria-label="strategy stage">
           <button
-            key={opt.key}
             type="button"
-            className={opt.key === sortKey ? 'filter-chip active' : 'filter-chip'}
-            aria-pressed={opt.key === sortKey}
-            onClick={() => setSortKey(opt.key === sortKey ? null : opt.key)}
+            className={activeStage === null ? 'filter-chip active' : 'filter-chip'}
+            aria-pressed={activeStage === null}
+            onClick={() => setStage(null)}
           >
-            {opt.label}
+            all <span className="num">{board.count}</span>
           </button>
-        ))}
-      </div>
+          {stages.map((s) => (
+            <button
+              key={s}
+              type="button"
+              className={s === activeStage ? 'filter-chip active' : 'filter-chip'}
+              aria-pressed={s === activeStage}
+              onClick={() => setStage(s === activeStage ? null : s)}
+            >
+              {s} <span className="num">{board.rows.filter((r) => r.stage === s).length}</span>
+            </button>
+          ))}
+          </div>
+
+          <div className="chip-row" role="group" aria-label="comparison order">
+          <button
+            type="button"
+            className={sortKey === null ? 'filter-chip active' : 'filter-chip'}
+            aria-pressed={sortKey === null}
+            onClick={() => setSortKey(null)}
+          >
+            lifecycle
+          </button>
+          {SORT_OPTIONS.map((opt) => (
+            <button
+              key={opt.key}
+              type="button"
+              className={opt.key === sortKey ? 'filter-chip active' : 'filter-chip'}
+              aria-pressed={opt.key === sortKey}
+              onClick={() => setSortKey(opt.key === sortKey ? null : opt.key)}
+            >
+              {opt.label}
+            </button>
+          ))}
+          </div>
+        </div>
+      )}
       {sortKey !== null && (
         <div className="dim-note" style={{ marginBottom: 8 }}>
           exploratory order only — not a promotion signal

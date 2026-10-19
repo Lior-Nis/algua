@@ -2,7 +2,9 @@ import { useEffect } from 'react'
 import { useParams } from 'react-router-dom'
 import { ApiError, formatTimestamp, useFetch } from '../api'
 import { useSetFetchedAt } from '../App'
-import EquityChart from '../components/EquityChart'
+import EquityChart, { drawableSeriesPointCount } from '../components/EquityChart'
+import EvidenceDisclosure from '../components/EvidenceDisclosure'
+import EvidenceStatus from '../components/EvidenceStatus'
 import GateBulletCard from '../components/GateBulletCard'
 import HealthBadge, { healthColor } from '../components/HealthBadge'
 import MetricTile from '../components/MetricTile'
@@ -19,6 +21,8 @@ import type {
   StrategyDetailResponse,
   Transition,
 } from '../types'
+import { deriveStrategyDecision } from './strategyDecision'
+import type { SeriesEvidenceState } from './strategyDecision'
 
 export default function StrategyDetail() {
   const { name = '' } = useParams()
@@ -56,6 +60,33 @@ export default function StrategyDetail() {
   const paper = d.paper
   const gates = d.gates
   const partErrors = d.part_errors ?? {}
+  const detailStale = d.stale || detail.error !== null
+  const seriesPayload = series.data?.data
+  const paperRows = seriesPayload?.series.paper ?? []
+  const liveRows = seriesPayload?.series.live ?? []
+  const rawSeriesCount = paperRows.length + liveRows.length
+  const drawableByLane = [
+    drawableSeriesPointCount(seriesPayload?.series.paper ?? null),
+    drawableSeriesPointCount(seriesPayload?.series.live ?? null),
+  ]
+  const seriesThinState: 'empty' | 'incomplete' | 'current' = rawSeriesCount === 0
+    ? 'empty'
+    : drawableByLane.some((count) => count >= 2)
+      ? 'current'
+      : 'incomplete'
+  const seriesStale = series.data !== undefined && (series.data.stale || series.error !== null)
+  const seriesState: SeriesEvidenceState = series.data !== undefined
+    ? seriesStale
+      ? 'stale'
+      : seriesThinState
+    : series.loading
+      ? 'loading'
+      : 'failed'
+  const decision = deriveStrategyDecision(
+    detailStale === d.stale ? d : { ...d, stale: true },
+    seriesState,
+  )
+  const seriesSummary = seriesStale ? `stale · ${seriesThinState}` : seriesState
   const metaBits = [
     registry?.family ?? null,
     registry && registry.tags.length > 0 ? registry.tags.join(', ') : null,
@@ -63,17 +94,7 @@ export default function StrategyDetail() {
   ].filter((x): x is string => x !== null)
 
   return (
-    <>
-      {d.stale && (
-        <section className="banner-stale">
-          <span className="micro-label">stale data</span>
-          <div>
-            showing cached data from {formatTimestamp(d.fetched_at)}
-            {d.last_error_code != null && <>, last error {d.last_error_code}</>}
-          </div>
-        </section>
-      )}
-
+    <main className="decision-page strategy-detail-page">
       <section className="detail-header">
         <div className="detail-title-row">
           <h1 className="detail-name">{d.strategy}</h1>
@@ -85,47 +106,92 @@ export default function StrategyDetail() {
         )}
       </section>
 
-      {partErrors.paper != null && (
-        <section className="banner-stale">
-          <span className="micro-label">degraded</span>
-          <div>paper state unavailable: {partErrors.paper}</div>
-        </section>
-      )}
-      {partErrors.gates != null && (
-        <section className="banner-stale">
-          <span className="micro-label">degraded</span>
-          <div>gate history unavailable: {partErrors.gates}</div>
-        </section>
-      )}
-
-      {series.data !== undefined ? (
-        <EquityChart payload={series.data.data} />
-      ) : series.loading ? (
-        <div className="skeleton-block" style={{ height: 220 }} aria-hidden="true" />
-      ) : (
-        <section className="banner-stale">
-          <span className="micro-label">degraded</span>
+      <section
+        className="decision-report strategy-decision"
+        data-state={decision.tone}
+        aria-labelledby="strategy-decision-heading"
+      >
+        <div className="decision-report-head">
           <div>
-            equity series unavailable
-            {series.error instanceof ApiError && series.error.code !== null
-              ? `: ${series.error.code}`
-              : ''}
+            <h2 id="strategy-decision-heading" className="micro-label">trader decision</h2>
+            <div className="decision-state">{decision.state}</div>
           </div>
-        </section>
-      )}
+          <div className="decision-consequence">{decision.consequence}</div>
+        </div>
+        <div className="decision-facts">
+          <div><span className="micro-label">reason</span><span>{decision.reason}</span></div>
+          <div>
+            <span className="micro-label">next checkpoint</span>
+            <span>{decision.nextCheckpoint}</span>
+          </div>
+        </div>
+        {detailStale && (
+          <div className="decision-raw-line">
+            cached {formatTimestamp(d.fetched_at)}
+            {(d.last_error_code != null || detail.error !== null) && (
+              <> · last error {d.last_error_code ?? detail.error?.message}</>
+            )}
+          </div>
+        )}
+      </section>
 
-      <ReturnOverlay strategy={d.strategy} family={registry?.family ?? null} />
+      <div className="strategy-evidence-grid">
+        <EvidenceDisclosure
+          title="performance evidence"
+          summary={`${seriesSummary}${paper !== null ? ` · paper ${paper.health}` : ''}`}
+        >
+          <EquityChart
+            payload={series.data?.data}
+            loading={series.loading}
+            error={series.error}
+            stale={seriesStale}
+            onRetry={series.refetch}
+          />
+          <ReturnOverlay strategy={d.strategy} family={registry?.family ?? null} />
+          {paper !== null && <PaperTiles paper={paper} />}
+          {partErrors.paper != null && (
+            <EvidenceStatus title="paper state" state="failed" detail={partErrors.paper} />
+          )}
+        </EvidenceDisclosure>
 
-      {paper !== null && <PaperTiles paper={paper} />}
+        <EvidenceDisclosure
+          title="research evidence"
+          summary={gates === null ? 'unavailable' : `${gates.gate_evaluations.length} research gates`}
+        >
+          {gates !== null ? (
+            <GatesSection gates={gates} limit={d.gates_limit} strategy={d.strategy} />
+          ) : (
+            <EvidenceStatus
+              title="gate history"
+              state="failed"
+              detail={partErrors.gates ?? 'unavailable'}
+            />
+          )}
+        </EvidenceDisclosure>
 
-      {gates !== null && <GatesSection gates={gates} limit={d.gates_limit} strategy={d.strategy} />}
-
-      {registry && registry.transitions.length > 0 && (
-        <TransitionsTimeline transitions={registry.transitions} />
-      )}
-
-      {paper !== null && paper.recent_orders.length > 0 && <OrdersTable paper={paper} />}
-    </>
+        <EvidenceDisclosure
+          title="raw provenance"
+          summary={`${registry?.transitions.length ?? 0} transitions · ${paper === null ? 'orders unavailable' : `${paper.recent_orders.length} orders`}`}
+        >
+          {registry && registry.transitions.length > 0 ? (
+            <TransitionsTimeline transitions={registry.transitions} />
+          ) : (
+            <EvidenceStatus title="transition history" state="empty" detail="no recorded transitions" />
+          )}
+          {paper !== null && paper.recent_orders.length > 0 ? (
+            <OrdersTable paper={paper} />
+          ) : paper === null ? (
+            <EvidenceStatus
+              title="recent orders"
+              state="failed"
+              detail={partErrors.paper ?? 'paper rollup unavailable'}
+            />
+          ) : (
+            <EvidenceStatus title="recent orders" state="empty" detail="no recorded orders" />
+          )}
+        </EvidenceDisclosure>
+      </div>
+    </main>
   )
 }
 

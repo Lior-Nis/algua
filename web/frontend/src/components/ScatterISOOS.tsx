@@ -1,6 +1,8 @@
 import { runsUrl, useFetch } from '../api'
+import type { UseFetchResult } from '../api'
 import type { ApiEnvelope, RunRow, RunsListPayload } from '../types'
 import ChartFrame from './ChartFrame'
+import EvidenceStatus from './EvidenceStatus'
 
 const HEIGHT = 240 // ChartFrame body height — fixed whether empty or populated.
 
@@ -136,16 +138,55 @@ function fmt(v: number): string {
 }
 
 export default function ScatterISOOS() {
-  const { data } = useFetch<ApiEnvelope<RunsListPayload>>(runsUrl({ kind: 'gate' }))
+  const query = useFetch<ApiEnvelope<RunsListPayload>>(runsUrl({ kind: 'gate' }))
+  return <ScatterISOOSView query={query} />
+}
+
+export function ScatterISOOSView({
+  query,
+}: {
+  query: UseFetchResult<ApiEnvelope<RunsListPayload>>
+}) {
+  const { data } = query
   const runs = data?.data.runs ?? []
   const geometry = buildScatterGeometry(runs)
   const isEmpty = geometry.points.length === 0
+  const stale = data !== undefined && (data.stale || query.error !== null)
 
-  const emptyLabel =
-    runs.length === 0
-      ? 'no gate runs recorded yet'
-      : `${geometry.excludedCount} gate run${geometry.excludedCount === 1 ? '' : 's'} recorded, ` +
-        'none with both IS and OOS metrics yet'
+  if (data === undefined) {
+    return query.loading ? (
+      <EvidenceStatus title="is vs oos" state="loading" detail="waiting for gate evidence" />
+    ) : (
+      <EvidenceStatus
+        title="is vs oos"
+        state="failed"
+        detail={query.error?.message ?? 'gate evidence unavailable'}
+        onRetry={query.refetch}
+      />
+    )
+  }
+
+  if (runs.length === 0) {
+    return (
+      <EvidenceStatus
+        title="is vs oos"
+        state={stale ? 'stale' : 'empty'}
+        detail={stale ? 'cached gate evidence is empty — no gate runs recorded' : 'no gate runs recorded yet'}
+        onRetry={stale ? query.refetch : undefined}
+      />
+    )
+  }
+
+  if (isEmpty) {
+    return (
+      <EvidenceStatus
+        title="is vs oos"
+        state={stale ? 'stale' : 'incomplete'}
+        detail={`${stale ? 'cached gate evidence is incomplete — ' : ''}${geometry.excludedCount} gate run${geometry.excludedCount === 1 ? '' : 's'} lack both IS and OOS metrics`}
+        onRetry={stale ? query.refetch : undefined}
+      />
+    )
+  }
 
   const excludedNote =
     geometry.excludedCount > 0
@@ -154,7 +195,16 @@ export default function ScatterISOOS() {
       : null
 
   return (
-    <ChartFrame title="is vs oos" isEmpty={isEmpty} emptyLabel={emptyLabel} height={HEIGHT}>
+    <>
+      {stale && (
+        <EvidenceStatus
+          title="is vs oos"
+          state="stale"
+          detail="showing last successful gate evidence"
+          onRetry={query.refetch}
+        />
+      )}
+      <ChartFrame title="is vs oos" isEmpty={false} emptyLabel="" height={HEIGHT}>
       <div className="scatter-body">
         <svg
           className="scatter-svg"
@@ -227,6 +277,7 @@ export default function ScatterISOOS() {
           <div className="chart-footnote">{excludedNote}</div>
         )}
       </div>
-    </ChartFrame>
+      </ChartFrame>
+    </>
   )
 }

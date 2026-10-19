@@ -4,6 +4,7 @@ import 'uplot/dist/uPlot.min.css'
 import { cssColor } from '../chartColors'
 import { parseUtc } from '../format'
 import type { Lane, SeriesPayload, SeriesRow } from '../types'
+import EvidenceStatus from './EvidenceStatus'
 
 const HEIGHT = 220
 const LANES: Lane[] = ['live', 'paper']
@@ -40,29 +41,75 @@ function normalize(rows: SeriesRow[]): Normalized {
   }
 }
 
-export default function EquityChart({ payload }: { payload: SeriesPayload }) {
-  // Lanes the backend actually returned (null = not requested / not present).
-  const available = LANES.filter((l) => {
-    const rows = payload.series[l]
-    return rows !== null && rows.length > 0
-  })
-  const showPicker = payload.series.paper !== null && payload.series.live !== null
-    && (payload.series.paper?.length ?? 0) > 0 && (payload.series.live?.length ?? 0) > 0
+export function drawableSeriesPointCount(rows: SeriesRow[] | null): number {
+  return rows === null ? 0 : normalize(rows).ts.length
+}
 
-  const [lane, setLane] = useState<Lane>(available[0] ?? 'paper')
-  const activeLane: Lane = available.includes(lane) ? lane : (available[0] ?? 'paper')
+export default function EquityChart({
+  payload,
+  loading = false,
+  error = null,
+  stale = false,
+  onRetry,
+}: {
+  payload?: SeriesPayload
+  loading?: boolean
+  error?: Error | null
+  stale?: boolean
+  onRetry?: () => void
+}) {
+  const series = payload?.series ?? { paper: null, live: null }
+  const normalized = useMemo(() => ({
+    live: normalize(series.live ?? []),
+    paper: normalize(series.paper ?? []),
+  }), [series.live, series.paper])
+  // A lane is available only when it has at least one point that can actually be plotted. Raw
+  // rows with invalid timestamps must not steal selection from a drawable lane.
+  const available = LANES.filter((l) => normalized[l].ts.length > 0)
+  const showPicker = available.length > 1
 
-  const rows = payload.series[activeLane] ?? []
-  const data = useMemo(() => normalize(rows), [rows])
+  const [lane, setLane] = useState<Lane | null>(null)
+  const firstPresentLane = LANES.find((candidate) => series[candidate] !== null) ?? 'paper'
+  const activeLane: Lane = lane !== null && available.includes(lane)
+    ? lane
+    : (available[0] ?? firstPresentLane)
+
+  const data = normalized[activeLane]
+  const cached = payload !== undefined && (stale || error !== null)
 
   const footnotes: string[] = []
   // Truncation MUST be visible: `fleet series` keeps only the newest N per lane, so a
   // truncated curve's left edge is a cut, not the strategy's first tick. Silently
   // clipping it reads as "this is the whole history".
-  if (payload.truncated[activeLane] === true) footnotes.push('newest ticks only (truncated)')
-  if (payload.n_legacy_excluded > 0) footnotes.push(`${payload.n_legacy_excluded} legacy excluded`)
-  if (payload.n_unparseable > 0) footnotes.push(`${payload.n_unparseable} unparseable`)
-  if (payload.n_invalid_lane > 0) footnotes.push(`${payload.n_invalid_lane} invalid lane`)
+  if (payload?.truncated[activeLane] === true) footnotes.push('newest ticks only (truncated)')
+  if ((payload?.n_legacy_excluded ?? 0) > 0) footnotes.push(`${payload!.n_legacy_excluded} legacy excluded`)
+  if ((payload?.n_unparseable ?? 0) > 0) footnotes.push(`${payload!.n_unparseable} unparseable`)
+  if ((payload?.n_invalid_lane ?? 0) > 0) footnotes.push(`${payload!.n_invalid_lane} invalid lane`)
+
+  let status: React.ReactNode = null
+  if (payload === undefined) {
+    status = loading
+      ? <EvidenceStatus title="equity" state="loading" detail="loading tick history" />
+      : <EvidenceStatus title="equity" state="failed" detail={error?.message ?? 'tick history unavailable'} onRetry={onRetry} />
+  } else if ((series.paper?.length ?? 0) + (series.live?.length ?? 0) === 0) {
+    status = (
+      <EvidenceStatus
+        title="equity"
+        state={cached ? 'stale' : 'empty'}
+        detail={cached ? 'cached tick history is empty — no ticks were recorded' : 'no tick history recorded'}
+        onRetry={cached ? onRetry : undefined}
+      />
+    )
+  } else if (data.ts.length < 2) {
+    status = (
+      <EvidenceStatus
+        title={`equity — ${activeLane}`}
+        state={cached ? 'stale' : 'incomplete'}
+        detail={`${cached ? 'cached tick history is incomplete — ' : ''}fewer than two valid ticks; no honest curve can be drawn`}
+        onRetry={cached ? onRetry : undefined}
+      />
+    )
+  }
 
   return (
     <section className="panel chart-panel">
@@ -83,11 +130,10 @@ export default function EquityChart({ payload }: { payload: SeriesPayload }) {
           </div>
         )}
       </div>
-      {data.ts.length < 2 ? (
-        <div className="chart-placeholder">awaiting tick history</div>
-      ) : (
-        <Plot data={data} />
+      {cached && status === null && (
+        <EvidenceStatus title="equity" state="stale" detail="showing cached tick history while refresh is unavailable" onRetry={onRetry} />
       )}
+      {status ?? <Plot data={data} />}
       {footnotes.length > 0 && <div className="chart-footnote">{footnotes.join(' · ')}</div>}
     </section>
   )

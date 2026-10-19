@@ -39,7 +39,7 @@
  * back the FIRST render's data on the second render, confirming the leak this guards against is
  * real (see task-3-report.md). `vi.useRealTimers()` after each test keeps the fake clock from
  * bleeding into unrelated assertions. */
-import { cleanup, render, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { resolveFixture } from '../fixtures'
@@ -77,16 +77,15 @@ import StrategyDetail from '../screens/StrategyDetail'
 export const BUDGETS: Record<string, { min: number; max: number; marks: number }> = {
   Now: { min: 29, max: 63, marks: 0 },
   Money: { min: 43, max: 94, marks: 0 },
-  // Raised 206 -> 322 when the strategy board replaced the ranked run list: measured at 292
-  // words against the 14-strategy fixture, plus the documented 10% ceiling. The floor is half
-  // that measured count. Marks stay 12: the scatter plus one sparkline per gated row.
-  Research: { min: 146, max: 322, marks: 12 },
+  // The decision layer and collapsed board/venue controls reduce the persistent view from 292
+  // to 242 words against the 14-strategy fixture. The ceiling retains the documented 10% margin
+  // and the floor remains half the measured count. Marks stay 12: scatter + board sparklines.
+  Research: { min: 121, max: 267, marks: 12 },
   Fleet: { min: 38, max: 84, marks: 0 },
-  // The deepest prose surface (spec §4.3 says to trim it) — and, until this fix, the one route
-  // `verify-viewport.mjs` covered that this file did not. Rendered standalone below via its own
-  // MemoryRouter+Route (it reads `useParams()`, unlike the other four screens). Measured 204
-  // words / 4 marks (EquityChart's canvas, GateBulletCard's and TrialDistribution's svgs).
-  StrategyDetail: { min: 102, max: 225, marks: 4 },
+  // The collapsed decision report is intentionally terse; supporting/raw evidence is mounted
+  // only after explicit disclosure. Measured at 57 words, with a 10% ceiling. Expanded evidence
+  // has its own assertion below so lowering the persistent-copy budget cannot hide lost detail.
+  StrategyDetail: { min: 28, max: 63, marks: 0 },
 }
 
 function mockFetch(overrides: Record<string, unknown> = {}) {
@@ -226,6 +225,21 @@ describe('StrategyDetail stays inside its word budget', () => {
     await waitFor(() => expect(container.textContent).not.toBe(''))
     const count = marks(container as HTMLElement)
     expect(count).toBeGreaterThanOrEqual(minMarks)
+  })
+
+  it('keeps the dense evidence and visual marks reachable after explicit expansion', async () => {
+    const { container } = renderDetail()
+    await waitFor(() => expect(container.textContent).not.toBe(''))
+    const collapsedWords = words(container as HTMLElement)
+
+    fireEvent.click(screen.getByRole('button', { name: /performance evidence/i }))
+    fireEvent.click(screen.getByRole('button', { name: /research evidence/i }))
+    fireEvent.click(screen.getByRole('button', { name: /raw provenance/i }))
+
+    await waitFor(() => expect(marks(container as HTMLElement)).toBeGreaterThanOrEqual(4))
+    expect(words(container as HTMLElement)).toBeGreaterThan(collapsedWords)
+    expect(container.textContent).toContain('holdout_sharpe')
+    expect(container.textContent).toContain('transitions')
   })
 })
 

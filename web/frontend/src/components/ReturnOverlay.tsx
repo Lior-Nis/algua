@@ -13,6 +13,7 @@ import type {
   RunsListPayload,
 } from '../types'
 import ChartFrame from './ChartFrame'
+import EvidenceStatus from './EvidenceStatus'
 
 // ChartFrame's fixed height for THIS chart, whether empty, focus+context, or small multiples —
 // small multiples divides this same budget across panels rather than growing the frame, so the
@@ -548,13 +549,6 @@ export default function ReturnOverlay({
     [backtestRuns, seriesById, gateRun, gateDetail, strategy],
   )
 
-  const isEmpty = geometry.mode === 'empty'
-  const emptyLabel =
-    backtestRuns.length === 0
-      ? 'no backtest runs recorded yet'
-      : `${geometry.excludedCurveCount} backtest run${geometry.excludedCurveCount === 1 ? '' : 's'} ` +
-        'recorded, none with a persisted return series yet'
-
   // Fix round 2: nothing on screen said these were FAMILY SIBLINGS, not this strategy's own
   // history — the title just says "return overlay" and the only signal was a strategy name at
   // each line end. Fix round 3: every one of these is read off the PLOTTED curves, never off the
@@ -574,38 +568,121 @@ export default function ReturnOverlay({
   // arithmetic test provably consume the same number.
   const panelHeight = computeSmallMultiplesPanelHeight(n, SMALL_MULTIPLES_PLOT_BUDGET)
 
+  if (backtestFetch.data === undefined) {
+    return backtestFetch.loading
+      ? <EvidenceStatus title="return overlay" state="loading" detail="loading backtest runs" />
+      : <EvidenceStatus title="return overlay" state="failed" detail={backtestFetch.error?.message ?? 'backtest runs unavailable'} onRetry={backtestFetch.refetch} />
+  }
+  const backtestStale = backtestFetch.data.stale || backtestFetch.error !== null
+  if (backtestRuns.length === 0) {
+    return (
+      <EvidenceStatus
+        title="return overlay"
+        state={backtestStale ? 'stale' : 'empty'}
+        detail={backtestStale ? 'cached return evidence is empty — no backtest runs were recorded' : 'no backtest runs recorded yet'}
+        onRetry={backtestStale ? backtestFetch.refetch : undefined}
+      />
+    )
+  }
+  if (seriesFetch.data === undefined) {
+    return seriesFetch.error === null
+      ? <EvidenceStatus title="return overlay" state="loading" detail="loading persisted return series" />
+      : <EvidenceStatus title="return overlay" state="failed" detail={seriesFetch.error.message} onRetry={seriesFetch.refetch} />
+  }
+  const seriesStale = seriesFetch.data.stale || seriesFetch.error !== null
+  const primaryStale = backtestStale || seriesStale
+  const retryPrimary = () => {
+    if (backtestStale) backtestFetch.refetch()
+    if (seriesStale) seriesFetch.refetch()
+  }
+  if (geometry.mode === 'empty') {
+    const runWord = geometry.excludedCurveCount === 1 ? 'run' : 'runs'
+    return (
+      <EvidenceStatus
+        title="return overlay"
+        state={primaryStale ? 'stale' : 'incomplete'}
+        detail={`${primaryStale ? 'cached return evidence is incomplete — ' : ''}${geometry.excludedCurveCount} backtest ${runWord} recorded, none with a persisted usable return series`}
+        onRetry={primaryStale ? retryPrimary : undefined}
+      />
+    )
+  }
+
+  let holdoutStatus: React.ReactNode = null
+  if (gateListFetch.data === undefined) {
+    holdoutStatus = gateListFetch.error !== null
+      ? <EvidenceStatus title="holdout context" state="failed" detail={gateListFetch.error.message} onRetry={gateListFetch.refetch} />
+      : <EvidenceStatus title="holdout context" state="loading" detail="loading gate context" />
+  } else if (gateRun === null) {
+    if (gateListFetch.data.stale || gateListFetch.error !== null) {
+      holdoutStatus = (
+        <EvidenceStatus
+          title="holdout context"
+          state="stale"
+          detail="cached holdout context is empty — no gate run was returned"
+          onRetry={gateListFetch.refetch}
+        />
+      )
+    }
+  } else if (gateDetailFetch.data === undefined) {
+    holdoutStatus = gateDetailFetch.error !== null
+      ? <EvidenceStatus title="holdout context" state="failed" detail={gateDetailFetch.error.message} onRetry={gateDetailFetch.refetch} />
+      : <EvidenceStatus title="holdout context" state="loading" detail="loading gate detail" />
+  } else {
+    const gateListStale = gateListFetch.data.stale || gateListFetch.error !== null
+    const gateDetailStale = gateDetailFetch.data.stale || gateDetailFetch.error !== null
+    if (gateListStale || gateDetailStale) {
+      const retryHoldout = () => {
+        if (gateListStale) gateListFetch.refetch()
+        if (gateDetailStale) gateDetailFetch.refetch()
+      }
+      holdoutStatus = (
+        <EvidenceStatus
+          title="holdout context"
+          state="stale"
+          detail="return curves are current; showing cached gate context"
+          onRetry={retryHoldout}
+        />
+      )
+    }
+  }
+
   return (
-    <ChartFrame title="return overlay" isEmpty={isEmpty} emptyLabel={emptyLabel} height={HEIGHT}>
-      {showCaption && (
-        <div className="overlay-family-caption" data-testid="overlay-family-caption">
-          {buildFamilyCaption(family, siblingCount, strategy, focusPlotted, bandDrawn)}
-        </div>
+    <>
+      {primaryStale && (
+        <EvidenceStatus title="return overlay" state="stale" detail="showing cached return evidence" onRetry={retryPrimary} />
       )}
-      {geometry.mode === 'overlay' ? (
-        <Panel curves={geometry.curves} region={geometry.region} height={overlayBudget} />
-      ) : (
-        <div className="overlay-small-multiples">
-          {geometry.curves.map((c, i) => (
-            <div
-              key={c.runId}
-              data-testid="overlay-panel"
-              style={{ height: panelHeight, marginBottom: i < n - 1 ? PANEL_GAP : 0 }}
-            >
-              {/* The region belongs to the VIEWED strategy's own gate evaluation, so it must
-                  land on the FOCUS panel specifically — not whichever curve the family query
-                  happened to list first (newest-first order, unrelated to role). */}
-              <Panel
-                curves={[c]}
-                region={c.role === 'focus' ? geometry.region : null}
-                height={panelHeight}
-                showXAxis={i === n - 1}
-                yAxisSize={SMALL_MULT_Y_AXIS_SIZE}
-                xAxisSize={SMALL_MULT_X_AXIS_SIZE}
-              />
-            </div>
-          ))}
-        </div>
-      )}
-    </ChartFrame>
+      {holdoutStatus}
+      <ChartFrame title="return overlay" isEmpty={false} emptyLabel="" height={HEIGHT}>
+        {showCaption && (
+          <div className="overlay-family-caption" data-testid="overlay-family-caption">
+            {buildFamilyCaption(family, siblingCount, strategy, focusPlotted, bandDrawn)}
+          </div>
+        )}
+        {geometry.mode === 'overlay' ? (
+          <Panel curves={geometry.curves} region={geometry.region} height={overlayBudget} />
+        ) : (
+          <div className="overlay-small-multiples">
+            {geometry.curves.map((c, i) => (
+              <div
+                key={c.runId}
+                data-testid="overlay-panel"
+                style={{ height: panelHeight, marginBottom: i < n - 1 ? PANEL_GAP : 0 }}
+              >
+                {/* The region belongs to the VIEWED strategy's own gate evaluation, so it must
+                    land on the FOCUS panel specifically — not whichever panel is listed first. */}
+                <Panel
+                  curves={[c]}
+                  region={c.role === 'focus' ? geometry.region : null}
+                  height={panelHeight}
+                  showXAxis={i === n - 1}
+                  yAxisSize={SMALL_MULT_Y_AXIS_SIZE}
+                  xAxisSize={SMALL_MULT_X_AXIS_SIZE}
+                />
+              </div>
+            ))}
+          </div>
+        )}
+      </ChartFrame>
+    </>
   )
 }

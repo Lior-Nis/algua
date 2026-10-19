@@ -63,7 +63,7 @@ for (const route of ROUTES) {
     continue
   }
 
-  const m = await page.evaluate(() => {
+  const m = await page.evaluate((currentRoute) => {
     const vw = window.innerWidth
     // An element clipped by an ancestor's own horizontal scrollport (overflow-x: auto/scroll/
     // hidden) is the INTENDED "scrolls inside its own container" pattern, not page overflow —
@@ -83,13 +83,38 @@ for (const route of ROUTES) {
         offenders.push(`${el.tagName}.${String(el.className).slice(0, 40)} right=${Math.round(r.right)}`)
       }
     })
-    return { vw, scrollWidth: document.documentElement.scrollWidth, offenders: offenders.slice(0, 5) }
-  })
+    const shortTargets = [...document.querySelectorAll('.tab, .back-btn')]
+      .map((el) => ({ name: el.className, height: el.getBoundingClientRect().height }))
+      .filter(({ height }) => height < 44)
+    const ideaDates = currentRoute === '/research'
+      ? [...document.querySelectorAll('.idea-date')].map((el) => ({
+          text: el.textContent,
+          display: getComputedStyle(el).display,
+          height: el.getBoundingClientRect().height,
+        }))
+      : []
+    return {
+      vw,
+      scrollWidth: document.documentElement.scrollWidth,
+      offenders: offenders.slice(0, 5),
+      shortTargets,
+      ideaDates,
+    }
+  }, route)
   // scrollWidth is the authoritative signal for "did the PAGE overflow" (the actual /money
   // symptom: the viewport itself widens/zooms out). offenders names the culprit when it does.
   const overflow = m.scrollWidth > m.vw
   console.log(`${overflow ? 'FAIL' : 'ok  '} ${route} vw=${m.vw} scrollWidth=${m.scrollWidth}`)
   if (overflow) failures.push(`${route}: scrollWidth=${m.scrollWidth} vw=${m.vw}\n    ${m.offenders.join('\n    ')}`)
+  if (m.shortTargets.length > 0) {
+    failures.push(`${route}: interactive targets below 44px: ${JSON.stringify(m.shortTargets)}`)
+  }
+  if (route === '/research' && (
+    m.ideaDates.length === 0
+    || m.ideaDates.some(({ display, height }) => display === 'none' || height === 0)
+  )) {
+    failures.push(`${route}: idea created_at is not visibly reachable at 390px`)
+  }
 }
 
 await browser.close()
