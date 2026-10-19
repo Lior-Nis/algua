@@ -15,3 +15,9 @@ services:
   gate:
     build: .
     entrypoint: ["./scripts/gate.sh"]
+
+  acceptance:
+    build: .
+    entrypoint: ["uv", "run", "pytest"]
+    command: ["-m", "acceptance", "-q"]
+    network_mode: none
