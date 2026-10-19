@@ -230,3 +230,46 @@ def test_series_missing_run_id_is_json_error_envelope():
     assert out["ok"] is False
     assert "error" in out
     assert "code" in out
+
+
+# -- runs board ---------------------------------------------------------------------------------
+
+
+def test_board_empty_registry_is_ok_with_zero_rows():
+    payload = _json(runner.invoke(app, ["runs", "board"]))
+    assert payload["ok"] is True
+    assert payload["schema_version"] == "strategy-board/v1"
+    assert payload["count"] == 0
+    assert payload["rows"] == []
+
+
+def test_board_lists_every_strategy_with_its_latest_gate_only():
+    with registry_conn() as conn:
+        repo = SqliteStrategyRepository(conn)
+        gated = repo.add("gated")
+        repo.add("bare")
+        repo.record_run("gate", "gated", strategy_id=gated.id, metrics={"sharpe_oos": 1.0})
+        latest = repo.record_run(
+            "gate", "gated", strategy_id=gated.id, passed=True, metrics={"sharpe_oos": 0.2})
+        repo.record_run("gate", "bare", metrics={"sharpe_oos": 9.0})  # legacy name-only run
+    payload = _json(runner.invoke(app, ["runs", "board"]))
+    assert payload["ok"] is True
+    assert payload["count"] == 2
+    rows = {row["name"]: row for row in payload["rows"]}
+    assert rows["gated"]["latest_gate"]["run_id"] == latest
+    assert rows["gated"]["latest_gate"]["passed"] is True
+    assert rows["bare"]["latest_gate"] is None
+
+
+def test_board_read_failure_is_a_json_error_not_an_empty_board(monkeypatch):
+    import sqlite3
+
+    def _boom(repo):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("algua.cli.runs_cmd.strategy_board_payload", _boom)
+    result = runner.invoke(app, ["runs", "board"])
+    assert result.exit_code != 0
+    out = json.loads(result.stdout)
+    assert out["ok"] is False
+    assert "error" in out

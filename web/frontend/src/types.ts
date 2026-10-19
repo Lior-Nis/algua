@@ -394,6 +394,42 @@ export interface RunsListPayload {
   count: number
 }
 
+/** The latest gate run of one strategy identity, as `runs board` projects it
+ * (algua/registry/strategy_board.py). Every metric is a nullable FINITE scalar read straight off
+ * the run row — a missing measurement is `null`, never 0. `*_oos` is the single-use holdout
+ * sample; `*_window_*` / `pct_positive_windows` are walk-forward windows. No series, no gate
+ * decision, no lineage. */
+export interface StrategyBoardGate {
+  run_id: number
+  created_at: string
+  passed: boolean | null
+  sharpe_oos: number | null
+  total_return_oos: number | null
+  max_drawdown_oos: number | null
+  n_obs_oos: number | null
+  mean_window_sharpe: number | null
+  min_window_sharpe: number | null
+  pct_positive_windows: number | null
+}
+
+/** One registered strategy identity; `latest_gate` is `null` when it has no identity-bound gate. */
+export interface StrategyBoardRow {
+  strategy_id: number
+  name: string
+  family: string | null
+  stage: string
+  latest_gate: StrategyBoardGate | null
+}
+
+/** GET /api/strategy-board — `runs board` payload, schema `strategy-board/v1`
+ * (docs/development/specs/spec-strategy-board/strategy-board-contract.md). `count` counts
+ * registered strategies, not runs; rows arrive in lifecycle order. */
+export interface StrategyBoardPayload {
+  schema_version: 'strategy-board/v1'
+  count: number
+  rows: StrategyBoardRow[]
+}
+
 /** GET /api/runs/{id} — `runs show` payload (algua/registry/run_views.py run_detail_payload):
  * one run row plus its `run_metrics` overflow tail and — for a `gate` run with a `gate_id` — the
  * allow-list-projected gate decision. `gate_decision` carries the SAME shape `GateRow.decision`

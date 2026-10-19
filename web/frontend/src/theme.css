@@ -532,18 +532,70 @@ button { font: inherit; }
   fill: var(--text);
 }
 
-/* ---- ranked run list ------------------------------------------------------- */
+/* ---- strategy board -------------------------------------------------------- */
 
-.run-row-metric {
+/* One dense evidence row inside the existing 680px shell: name + stage on the first line, a
+   short metric rail + degradation sparkline on the second. Everything wraps or ellipsizes —
+   nothing here can widen the page at 390px. */
+.board-row {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 9px 14px;
+  border-top: 1px solid var(--line);
+  color: inherit;
+  text-decoration: none;
+}
+
+.board-row:focus-visible {
+  outline: 1px solid var(--electric);
+  outline-offset: -1px;
+}
+
+.board-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.board-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.board-rail {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  min-width: 0;
+}
+
+.board-metric {
   font-family: var(--mono);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   color: var(--text);
-  min-width: 34px;
-  text-align: right;
+  white-space: nowrap;
 }
 
-/* ---- sparkline (ranked run list) ------------------------------------------ */
+.board-k {
+  margin-right: 4px;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.board-n {
+  font-size: 9px;
+  color: var(--text-dim);
+}
+
+/* ---- sparkline (strategy board) ------------------------------------------- */
 
 /* One series per row: never a categorical hue. `--series-context` (the neutral series token) —
    not Electric, which is reserved for the ONE active thing on a screen; with one sparkline per

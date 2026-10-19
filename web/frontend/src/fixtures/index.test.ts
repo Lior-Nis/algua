@@ -22,6 +22,7 @@ const REAL_ENDPOINT_URLS = [
   '/api/strategies',
   '/api/activity?limit=25',
   '/api/runs',
+  '/api/strategy-board',
   '/api/runs?kind=gate&sort=sharpe_oos&limit=20',
   '/api/runs?kind=backtest&strategy=liquid10_adj_momentum&limit=1',
   '/api/runs?kind=sweep_trial&limit=200',

@@ -1,7 +1,6 @@
 /** Shared pass/fail verdict mark. Originated in `StrategyDetail.tsx` (the gate bullet card and
- * per-check rows) and reused verbatim by `RunList.tsx` (task 4 review, fix round 1) rather than
- * re-implementing the same branching a second time — this is the superset (keeps `advisory`,
- * which `RunList` never passes but a future gate-check consumer will).
+ * per-check rows) and is reused verbatim by the strategy board rather than re-implementing the
+ * same branching a second time. This remains the superset because gate checks use `advisory`.
  */
 export default function PassMark({
   passed,

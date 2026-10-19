@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, expect, it, vi } from 'vitest'
 import Research from './Research'
@@ -22,6 +22,36 @@ const runs = {
   fetched_at: '2026-08-15T17:04:00Z',
   stale: false,
   data: { count: 0, runs: [] },
+}
+
+const board = {
+  ok: true,
+  fetched_at: '2026-08-15T17:04:00Z',
+  stale: false,
+  data: {
+    schema_version: 'strategy-board/v1',
+    count: 2,
+    rows: [
+      { strategy_id: 1, name: 'live_one', family: 'momentum', stage: 'paper',
+        latest_gate: { run_id: 7, created_at: '2026-08-14T00:00:00+00:00', passed: true,
+                       sharpe_oos: 0.8, total_return_oos: 0.1, max_drawdown_oos: -0.05,
+                       n_obs_oos: 126, mean_window_sharpe: 0.7, min_window_sharpe: 0.2,
+                       pct_positive_windows: 0.75 } },
+      { strategy_id: 2, name: 'benched', family: null, stage: 'retired', latest_gate: null },
+    ],
+  },
+}
+
+function routeBody(url: string) {
+  return url.startsWith('/api/strategy-board')
+    ? board
+    : url.startsWith('/api/strategies')
+      ? strategies
+      : url.startsWith('/api/runs')
+        ? runs
+        : url.startsWith('/api/ops')
+          ? ops
+          : ideas
 }
 
 const ops = {
@@ -76,18 +106,11 @@ afterEach(() => {
 function renderResearch() {
   vi.stubGlobal(
     'fetch',
-    vi.fn(async (url: string) => {
-      const body = url.startsWith('/api/strategies')
-        ? strategies
-        : url.startsWith('/api/runs')
-          ? runs
-          : url.startsWith('/api/ops')
-            ? ops
-            : ideas
-      return { ok: true, status: 200, json: async () => body }
-    }) as unknown as typeof fetch,
+    vi.fn(async (url: string) => ({
+      ok: true, status: 200, json: async () => routeBody(url),
+    })) as unknown as typeof fetch,
   )
-  render(
+  return render(
     <MemoryRouter>
       <Research />
     </MemoryRouter>,
@@ -106,42 +129,27 @@ it('reports a wedged merge-back queue', async () => {
   expect(await screen.findByText(/merge-back queue 23 — wedged/)).toBeTruthy()
 })
 
-it('summarizes the funnel as a one-line count strip, not per-strategy detail', async () => {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async (url: string) => {
-      const body = url.startsWith('/api/strategies')
-        ? strategies
-        : url.startsWith('/api/runs')
-          ? runs
-          : url.startsWith('/api/ops')
-            ? ops
-            : ideas
-      return { ok: true, status: 200, json: async () => body }
-    }) as unknown as typeof fetch,
-  )
-  const { container } = render(
-    <MemoryRouter>
-      <Research />
-    </MemoryRouter>,
-  )
-  expect(await screen.findByText('paper (1)')).toBeTruthy()
+it('keeps the funnel count strip separate from the board filters', async () => {
+  const { container } = renderResearch()
+  await screen.findByText('strategy board')
+  expect(screen.getByText('paper (1)')).toBeTruthy()
   expect(screen.getByText('retired (1)')).toBeTruthy()
-  // Per-strategy names/links used to render here (`<details>` per stage) — that is now Fleet's
-  // job. The funnel section is chips only: no strategy name, no link, no per-row health badge.
-  expect(screen.queryByText('live_one')).toBeNull()
-  expect(screen.queryByText('benched')).toBeNull()
+  expect(screen.getByRole('button', { name: /^paper 1$/ })).toBeTruthy()
+  expect(screen.getByRole('button', { name: /^retired 1$/ })).toBeTruthy()
+  expect(screen.getByText(/^funnel$/i)).toBeTruthy()
   expect(container.querySelector('.funnel-row')).toBeNull()
   expect(container.querySelector('details')).toBeNull()
 })
 
-it('wires in the IS-vs-OOS scatter and the ranked run list as the run-ledger surface', async () => {
+it('wires in the IS-vs-OOS scatter and the strategy board, not the ranked run list', async () => {
   renderResearch()
   expect(await screen.findByText('is vs oos')).toBeTruthy()
-  expect(screen.getByText('ranked runs')).toBeTruthy()
-  expect(
-    screen.getByText(/no runs recorded yet — the ledger fills when the operator loop runs/i),
-  ).toBeTruthy()
+  expect(await screen.findByText('strategy board')).toBeTruthy()
+  expect(screen.queryByText('ranked runs')).toBeNull()
+  // One row per registered strategy — including the one with no gate evidence.
+  const boardRows = screen.getAllByTestId('board-row')
+  expect(boardRows).toHaveLength(2)
+  expect(within(boardRows[1]).getByText(/^no usable gate evidence$/i)).toBeTruthy()
 })
 
 it('absorbs the idea pool, keeping the windowed stats on their own line', async () => {

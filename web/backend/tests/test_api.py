@@ -631,6 +631,56 @@ async def test_runs_list_cli_error_is_502(monkeypatch: pytest.MonkeyPatch) -> No
     assert resp.json()["code"] == "cli_timeout"
 
 
+# --- /api/strategy-board ---
+
+
+async def test_strategy_board_is_the_cli_envelope_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
+    board = {"schema_version": "strategy-board/v1", "count": 0, "rows": []}
+    envelope = _env(board)
+    seen = _route_cli(monkeypatch, {("runs", "board"): envelope})
+    async with _client() as client:
+        resp = await client.get("/api/strategy-board")
+    assert resp.status_code == 200
+    assert resp.json() == envelope
+    assert seen == [("runs", "board")]
+
+
+async def test_strategy_board_forwards_no_query_params_to_the_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _route_cli(monkeypatch, {("runs", "board"): _env({"rows": []})})
+    async with _client() as client:
+        resp = await client.get("/api/strategy-board", params={"sort": "--limit=1", "kind": "gate"})
+    assert resp.status_code == 200
+    assert seen == [("runs", "board")]
+
+
+async def test_strategy_board_is_cached_for_sixty_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
+    ttls: list[float] = []
+
+    async def fake_run_cli(*args: str, ttl_s: float, timeout_s: float = 60.0) -> dict[str, Any]:
+        ttls.append(ttl_s)
+        return _env({"rows": []})
+
+    monkeypatch.setattr(main_mod, "run_cli", fake_run_cli)
+    async with _client() as client:
+        await client.get("/api/strategy-board")
+    assert ttls == [60.0]
+
+
+async def test_strategy_board_cli_error_is_502_never_an_empty_board(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _route_cli(monkeypatch, {("runs", "board"): CliError("cli_timeout", "runs board timed out")})
+    async with _client() as client:
+        resp = await client.get("/api/strategy-board")
+    assert resp.status_code == 502
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["code"] == "cli_timeout"
+    assert "rows" not in body
+
+
 # --- /api/runs/{run_id} ---
 
 
