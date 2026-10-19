@@ -3,9 +3,9 @@ import { ApiError, useFetch } from '../api'
 import { useSetFetchedAt } from '../App'
 import HealthBadge from '../components/HealthBadge'
 import MetricTile from '../components/MetricTile'
-import RunList from '../components/RunList'
 import ScatterISOOS from '../components/ScatterISOOS'
 import StaleNotice from '../components/StaleNotice'
+import StrategyBoard from '../components/StrategyBoard'
 import { utcDate, utcDateTime } from '../format'
 import type {
   ApiEnvelope,
@@ -59,13 +59,8 @@ function statusCounts(stats: IdeasResponse['stats']): Record<string, number> {
 
 /**
  * Research — the run-ledger surface (spec Q7). Top to bottom: the research-loop liveness panel,
- * the funnel as a one-line count strip, the IS-vs-OOS scatter (view 2), the ranked run list
- * (view 1), then the idea pool — collapsed to a count until it actually has rows.
- *
- * Per-strategy detail (name, family, hypothesis status, live health) used to live here as
- * `<details>` lists per stage; that is now Fleet's job (it already lists every strategy), and
- * this screen only needs stage COUNTS to summarize the funnel, so the `/api/fleet` fetch this
- * screen used to make purely for per-strategy health is gone too.
+ * the funnel as a one-line count strip, the IS-vs-OOS scatter, the strategy board (one row per
+ * registered strategy and its latest gate run), then the idea pool.
  */
 export default function Research() {
   const strategies = useFetch<ApiEnvelope<ListPayload<StrategyRecord>>>('/api/strategies')
@@ -135,7 +130,7 @@ export default function Research() {
 
       <ScatterISOOS />
 
-      <RunList />
+      <StrategyBoard />
 
       <IdeaPool query={ideas} />
     </>

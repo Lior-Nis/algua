@@ -85,7 +85,7 @@ export function buildSparklineGeometry(
  * `ScatterISOOS`'s reference diagonal uses, for the same reason (a reference the marks are
  * judged against, not data itself).
  *
- * NOT a time series (see `RunList.tsx`'s caption, and this component's `label` prop) — the three
+ * NOT a time series (see the caller's caption and this component's `label` prop) — the three
  * points are `[in-sample worst window, in-sample mean window, out-of-sample result]`, a
  * degradation profile, not evenly-spaced observations over time. The `aria-label` says so
  * explicitly rather than defaulting to "trend", which would assert exactly the reading this
@@ -107,7 +107,7 @@ export default function Sparkline({
   width?: number
   height?: number
   /** Accessible description of what this specific sparkline plots. Callers that give the mark a
-   * specific meaning (e.g. RunList's degradation profile) should pass one; the default is
+   * specific meaning (e.g. the strategy board's degradation profile) should pass one; the default is
    * generic but still never claims a time series. */
   label?: string
 }) {

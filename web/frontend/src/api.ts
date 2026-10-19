@@ -44,9 +44,9 @@ export interface RunsQuery {
   limit?: number
 }
 
-/** Builds the `/api/runs` query string. Centralizes the encoding so every run-ledger view (the
- * IS-vs-OOS scatter here; the ranked run list and trial distribution in later tasks) constructs
- * the same URL shape instead of each hand-rolling its own `encodeURIComponent` calls. */
+/** Builds the `/api/runs` query string. Centralizes the encoding so run-ledger views such as the
+ * IS-vs-OOS scatter and trial distribution construct one URL shape instead of each hand-rolling
+ * its own `encodeURIComponent` calls. */
 export function runsUrl(query: RunsQuery = {}): string {
   const params = new URLSearchParams()
   if (query.kind) params.set('kind', query.kind)
@@ -89,11 +89,21 @@ const cache = new Map<string, CacheEntry>()
 /** Module-level in-flight dedup: concurrent consumers of one URL (or StrictMode double
  * effects) share a single HTTP request instead of racing the cache. */
 const inFlightByUrl = new Map<string, Promise<unknown>>()
+let cacheEpoch = 0
+
+/** Test seam: drops every cached payload so a test's own mocked response is the one rendered. */
+export function clearFetchCache(): void {
+  cacheEpoch += 1
+  cache.clear()
+  inFlightByUrl.clear()
+}
 
 function fetchShared<T>(url: string): Promise<T> {
   const existing = inFlightByUrl.get(url)
   if (existing) return existing as Promise<T>
-  const p = getJSON<T>(url).finally(() => inFlightByUrl.delete(url))
+  const p = getJSON<T>(url).finally(() => {
+    if (inFlightByUrl.get(url) === p) inFlightByUrl.delete(url)
+  })
   inFlightByUrl.set(url, p)
   return p
 }
@@ -124,9 +134,11 @@ export function useFetch<T>(url: string | null, opts: { ttlMs?: number } = {}): 
 
   const load = useCallback(async () => {
     if (url === null) return
+    const epoch = cacheEpoch
     if (!cache.has(url)) setLoading(true)
     try {
       const fresh = await fetchShared<T>(url)
+      if (epoch !== cacheEpoch) return
       cache.set(url, { at: Date.now(), data: fresh })
       setData(fresh)
       setError(null)

@@ -16,6 +16,8 @@ import type {
   OpsPayload,
   RunRow,
   RunsListPayload,
+  StrategyBoardPayload,
+  StrategyBoardRow,
   StrategyRecord,
   TriageItem,
   TriagePayload,
@@ -409,6 +411,55 @@ const runs = (() => {
       sortino_oos: Number((oos * 1.3).toFixed(4)),
     }
   })
+})()
+
+const BOARD_STAGE_ORDER = [
+  'idea', 'backtested', 'candidate', 'paper', 'forward_tested', 'live', 'dormant', 'retired',
+]
+
+/** `runs board`: EVERY registry strategy once, in lifecycle order, joined to its gate run by
+ * identity (`strategy_id`). The three research-stage seeds have no gate run — `latest_gate: null`
+ * is the explicit "no evidence" the board must render, not a missing row. */
+export const BOARD: ApiEnvelope<StrategyBoardPayload> = (() => {
+  const rows = SEEDS.map((s, i): StrategyBoardRow => {
+    const run = runs
+      .filter((r) => r.kind === 'gate' && r.strategy_id === s.id)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id - a.id)[0]
+    const oos = run?.sharpe_oos ?? null
+    return {
+      strategy_id: s.id,
+      name: s.name,
+      family: s.family,
+      stage: s.stage,
+      latest_gate:
+        run === undefined
+          ? null
+          : {
+              run_id: run.id,
+              created_at: run.created_at,
+              passed: run.passed === null ? null : run.passed === true || run.passed === 1,
+              sharpe_oos: oos,
+              total_return_oos: oos === null ? null : Number((oos * 0.12).toFixed(4)),
+              max_drawdown_oos: oos === null ? null : Number((-0.04 - oos * 0.05).toFixed(4)),
+              // One run carries no holdout length: the nullable-metric path stays exercised.
+              n_obs_oos: i % 5 === 4 ? null : 126 + i,
+              mean_window_sharpe: run.mean_window_sharpe,
+              min_window_sharpe: typeof run.min_window_sharpe === 'number' ? run.min_window_sharpe : null,
+              pct_positive_windows: 0.5 + (i % 4) * 0.125,
+            },
+    }
+  })
+  rows.sort(
+    (a, b) => {
+      const aStage = BOARD_STAGE_ORDER.indexOf(a.stage)
+      const bStage = BOARD_STAGE_ORDER.indexOf(b.stage)
+      return (aStage < 0 ? BOARD_STAGE_ORDER.length : aStage) -
+        (bStage < 0 ? BOARD_STAGE_ORDER.length : bStage) ||
+      a.name.toLowerCase().localeCompare(b.name.toLowerCase()) ||
+      a.strategy_id - b.strategy_id
+    },
+  )
+  return envelope({ schema_version: 'strategy-board/v1' as const, count: rows.length, rows })
 })()
 
 export const RUNS: ApiEnvelope<RunsListPayload> = envelope({

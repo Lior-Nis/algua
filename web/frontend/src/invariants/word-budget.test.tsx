@@ -43,7 +43,7 @@ import { cleanup, render, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { resolveFixture } from '../fixtures'
-import { ACTIVITY, BOOK, FLEET, RUNS, TRIAGE } from '../fixtures/steady-state'
+import { ACTIVITY, BOARD, BOOK, FLEET, RUNS, TRIAGE } from '../fixtures/steady-state'
 import Fleet from '../screens/Fleet'
 import Money from '../screens/Money'
 import Now from '../screens/Now'
@@ -64,7 +64,7 @@ import StrategyDetail from '../screens/StrategyDetail'
  * of `<svg>`/`<canvas>` elements (the logo excluded — see `marks()` below — so it can never
  * satisfy this floor by itself). Without it, a screen with zero visualizations passes the word
  * ceiling forever, which was true of Now/Money/Fleet before this fix (Research already carries
- * 12 via ScatterISOOS + RunList's sparklines). Each value below is pinned at TODAY's measured
+ * 12 via ScatterISOOS + the strategy board's sparklines). Each value below is pinned at TODAY's measured
  * count (0 where a screen genuinely has no chart yet) purely to stop a regression; slices 2 and 3
  * are expected to RAISE these numbers as marks land, the same deliberate, reviewed bump the word
  * ceiling already requires.
@@ -77,7 +77,10 @@ import StrategyDetail from '../screens/StrategyDetail'
 export const BUDGETS: Record<string, { min: number; max: number; marks: number }> = {
   Now: { min: 29, max: 63, marks: 0 },
   Money: { min: 43, max: 94, marks: 0 },
-  Research: { min: 94, max: 206, marks: 12 },
+  // Raised 206 -> 322 when the strategy board replaced the ranked run list: measured at 292
+  // words against the 14-strategy fixture, plus the documented 10% ceiling. The floor is half
+  // that measured count. Marks stay 12: the scatter plus one sparkline per gated row.
+  Research: { min: 146, max: 322, marks: 12 },
   Fleet: { min: 38, max: 84, marks: 0 },
   // The deepest prose surface (spec §4.3 says to trim it) — and, until this fix, the one route
   // `verify-viewport.mjs` covered that this file did not. Rendered standalone below via its own
@@ -151,6 +154,13 @@ function marks(el: HTMLElement): number {
   return count
 }
 
+async function waitUntilPopulated(name: string, container: HTMLElement): Promise<void> {
+  await waitFor(() => expect(container.textContent).not.toBe(''))
+  if (name === 'Research') {
+    await waitFor(() => expect(container.querySelectorAll('[data-testid="board-row"]')).toHaveLength(14))
+  }
+}
+
 describe.each([
   ['Now', Now],
   ['Money', Money],
@@ -163,7 +173,7 @@ describe.each([
         <Screen />
       </MemoryRouter>,
     )
-    await waitFor(() => expect(container.textContent).not.toBe(''))
+    await waitUntilPopulated(name, container as HTMLElement)
     const count = words(container as HTMLElement)
     const { min, max } = BUDGETS[name]
     expect(
@@ -179,7 +189,7 @@ describe.each([
         <Screen />
       </MemoryRouter>,
     )
-    await waitFor(() => expect(container.textContent).not.toBe(''))
+    await waitUntilPopulated(name, container as HTMLElement)
     const count = marks(container as HTMLElement)
     expect(count).toBeGreaterThanOrEqual(BUDGETS[name].marks)
   })
@@ -251,6 +261,20 @@ describe('actually renders fixture data', () => {
     await waitFor(() => expect(container.textContent).toContain(RUNS.data.runs[0].strategy_name))
   })
 
+  it('Research shows every registered strategy on the board, gated or not', async () => {
+    const { container } = render(
+      <MemoryRouter>
+        <Research />
+      </MemoryRouter>,
+    )
+    await waitFor(() =>
+      expect(container.querySelectorAll('[data-testid="board-row"]')).toHaveLength(
+        BOARD.data.rows.length,
+      ),
+    )
+    expect(BOARD.data.rows.some((r) => r.latest_gate === null)).toBe(true)
+  })
+
   it('Fleet shows a real strategy name from the full row list', async () => {
     const { container } = render(
       <MemoryRouter>
@@ -293,6 +317,11 @@ const EMPTY_RUNS = {
   data: { ...RUNS.data, runs: [], count: 0 },
 }
 
+const EMPTY_BOARD = {
+  ...BOARD,
+  data: { ...BOARD.data, rows: [], count: 0 },
+}
+
 const EMPTY_TRIAGE = { ...TRIAGE, items: [] }
 const EMPTY_ACTIVITY = { ...ACTIVITY, data: { ...ACTIVITY.data, data: [] } }
 
@@ -304,7 +333,11 @@ const EMPTY_ACTIVITY = { ...ACTIVITY, data: { ...ACTIVITY.data, data: [] } }
 describe.each([
   { name: 'Now', Screen: Now, overrides: () => ({ '/api/triage': EMPTY_TRIAGE, '/api/activity': EMPTY_ACTIVITY }) },
   { name: 'Money', Screen: Money, overrides: () => ({ '/api/book': EMPTY_BOOK }) },
-  { name: 'Research', Screen: Research, overrides: () => ({ '/api/runs': EMPTY_RUNS }) },
+  {
+    name: 'Research',
+    Screen: Research,
+    overrides: () => ({ '/api/runs': EMPTY_RUNS, '/api/strategy-board': EMPTY_BOARD }),
+  },
   { name: 'Fleet', Screen: Fleet, overrides: () => ({ '/api/fleet': EMPTY_FLEET }) },
 ])('$name: populated fixture beats an emptied one', ({ name, Screen, overrides }) => {
   it('renders strictly more words with real data than with its collection emptied', async () => {

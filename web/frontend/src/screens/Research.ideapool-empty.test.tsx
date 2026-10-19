@@ -20,6 +20,13 @@ const runs = {
   data: { count: 0, runs: [] },
 }
 
+const board = {
+  ok: true,
+  fetched_at: '2026-08-15T17:04:00Z',
+  stale: false,
+  data: { schema_version: 'strategy-board/v1', count: 0, rows: [] },
+}
+
 const ops = {
   ok: true,
   fetched_at: '2026-08-15T17:04:00Z',
@@ -45,13 +52,15 @@ it('collapses the idea pool to a bare count when it has zero rows — no tiles, 
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string) => {
-      const body = url.startsWith('/api/strategies')
-        ? strategies
-        : url.startsWith('/api/runs')
-          ? runs
-          : url.startsWith('/api/ops')
-            ? ops
-            : emptyIdeas
+      const body = url.startsWith('/api/strategy-board')
+        ? board
+        : url.startsWith('/api/strategies')
+          ? strategies
+          : url.startsWith('/api/runs')
+            ? runs
+            : url.startsWith('/api/ops')
+              ? ops
+              : emptyIdeas
       return { ok: true, status: 200, json: async () => body }
     }) as unknown as typeof fetch,
   )

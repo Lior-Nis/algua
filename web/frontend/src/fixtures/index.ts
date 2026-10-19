@@ -3,6 +3,7 @@
  * build (see `transport.ts`), not render a plausible-looking empty state that hides the gap. */
 import {
   ACTIVITY,
+  BOARD,
   BOOK,
   FETCHED_AT,
   FIXTURE_SENTINEL,
@@ -279,6 +280,7 @@ export function resolveFixture(url: string): unknown | undefined {
     case '/api/ideas':       return IDEAS
     case '/api/strategies':  return STRATEGIES
     case '/api/runs':        return RUNS
+    case '/api/strategy-board': return BOARD
     case '/api/activity':    return ACTIVITY
     // The run-ledger series endpoint deliberately never returns a per-bar OOS vector
     // (holdout_returns.returns_blob is SENSITIVE) — an empty series map is the honest fixture.
