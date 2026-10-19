@@ -34,6 +34,12 @@ The dashboard contains:
 - `FWD-01`: one immutable snapshot through both `simulate` and the paper rehearsal, proving that
   the two lanes agree on target weights at the same information cutoff and that the paper intents
   fill no earlier than `t+1`.
+- `RISK-01`: a legal proposed allocation through the public planner, showing the exact buy, sell,
+  and dropped-holding intents it approves.
+- `RISK-02`: concentration and gross-exposure violations through the same planner, showing their
+  named rejection reasons and proving that neither produces an intent.
+- `RISK-03`: a planner breach through the operational breach handler, showing the persistent kill
+  switch and corresponding audit record.
 
 Files under `fixtures/reference_market_v1/expected/` are approved examples, not snapshots to update
 automatically. Change them only after a human has reviewed the attached input and actual output and

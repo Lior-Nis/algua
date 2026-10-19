@@ -18,7 +18,7 @@ uv run algua doctor
 
 The focused acceptance suite presents fixed inputs, actual outputs, and expected-versus-actual
 evidence for data ingestion, strategy decisions, delayed backtest execution, and backtest/paper
-decision parity:
+decision parity. It also presents approved and rejected risk decisions plus kill-switch evidence:
 
 ```bash
 npm install

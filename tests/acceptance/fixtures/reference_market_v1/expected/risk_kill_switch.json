@@ -1,0 +1,18 @@
+{
+  "breach": {
+    "kind": "max_weight_per_symbol",
+    "detail": "single-name weight(s) for ['AAPL'] exceed max_weight_per_symbol 0.5000"
+  },
+  "kill_switch": {
+    "strategy": "acceptance_risk_policy",
+    "actor": "system",
+    "reason": "single-name weight(s) for ['AAPL'] exceed max_weight_per_symbol 0.5000",
+    "is_tripped": true
+  },
+  "audit": {
+    "strategy": "acceptance_risk_policy",
+    "actor": "system",
+    "action": "kill_switch_trip",
+    "reason": "max_weight_per_symbol: single-name weight(s) for ['AAPL'] exceed max_weight_per_symbol 0.5000"
+  }
+}
