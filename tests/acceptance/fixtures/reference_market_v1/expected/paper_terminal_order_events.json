@@ -1,0 +1,27 @@
+{
+  "venue_activities": [
+    {
+      "id": "event-rejected-001",
+      "activity_type": "ORDER_REJECTED",
+      "symbol": "AAPL",
+      "order_id": "venue-order-AAPL",
+      "transaction_time": "2026-03-27T14:31:00Z"
+    },
+    {
+      "id": "event-cancelled-001",
+      "activity_type": "ORDER_CANCELED",
+      "symbol": "AAPL",
+      "order_id": "venue-order-AAPL",
+      "transaction_time": "2026-03-27T14:32:00Z"
+    }
+  ],
+  "book": {
+    "believed_positions": {},
+    "fill_cursor": "2026-03-27T14:33:00+00:00",
+    "reconciliation": {
+      "clean": true,
+      "halt": false,
+      "mismatches": []
+    }
+  }
+}
