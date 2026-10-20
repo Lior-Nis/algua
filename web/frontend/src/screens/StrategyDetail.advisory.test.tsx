@@ -1,6 +1,6 @@
 /** Own file: api.ts's fetch cache is module-level and keyed by URL, and vitest isolates
  * the module graph per FILE — a second /api/strategy/* fixture needs its own file. */
-import { cleanup, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, expect, it, vi } from 'vitest'
 import type {
@@ -180,6 +180,14 @@ afterEach(() => {
 it('marks a failed ADVISORY check as non-vetoing instead of rendering it like a breach', async () => {
   renderDetail()
 
+  expect(await screen.findByRole('heading', { name: /trader decision/i })).toBeTruthy()
+  expect(screen.getByText('candidate · partial')).toBeTruthy()
+  expect(screen.getByText(/research gate passed; advisory weakness remains/i)).toBeTruthy()
+  const researchEvidence = screen.getByRole('button', { name: /research evidence/i })
+  expect(researchEvidence.getAttribute('aria-expanded')).toBe('false')
+  expect(screen.queryByText('holdout_sharpe')).toBeNull()
+  fireEvent.click(researchEvidence)
+
   // The gate bullet card (task 5): advisory checks render in their OWN group, captioned as
   // non-vetoing, and the failed one carries an explicit "advisory" text label — never colour
   // alone.
@@ -197,10 +205,12 @@ it('marks a failed ADVISORY check as non-vetoing instead of rendering it like a 
 
 it('names the ledger by the lifecycle edge it gates', async () => {
   renderDetail()
+  fireEvent.click(await screen.findByRole('button', { name: /research evidence/i }))
   expect(await screen.findByText(/research gate — backtested → candidate/)).toBeTruthy()
 })
 
 it('shows whether the passing gate token has been spent', async () => {
   renderDetail()
+  fireEvent.click(await screen.findByRole('button', { name: /research evidence/i }))
   expect(await screen.findByText('token unspent')).toBeTruthy()
 })

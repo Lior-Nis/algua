@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
-import { ApiError, useFetch } from '../api'
+import { ApiError, runsUrl, useFetch } from '../api'
+import type { UseFetchResult } from '../api'
 import { useSetFetchedAt } from '../App'
-import HealthBadge from '../components/HealthBadge'
-import MetricTile from '../components/MetricTile'
-import ScatterISOOS from '../components/ScatterISOOS'
+import EvidenceDisclosure from '../components/EvidenceDisclosure'
+import EvidenceStatus from '../components/EvidenceStatus'
+import { ScatterISOOSView } from '../components/ScatterISOOS'
 import StaleNotice from '../components/StaleNotice'
-import StrategyBoard from '../components/StrategyBoard'
+import { isBoardPayload, StrategyBoardView } from '../components/StrategyBoard'
 import { utcDate, utcDateTime } from '../format'
 import type {
   ApiEnvelope,
@@ -14,6 +15,8 @@ import type {
   IdeasResponse,
   ListPayload,
   OpsPayload,
+  RunsListPayload,
+  StrategyBoardPayload,
   StrategyRecord,
 } from '../types'
 
@@ -66,6 +69,8 @@ export default function Research() {
   const strategies = useFetch<ApiEnvelope<ListPayload<StrategyRecord>>>('/api/strategies')
   const ops = useFetch<ApiEnvelope<OpsPayload>>('/api/ops', { ttlMs: 30_000 })
   const ideas = useFetch<IdeasResponse>('/api/ideas')
+  const board = useFetch<ApiEnvelope<StrategyBoardPayload>>('/api/strategy-board')
+  const gateRuns = useFetch<ApiEnvelope<RunsListPayload>>(runsUrl({ kind: 'gate' }))
   const setFetchedAt = useSetFetchedAt()
 
   const fetchedAt = strategies.data?.fetched_at ?? null
@@ -74,27 +79,7 @@ export default function Research() {
     return () => setFetchedAt(null)
   }, [fetchedAt, setFetchedAt])
 
-  if (strategies.data === undefined) {
-    if (strategies.loading) {
-      return <div className="skeleton-block" style={{ height: 260 }} aria-hidden="true" />
-    }
-    const error = strategies.error
-    return (
-      <section className="panel error-panel">
-        <span className="micro-label">fetch failed</span>
-        <div className="error-code">
-          {error instanceof ApiError && error.code !== null
-            ? error.code
-            : (error?.message ?? 'unknown error')}
-        </div>
-        <button type="button" className="retry-btn" onClick={strategies.refetch}>
-          retry
-        </button>
-      </section>
-    )
-  }
-
-  const records = strategies.data.data.data
+  const records = strategies.data?.data.data ?? []
   const byStage = new Map<string, number>()
   for (const rec of records) byStage.set(rec.stage, (byStage.get(rec.stage) ?? 0) + 1)
   const stages = [
@@ -103,65 +88,201 @@ export default function Research() {
   ]
 
   return (
-    <>
-      <StaleNotice env={strategies.data} />
+    <main className="decision-page research-page">
+      {strategies.data !== undefined && <StaleNotice env={strategies.data} />}
 
-      <ResearchLoop ops={ops.data?.data} />
+      <ResearchDecision
+        strategies={strategies}
+        ops={ops}
+        ideas={ideas}
+        board={board}
+        gateRuns={gateRuns}
+      />
 
-      <section>
-        <div className="micro-label" style={{ marginBottom: 6 }}>
-          funnel
-        </div>
-        {stages.length === 0 ? (
-          <section className="panel all-clear">
-            <span className="micro-label">funnel empty</span>
-            no strategies registered
-          </section>
+      <div className="research-overview-grid">
+        <section className="funnel-panel" aria-labelledby="funnel-heading">
+          <h2 id="funnel-heading" className="micro-label">lifecycle inventory</h2>
+        {strategies.data === undefined ? (
+          <EvidenceStatus
+            title="lifecycle inventory"
+            state={strategies.loading ? 'loading' : 'failed'}
+            detail={strategies.loading ? 'loading registry strategies' : (strategies.error?.message ?? 'registry unavailable')}
+            onRetry={strategies.loading ? undefined : strategies.refetch}
+          />
+        ) : stages.length === 0 ? (
+          strategies.data.stale ? (
+            <EvidenceStatus
+              title="lifecycle inventory"
+              state="stale"
+              detail="cached registry response contains no strategies"
+              onRetry={strategies.refetch}
+            />
+          ) : (
+            <EvidenceStatus title="lifecycle inventory" state="empty" detail="no strategies registered" />
+          )
         ) : (
-          <div className="chip-row">
-            {stages.map((stage) => (
-              <span key={stage} className="stage-chip">
-                {stage} ({byStage.get(stage)})
-              </span>
-            ))}
-          </div>
+          <>
+            {strategies.data.stale && (
+              <EvidenceStatus title="lifecycle inventory" state="stale" detail="showing cached registry counts" onRetry={strategies.refetch} />
+            )}
+            <div className="funnel-inventory" aria-label="strategy inventory">
+              {stages.map((stage) => {
+                const count = byStage.get(stage) ?? 0
+                const max = Math.max(...byStage.values())
+                return (
+                  <div key={stage} className="funnel-stage" aria-label={`${stage}: ${count} strategies`}>
+                    <div className="funnel-stage-label">
+                      <span>{stage}</span><span className="num">{count}</span>
+                    </div>
+                    <div className="funnel-track" aria-hidden="true">
+                      <span style={{ width: `${(count / max) * 100}%` }} />
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </>
         )}
-      </section>
+        </section>
 
-      <ScatterISOOS />
+        <ScatterISOOSView query={gateRuns} />
+      </div>
 
-      <StrategyBoard />
+      <StrategyBoardView query={board} />
 
       <IdeaPool query={ideas} />
-    </>
+    </main>
   )
 }
 
-/** The top of the funnel. A stopped research loop is the difference between "no ideas today"
- * and "nothing will ever arrive again", and only this panel can tell them apart. */
-function ResearchLoop({ ops }: { ops: OpsPayload | undefined }) {
-  if (ops === undefined) return null
-  const research = ops.loops.research
-  const mergeback = ops.loops.mergeback
-  if (research === undefined) return null
-  const down = research.health !== 'ok' && research.health !== 'idle'
+type SourceStatus = 'current' | 'loading' | 'stale' | 'failed'
+
+interface DecisionSource {
+  label: string
+  status: SourceStatus
+  detail?: string
+}
+
+function sourceStatus<T>(
+  label: string,
+  query: UseFetchResult<T>,
+  stale: boolean,
+  valid = true,
+): DecisionSource {
+  if (query.data === undefined) {
+    return {
+      label,
+      status: query.loading ? 'loading' : 'failed',
+      detail: query.error instanceof ApiError && query.error.code !== null
+        ? query.error.code
+        : (query.error?.message ?? 'unavailable'),
+    }
+  }
+  if (!valid) return { label, status: 'failed', detail: 'unsupported data' }
+  if (stale || query.error !== null) return { label, status: 'stale', detail: 'last read not current' }
+  return { label, status: 'current' }
+}
+
+function ResearchDecision({
+  strategies,
+  ops,
+  ideas,
+  board,
+  gateRuns,
+}: {
+  strategies: UseFetchResult<ApiEnvelope<ListPayload<StrategyRecord>>>
+  ops: UseFetchResult<ApiEnvelope<OpsPayload>>
+  ideas: UseFetchResult<IdeasResponse>
+  board: UseFetchResult<ApiEnvelope<StrategyBoardPayload>>
+  gateRuns: UseFetchResult<ApiEnvelope<RunsListPayload>>
+}) {
+  const sources = [
+    sourceStatus('registry', strategies, strategies.data?.stale === true),
+    sourceStatus('operations', ops, ops.data?.stale === true),
+    sourceStatus('strategy board', board, board.data?.stale === true, isBoardPayload(board.data?.data)),
+    sourceStatus('gate evidence', gateRuns, gateRuns.data?.stale === true),
+    sourceStatus('ideas', ideas, ideas.data?.stale === true, ideas.data?.ok !== false),
+  ]
+  const research = ops.data?.data.loops.research
+  const mergeback = ops.data?.data.loops.mergeback
+  const loopBlocked = (ops.data !== undefined && research === undefined)
+    || (research !== undefined && !['ok', 'idle'].includes(research.health))
+  const mergebackBlocked = ops.data !== undefined
+    && (mergeback === undefined || !['ok', 'idle'].includes(mergeback.health))
+  const operationsStale = sources.some(
+    (source) => source.label === 'operations' && source.status === 'stale',
+  )
+  const failed = sources.filter((source) => source.status === 'failed')
+  const stale = sources.filter((source) => source.status === 'stale')
+  const loading = sources.filter((source) => source.status === 'loading')
+
+  let state = 'current'
+  let consequence = 'Research flow is observable.'
+  let reason = 'All required sources are current.'
+  let checkpoint = 'Next gate or lifecycle change.'
+  if (failed.length > 0) {
+    state = 'blocked'
+    consequence = 'Research decisions are blocked.'
+    reason = `${failed.map((source) => source.label).join(', ')} unavailable.`
+    checkpoint = `Restore ${failed[0].label} and refresh.`
+  } else if (loopBlocked || mergebackBlocked) {
+    state = 'blocked'
+    consequence = 'New evidence may not arrive.'
+    const causes: string[] = []
+    if (operationsStale) causes.push('Operations evidence is stale; conclusions use cached loop state.')
+    if (research === undefined) {
+      causes.push('Research loop state is absent.')
+    } else if (!['ok', 'idle'].includes(research.health)) {
+      causes.push(`${operationsStale ? 'Cached research' : 'Research'} loop ${research.health}${research.detail ? `: ${research.detail}` : ''}.`)
+    }
+    if (mergeback === undefined) {
+      causes.push('Merge-back loop state is absent.')
+    } else if (!['ok', 'idle'].includes(mergeback.health)) {
+      causes.push(mergeback.health === 'stale'
+        ? `Merge-back queue ${mergeback.queue_depth ?? '—'} is wedged.`
+        : `Merge-back loop ${mergeback.health}${mergeback.detail ? `: ${mergeback.detail}` : ''}.`)
+    }
+    reason = causes.join(' ')
+    checkpoint = 'Next clean research loop run.'
+  } else if (stale.length > 0) {
+    state = 'partial'
+    consequence = 'Current evidence is incomplete.'
+    reason = `${stale.map((source) => source.label).join(', ')} stale.`
+    checkpoint = 'Next successful source refresh.'
+  } else if (loading.length > 0) {
+    state = 'loading'
+    consequence = 'No current decision yet.'
+    reason = `Waiting for ${loading.map((source) => source.label).join(', ')}.`
+    checkpoint = 'Required reads complete.'
+  }
+
   return (
-    <section className={down ? 'panel loop-panel down' : 'panel loop-panel'}>
-      <span className="micro-label">research loop</span>
-      <div className="loop-line">
-        <HealthBadge health={research.health} />
-        {research.detail != null && <span className="dim-note">{research.detail}</span>}
+    <section className="decision-report" data-state={state} aria-labelledby="research-decision-heading">
+      <div className="decision-report-head">
+        <div>
+          <h1 id="research-decision-heading" className="micro-label">research decision</h1>
+          <div className="decision-state">{state}</div>
+        </div>
+        <div className="decision-consequence">{consequence}</div>
       </div>
-      {research.last_ok_at != null && (
-        <div className="dim-note num">last clean run {utcDateTime(research.last_ok_at)}</div>
-      )}
-      {typeof research.consecutive_failures === 'number' && research.consecutive_failures > 0 && (
-        <div className="dim-note">{research.consecutive_failures} consecutive failed runs</div>
-      )}
-      {mergeback !== undefined && typeof mergeback.queue_depth === 'number' && (
-        <div className="dim-note">
-          merge-back queue {mergeback.queue_depth}
-          {mergeback.health === 'stale' && ' — wedged'}
+      <div className="decision-facts">
+        <div><span className="micro-label">reason</span><span>{reason}</span></div>
+        <div><span className="micro-label">next checkpoint</span><span>{checkpoint}</span></div>
+      </div>
+      <div className="decision-sources" aria-label="decision sources">
+        {sources.map((source) => (
+          <span key={source.label} data-state={source.status} title={source.detail}>
+            {source.label} <b>{source.status}</b>
+          </span>
+        ))}
+      </div>
+      {research !== undefined && state === 'blocked' && (
+        <div className="decision-raw-line">
+          <span>research loop</span>
+          {typeof research.consecutive_failures === 'number' && research.consecutive_failures > 0 && (
+            <span>{research.consecutive_failures} consecutive failed runs</span>
+          )}
+          {research.last_ok_at != null && <span className="num">last clean {utcDateTime(research.last_ok_at)}</span>}
         </div>
       )}
     </section>
@@ -174,6 +295,7 @@ function ResearchLoop({ ops }: { ops: OpsPayload | undefined }) {
  * `ideas.length > 0`, unchanged from before. */
 function IdeaPool({ query }: { query: ReturnType<typeof useFetch<IdeasResponse>> }) {
   const [statusFilter, setStatusFilter] = useState<string | null>(null)
+  const [expandedIdea, setExpandedIdea] = useState<number | null>(null)
 
   if (query.data === undefined) {
     if (query.loading) {
@@ -231,13 +353,11 @@ function IdeaPool({ query }: { query: ReturnType<typeof useFetch<IdeasResponse>>
       {/* The tiles are ALL-TIME, counted off the same list rendered below and filtered by the
           same chips. `idea stats` is a DIFFERENT denominator (trailing window), so mixing it
           into this row made a histogram that could not add up. */}
-      <div className="tile-row">
-        <MetricTile label="all ideas" value={ideas.length} />
-        {statuses
-          .filter((s) => s in listCounts)
-          .map((s) => (
-            <MetricTile key={s} label={s} value={listCounts[s]} />
-          ))}
+      <div className="idea-counts num">
+        <span>{ideas.length} total</span>
+        {statuses.filter((s) => s in listCounts).map((s) => (
+          <span key={s}>{s} {listCounts[s]}</span>
+        ))}
       </div>
       {windowed.length > 0 && (
         <div className="dim-note num" style={{ marginTop: 6 }}>
@@ -252,6 +372,7 @@ function IdeaPool({ query }: { query: ReturnType<typeof useFetch<IdeasResponse>>
               key={s}
               type="button"
               className={s === statusFilter ? 'filter-chip active' : 'filter-chip'}
+              aria-pressed={s === statusFilter}
               onClick={() => setStatusFilter(statusFilter === s ? null : s)}
             >
               {s}
@@ -269,21 +390,39 @@ function IdeaPool({ query }: { query: ReturnType<typeof useFetch<IdeasResponse>>
         <div className="alert-list" style={{ marginTop: 8 }}>
           {visible.map((idea) => (
             <div key={idea.id} className="idea-row">
-              <div className="idea-row-head">
+              <button
+                type="button"
+                className="idea-row-head"
+                aria-expanded={expandedIdea === idea.id}
+                aria-controls={`idea-evidence-${idea.id}`}
+                onClick={() => setExpandedIdea(expandedIdea === idea.id ? null : idea.id)}
+              >
                 <span className="idea-title">{idea.title}</span>
                 <span className="stage-chip">{idea.status}</span>
-              </div>
-              <div className="dim-note idea-hypothesis">{idea.hypothesis}</div>
-              <div className="dim-note num">
-                {idea.family !== null ? `${idea.family} · ` : ''}
-                {utcDate(idea.created_at)}
-              </div>
+                <span className="idea-date num">{utcDate(idea.created_at)}</span>
+              </button>
+              {expandedIdea === idea.id && (
+                <div id={`idea-evidence-${idea.id}`} className="idea-evidence">
+                  <div className="idea-hypothesis">{idea.hypothesis}</div>
+                  <div className="dim-note num">
+                    {idea.family !== null ? `${idea.family} · ` : ''}
+                    {idea.source_type}{idea.source_ref !== null ? ` · ${idea.source_ref}` : ''}
+                  </div>
+                </div>
+              )}
             </div>
           ))}
         </div>
       )}
 
-      <VenueYieldTable byVenue={data.scorecard?.by_venue} />
+      {data.scorecard?.by_venue != null && Object.keys(data.scorecard.by_venue).length > 0 && (
+        <EvidenceDisclosure
+          title="yield by venue"
+          summary={`${Object.keys(data.scorecard.by_venue).length} venues`}
+        >
+          <VenueYieldTable byVenue={data.scorecard.by_venue} />
+        </EvidenceDisclosure>
+      )}
     </section>
   )
 }
@@ -294,10 +433,7 @@ function VenueYieldTable({ byVenue }: { byVenue: Record<string, IdeaScorecardBuc
   const entries = byVenue != null ? Object.entries(byVenue) : []
   if (entries.length === 0) return null
   return (
-    <div style={{ marginTop: 12 }}>
-      <div className="micro-label" style={{ marginBottom: 6 }}>
-        yield by venue
-      </div>
+    <div>
       <table>
         <thead>
           <tr>

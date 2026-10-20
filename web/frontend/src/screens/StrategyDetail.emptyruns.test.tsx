@@ -10,7 +10,7 @@
  * runs-empty database, and rendered "no gate checks recorded yet" OVER a real, passing/failing
  * gate header — the per-check breakdown for every historical evaluation was unreachable. Feeding
  * the card `row.decision.checks` directly makes it immune to the `runs` ledger being empty. */
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, expect, it, vi } from 'vitest'
 import type {
@@ -117,6 +117,7 @@ it('renders the gate per-check breakdown even when the runs ledger has zero rows
   )
 
   // The per-check breakdown renders from `row.decision.checks` — no waterfall required.
+  fireEvent.click(await screen.findByRole('button', { name: /research evidence/i }))
   expect(await screen.findByText('holdout_sharpe')).toBeTruthy()
   expect(screen.queryByText(/no gate checks recorded yet/i)).toBeNull()
   // TrialDistribution degrades honestly instead (its own fetch chain really did find nothing).

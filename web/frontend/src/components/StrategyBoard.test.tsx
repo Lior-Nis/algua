@@ -77,6 +77,25 @@ function renderBoard() {
 
 const names = () => screen.getAllByTestId('board-row-name').map((el) => el.textContent)
 
+function openControls() {
+  fireEvent.click(screen.getByRole('button', { name: /board controls/i }))
+}
+
+it('keeps stage and exploratory ordering behind one control while the active query stays visible', async () => {
+  mockBoard(populated)
+  renderBoard()
+  await screen.findAllByTestId('board-row')
+  const controls = screen.getByRole('button', { name: /board controls.*all stages.*lifecycle/i })
+  expect(controls.getAttribute('aria-expanded')).toBe('false')
+  expect(screen.queryByRole('button', { name: 'oos sharpe' })).toBeNull()
+  fireEvent.click(controls)
+  expect(controls.getAttribute('aria-expanded')).toBe('true')
+  fireEvent.click(screen.getByRole('button', { name: /^live/ }))
+  fireEvent.click(screen.getByRole('button', { name: 'oos sharpe' }))
+  expect(screen.getByRole('button', { name: /board controls.*live.*oos sharpe/i })).toBeTruthy()
+  expect(screen.getByText(/exploratory order only/i)).toBeTruthy()
+})
+
 it('renders exactly one row per registered strategy, including ones with no gate evidence', async () => {
   mockBoard(populated)
   renderBoard()
@@ -108,6 +127,7 @@ it('filters by stage without fetching again or touching representative runs', as
   const fetchMock = mockBoard(populated)
   renderBoard()
   await screen.findAllByTestId('board-row')
+  openControls()
   fireEvent.click(screen.getByRole('button', { name: /^live/ }))
   expect(screen.getByRole('button', { name: /^live/ }).getAttribute('aria-pressed')).toBe('true')
   expect(names()).toEqual(['steady', 'tied_a'])
@@ -120,6 +140,7 @@ it('orders by a chosen metric higher-first, nulls last, ties kept in lifecycle o
   const fetchMock = mockBoard(populated)
   renderBoard()
   await screen.findAllByTestId('board-row')
+  openControls()
   fireEvent.click(screen.getByRole('button', { name: 'oos sharpe' }))
   expect(names()).toEqual([
     'mined_above', 'steady', 'tied_a', 'honest_neg', 'bare_idea', 'unmeasured',
@@ -131,6 +152,7 @@ it('never changes which run represents a strategy when the comparison order chan
   mockBoard(populated)
   renderBoard()
   await screen.findAllByTestId('board-row')
+  openControls()
   const runIds = () =>
     Object.fromEntries(
       screen.getAllByTestId('board-row').map((el) => [el.getAttribute('data-strategy'), el.getAttribute('data-run')]),
@@ -146,6 +168,7 @@ it('states that comparison ordering is exploratory only, and returns to lifecycl
   mockBoard(populated)
   renderBoard()
   await screen.findAllByTestId('board-row')
+  openControls()
   expect(screen.queryByText(/exploratory/i)).toBeNull()
   fireEvent.click(screen.getByRole('button', { name: 'oos return' }))
   expect(screen.getByRole('button', { name: 'oos return' }).getAttribute('aria-pressed')).toBe('true')

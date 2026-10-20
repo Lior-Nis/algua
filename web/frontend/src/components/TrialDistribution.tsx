@@ -2,6 +2,7 @@ import { runDetailUrl, runsUrl, useFetch } from '../api'
 import { num } from '../format'
 import type { ApiEnvelope, RunDetail, RunRow, RunsListPayload } from '../types'
 import ChartFrame from './ChartFrame'
+import EvidenceStatus from './EvidenceStatus'
 
 // ChartFrame body height — fixed whether empty or populated. Raised from 220 in fix round 3:
 // both viewBoxes grew taller to unstack the axis ticks from the axis captions, and since each
@@ -339,16 +340,9 @@ export default function TrialDistribution({ strategy }: { strategy: string }) {
 
   const cloud = buildTrialCloudGeometry(trials, ownMeanWindowSharpe)
   const strip = buildHoldoutStripGeometry(effectiveMinHoldoutSharpe, ownHoldout)
-  const isEmpty = cloud.points.length === 0
   const showStrip = strip.bar !== null || strip.own !== null
   const summary = buildSummary(cloud.points.length, strip)
   const isTruncated = trials.length === TRIAL_LIMIT
-
-  const emptyLabel =
-    trials.length === 0
-      ? 'no sweep trials recorded yet'
-      : `${cloud.excludedCount} sweep trial${cloud.excludedCount === 1 ? '' : 's'} ` +
-        'recorded, none with a mean-window-sharpe metric yet'
 
   const excludedNote =
     cloud.excludedCount > 0
@@ -379,9 +373,81 @@ export default function TrialDistribution({ strategy }: { strategy: string }) {
       ? strip.own.cx + (ownStripLabelAnchor === 'end' ? -LABEL_GAP : LABEL_GAP)
       : 0
 
+  if (trialsFetch.data === undefined) {
+    return trialsFetch.loading
+      ? <EvidenceStatus title="funnel trial distribution" state="loading" detail="loading sweep trials" />
+      : <EvidenceStatus title="funnel trial distribution" state="failed" detail={trialsFetch.error?.message ?? 'sweep trials unavailable'} onRetry={trialsFetch.refetch} />
+  }
+  const trialsStale = trialsFetch.data.stale || trialsFetch.error !== null
+  if (trials.length === 0) {
+    return (
+      <EvidenceStatus
+        title="funnel trial distribution"
+        state={trialsStale ? 'stale' : 'empty'}
+        detail={trialsStale ? 'cached trial evidence is empty — no sweep trials were recorded' : 'no sweep trials recorded yet'}
+        onRetry={trialsStale ? trialsFetch.refetch : undefined}
+      />
+    )
+  }
+  if (cloud.points.length === 0) {
+    const trialWord = cloud.excludedCount === 1 ? 'trial' : 'trials'
+    return (
+      <EvidenceStatus
+        title="funnel trial distribution"
+        state={trialsStale ? 'stale' : 'incomplete'}
+        detail={`${trialsStale ? 'cached trial evidence is incomplete — ' : ''}${cloud.excludedCount} sweep ${trialWord} recorded, none with a mean-window-sharpe metric`}
+        onRetry={trialsStale ? trialsFetch.refetch : undefined}
+      />
+    )
+  }
+
+  let gateStatus: React.ReactNode = null
+  if (gateListFetch.data === undefined) {
+    gateStatus = gateListFetch.error !== null
+      ? <EvidenceStatus title="gate comparison" state="failed" detail={gateListFetch.error.message} onRetry={gateListFetch.refetch} />
+      : <EvidenceStatus title="gate comparison" state="loading" detail="loading gate comparison" />
+  } else if (gateRunId === null) {
+    if (gateListFetch.data.stale || gateListFetch.error !== null) {
+      gateStatus = (
+        <EvidenceStatus
+          title="gate comparison"
+          state="stale"
+          detail="cached gate comparison is empty — no gate run was returned"
+          onRetry={gateListFetch.refetch}
+        />
+      )
+    }
+  } else if (gateDetailFetch.data === undefined) {
+    gateStatus = gateDetailFetch.error !== null
+      ? <EvidenceStatus title="gate comparison" state="failed" detail={gateDetailFetch.error.message} onRetry={gateDetailFetch.refetch} />
+      : <EvidenceStatus title="gate comparison" state="loading" detail="loading gate detail" />
+  } else {
+    const gateListStale = gateListFetch.data.stale || gateListFetch.error !== null
+    const gateDetailStale = gateDetailFetch.data.stale || gateDetailFetch.error !== null
+    if (gateListStale || gateDetailStale) {
+      const retryGate = () => {
+        if (gateListStale) gateListFetch.refetch()
+        if (gateDetailStale) gateDetailFetch.refetch()
+      }
+      gateStatus = (
+        <EvidenceStatus
+          title="gate comparison"
+          state="stale"
+          detail="trial cloud is current; showing cached gate comparison"
+          onRetry={retryGate}
+        />
+      )
+    }
+  }
+
   return (
-    <ChartFrame title="funnel trial distribution" isEmpty={isEmpty} emptyLabel={emptyLabel} height={HEIGHT}>
-      <div className="trial-dist-body">
+    <>
+      {trialsStale && (
+        <EvidenceStatus title="funnel trial distribution" state="stale" detail="showing cached trial evidence" onRetry={trialsFetch.refetch} />
+      )}
+      {gateStatus}
+      <ChartFrame title="funnel trial distribution" isEmpty={false} emptyLabel="" height={HEIGHT}>
+        <div className="trial-dist-body">
         <svg
           className="trial-dist-cloud-svg"
           data-testid="trial-cloud-svg"
@@ -571,7 +637,8 @@ export default function TrialDistribution({ strategy }: { strategy: string }) {
           </div>
         )}
         {excludedNote !== null && <div className="chart-footnote">{excludedNote}</div>}
-      </div>
-    </ChartFrame>
+        </div>
+      </ChartFrame>
+    </>
   )
 }

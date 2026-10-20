@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, expect, it, vi } from 'vitest'
 import type {
@@ -146,23 +146,32 @@ afterEach(() => {
 })
 
 it('renders the degraded paper banner and the rest of the page when paper is null', async () => {
+  let failDetailRefresh = false
+  let failSeriesRefresh = false
   vi.stubGlobal(
     'fetch',
-    vi.fn(async (url: string) => ({
-      ok: true,
-      status: 200,
-      json: async () => {
+    vi.fn(async (url: string) => {
+      const strategySeries = url.endsWith('/series') && !url.startsWith('/api/runs/series')
+      const strategyDetail = url.startsWith('/api/strategy/') && !strategySeries
+      if ((strategySeries && failSeriesRefresh) || (strategyDetail && failDetailRefresh)) {
+        return { ok: false, status: 503, json: async () => ({ error: 'refresh offline' }) }
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => {
         // Registered before the `/api/runs?` and `/api/runs/{id}` checks below — its own path
         // segment ("series") would otherwise fall through to neither and hit the `detail`
         // catch-all, handing ReturnOverlay a StrategyDetailResponse where it expects
         // `{series: {...}}` (mirrors web/backend/main.py's own route-registration-order note).
         if (url.startsWith('/api/runs/series')) return runSeriesEnvelope
-        if (url.endsWith('/series')) return seriesEnvelope
+        if (strategySeries) return seriesEnvelope
         if (/^\/api\/runs\/\d+$/.test(url)) return runDetailEnvelope
         if (url.startsWith('/api/runs?')) return runsListEnvelope
-        return detail
-      },
-    })) as unknown as typeof fetch,
+          return detail
+        },
+      }
+    }) as unknown as typeof fetch,
   )
 
   render(
@@ -173,18 +182,36 @@ it('renders the degraded paper banner and the rest of the page when paper is nul
     </MemoryRouter>,
   )
 
-  // degraded-part banner carries the part_errors code
-  expect(await screen.findByText(/paper state unavailable: cli_failed/)).toBeTruthy()
-  // ...while the rest of the page still renders
-  expect(screen.getByText('mom_breakout')).toBeTruthy()
+  expect(await screen.findByText('mom_breakout')).toBeTruthy()
   expect(screen.getByText('breakout over rolling high')).toBeTruthy()
+
+  fireEvent.click(screen.getByRole('button', { name: /performance evidence/i }))
+  // degraded-part evidence carries the part_errors code
+  expect(await screen.findByText('cli_failed')).toBeTruthy()
+  expect(screen.getByText('paper state')).toBeTruthy()
+  expect(screen.getByText(/no tick history recorded/i)).toBeTruthy()
+
+  fireEvent.click(screen.getByRole('button', { name: /raw provenance/i }))
   expect(screen.getByText('idea → backtested')).toBeTruthy()
+  const ordersStatus = screen.getByText('recent orders').closest('[data-state]')
+  expect(ordersStatus?.getAttribute('data-state')).toBe('failed')
+  expect(ordersStatus?.textContent).toContain('cli_failed')
+  fireEvent.click(screen.getByRole('button', { name: /research evidence/i }))
   // The gate bullet card's checks come straight from the already-fetched composite response
   // (fix round 2 — no fetch of its own), so this is available as soon as the page renders.
   expect(await screen.findByText('holdout_sharpe')).toBeTruthy()
   expect(screen.getAllByText('fail').length).toBeGreaterThanOrEqual(2) // verdict + check row
-  // empty series -> chart placeholder, no crash
-  expect(screen.getByText(/awaiting tick history/i)).toBeTruthy()
+  // empty series -> compact genuine-empty status, no false chart
+  expect(screen.getByText(/no tick history recorded/i)).toBeTruthy()
+
+  failDetailRefresh = true
+  document.dispatchEvent(new Event('visibilitychange'))
+  await waitFor(() => expect(screen.getByText(/cached .*last error refresh offline/i)).toBeTruthy())
+
+  failDetailRefresh = false
+  failSeriesRefresh = true
+  document.dispatchEvent(new Event('visibilitychange'))
+  await waitFor(() => expect(screen.getByText(/cached tick history is empty/i)).toBeTruthy())
 })
 
 // The runs-ledger-empty regression (fix round 2) lives in its own file
