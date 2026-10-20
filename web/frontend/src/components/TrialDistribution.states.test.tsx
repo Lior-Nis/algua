@@ -146,7 +146,9 @@ describe('TrialDistribution source states', () => {
     render(<TrialDistribution strategy="stale_gate" />)
     expect(await screen.findByTestId('trial-cloud-svg')).toBeTruthy()
     expect(screen.getByText('gate comparison')).toBeTruthy()
-    expect(screen.getByTestId('evidence-status').getAttribute('data-state')).toBe('stale')
+    await waitFor(() => {
+      expect(screen.getByTestId('evidence-status').getAttribute('data-state')).toBe('stale')
+    })
     expect(screen.queryByText('showing cached trial evidence')).toBeNull()
   })
 
