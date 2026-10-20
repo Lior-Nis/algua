@@ -3,6 +3,18 @@
 These scenarios expose a small number of deterministic, production-seam examples for human
 inspection. They complement the broad unit and integration suite; they do not replace it.
 
+## Persistent dashboard
+
+The latest report from `main` is published at:
+
+<https://lior-nis.github.io/algua/>
+
+The `Acceptance Dashboard` GitHub Actions workflow replaces that site after every push to `main`,
+once per day, or whenever it is started manually from the Actions tab. A failed scenario prevents
+publication, so the persistent URL continues to show the last fully passing report while the
+failed workflow preserves the failure logs for diagnosis. The report is deterministic acceptance
+evidence, not live market or account telemetry.
+
 ## Generate the dashboard
 
 Install the Python and report dependencies once:

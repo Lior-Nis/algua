@@ -25,8 +25,10 @@ npm install
 scripts/acceptance-report.sh
 ```
 
-Open the reported local HTML path. See [the acceptance guide](tests/acceptance/README.md) for the
-scenario inventory and review protocol.
+Open the reported local HTML path, or use the persistent
+[acceptance dashboard](https://lior-nis.github.io/algua/) built from the latest passing `main`.
+See [the acceptance guide](tests/acceptance/README.md) for the scenario inventory, refresh behavior,
+and review protocol.
 
 ## Data snapshots
 ```

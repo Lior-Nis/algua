@@ -1,0 +1,56 @@
+name: Acceptance Dashboard
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Refresh after the daily UTC close while avoiding the top-of-hour Actions surge.
+    - cron: "17 05 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install Python dependencies
+        run: uv sync --locked
+      - name: Install dashboard renderer
+        run: npm ci
+      - name: Generate acceptance dashboard
+        run: scripts/acceptance-report.sh
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+      - name: Upload dashboard
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: .runs/acceptance/allure-report
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy dashboard
+        id: deployment
+        uses: actions/deploy-pages@v4
