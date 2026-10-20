@@ -1325,15 +1325,7 @@ details[open] > .stage-summary::before { content: '▾'; }
   overflow: hidden;
   border: 1px solid var(--line-2);
   border-radius: 8px;
-  padding: 15px 16px 13px 20px;
-}
-
-.decision-report::before {
-  content: '';
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 3px;
-  background: var(--decision-color);
+  padding: 15px 16px 13px;
 }
 
 .decision-report[data-state='blocked'] { --decision-color: var(--red); }
