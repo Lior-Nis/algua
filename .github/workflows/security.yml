@@ -22,10 +22,11 @@ jobs:
       - name: Audit locked dependencies
         run: |
           set -euo pipefail
-          # Export the fully pinned lock graph (incl. transitives + all dependency
-          # groups) so the audit reflects exactly what CI installs. Any export
-          # failure is fatal (set -e).
+          # Export both fully pinned lock graphs (incl. transitives + all dependency
+          # groups) so the audit reflects exactly what the platform and standalone
+          # web service install. Any export failure is fatal (set -e).
           uv export --format requirements-txt --no-emit-project --all-groups --no-hashes > requirements.audit.txt
+          uv export --project web --format requirements-txt --no-emit-project --all-groups --no-hashes > requirements.web.audit.txt
           # Assemble documented false-positive / unfixable advisory ignores into an
           # array (no word-splitting; an empty file yields no args).
           ignores=()
@@ -39,6 +40,12 @@ jobs:
           # pip-audit exits non-zero on any un-ignored advisory -> build fails.
           uvx pip-audit@2.9.0 \
             --requirement requirements.audit.txt \
+            --no-deps \
+            --strict \
+            --desc on \
+            "${ignores[@]}"
+          uvx pip-audit@2.9.0 \
+            --requirement requirements.web.audit.txt \
             --no-deps \
             --strict \
             --desc on \
