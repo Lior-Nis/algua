@@ -2,7 +2,7 @@
 title: 'Planner input contract: non-finite current weights and symbol labels'
 type: 'correctness'
 created: '2026-10-22'
-status: 'drafted'  # awaiting owner decision (see "Open decision for Lior"); not ready-for-dev
+status: 'ready-for-dev'
 baseline_commit: 'a3c71fa'
 context:
   - 'docs/development/stories/deferred-work.md'
@@ -186,17 +186,13 @@ captured keys; strategy weights are not normalized). It needs a separate parity 
 No new breach kind and no change to the frozen vocabulary. Valid inputs produce byte-identical
 intents.
 
-## Open decision for Lior
+## Owner decision
 
-1. **NaN/inf current-weight policy:** approve **N1** (fail closed with a contract `ValueError`), or
-   choose N2 (fail closed with `RiskBreach("unvaluable_marks")`, halting the account and preserving
-   positions). N3 (flatten) and N4 (skip and alert) are not recommended.
-2. **Label contract:** approve **L1**: symbol labels must be non-empty `str`, enforced in the shared
-   `check_finite_weights` rail as `non_finite_weight`. This accepts that a backtest which today
-   passes with a zero-weight non-`str` label would start to breach. Alternatively, choose L3 (a new
-   `invalid_symbol_label` kind, which changes the frozen child vocabulary).
+Lior approved on 2026-10-22:
 
-Until both are answered this spec stays `drafted` and is not admitted for development.
+1. **N1.** Fail closed with a contract `ValueError` for NaN/inf current weights.
+2. **L1.** Labels must be non-empty `str`, enforced in `check_finite_weights` as `non_finite_weight`.
+3. The `run_paper` held-symbol mark check.
 
 ## Code Map (for the implementing story, after approval)
 
@@ -258,6 +254,7 @@ Until both are answered this spec stays `drafted` and is not admitted for develo
 ## Spec Change Log
 
 - 2026-10-22: drafted from the Story 1.1 deferred-work entries; awaiting owner decision.
+- 2026-10-22: owner approved N1 + L1; status ready-for-dev.
 
 ## Verification
 
