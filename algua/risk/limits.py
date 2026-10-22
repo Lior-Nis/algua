@@ -105,11 +105,18 @@ def check_gross_exposure(weights: pd.Series, max_gross: float) -> None:
 
 
 def check_finite_weights(weights: pd.Series, strategy_name: str) -> None:
-    """Fail-closed guard against non-finite target weights. A strategy returning NaN/inf for a
-    named symbol, a non-numeric weight, or a duplicated symbol index must HARD-BREACH, not be
-    silently flattened by a downstream fillna(0.0) (NaN-skipping .sum() / `NaN < 0` would let it
-    through). The panel fast-path's omitted-cell NaN is filled to flat BEFORE this runs, so its
-    sparse-NaN-as-flat convention is preserved; only real non-finite VALUES reach here (#135)."""
+    """Fail-closed guard against non-finite target weights and illegal symbol labels. A strategy
+    returning NaN/inf for a named symbol, a non-numeric weight, a duplicated symbol index, or a
+    label that is not a non-empty ``str`` must HARD-BREACH, not be silently flattened by a
+    downstream fillna(0.0) (NaN-skipping .sum() / `NaN < 0` would let it through). The panel
+    fast-path's omitted-cell NaN is filled to flat BEFORE this runs, so its sparse-NaN-as-flat
+    convention is preserved; only real non-finite VALUES reach here (#135).
+
+    A non-string or empty label is named before duplicate and value checks, including when the
+    weight is also non-finite: the label is not a symbol, so the breach names a non-string symbol
+    label. Every offender list is sorted with ``key=str``, so a mixed-type index that reaches a
+    value-rail message raises ``RiskBreach`` instead of ``TypeError``.
+    """
     if len(weights) == 0:
         return
     if weights.index.isnull().any():
@@ -117,8 +124,15 @@ def check_finite_weights(weights: pd.Series, strategy_name: str) -> None:
             "non_finite_weight",
             f"strategy '{strategy_name}' returned a null symbol label",
         )
+    offenders = [label for label in weights.index if not isinstance(label, str) or not label]
+    if offenders:
+        raise RiskBreach(
+            "non_finite_weight",
+            f"strategy '{strategy_name}' returned a non-string symbol label "
+            f"{sorted(offenders, key=str)}",
+        )
     if weights.index.has_duplicates:
-        dups = sorted(set(weights.index[weights.index.duplicated(keep=False)]))
+        dups = sorted(set(weights.index[weights.index.duplicated(keep=False)]), key=str)
         raise RiskBreach(
             "non_finite_weight",
             f"strategy '{strategy_name}' returned duplicate symbol weight(s) for {dups}",
@@ -132,7 +146,7 @@ def check_finite_weights(weights: pd.Series, strategy_name: str) -> None:
         )
     finite = np.isfinite(weights.to_numpy())
     if not bool(finite.all()):
-        bad = sorted(weights.index[~finite])
+        bad = sorted(weights.index[~finite], key=str)
         raise RiskBreach(
             "non_finite_weight",
             f"strategy '{strategy_name}' returned non-finite target weight(s) for {bad}",
@@ -175,7 +189,7 @@ def check_max_weight_per_symbol(weights: pd.Series, max_per_symbol: float) -> No
         return
     over = weights[weights.abs() > max_per_symbol + WEIGHT_TOL]
     if len(over):
-        worst = sorted(over.index)
+        worst = sorted(over.index, key=str)
         raise RiskBreach(
             "max_weight_per_symbol",
             f"single-name weight(s) for {worst} exceed max_weight_per_symbol "
@@ -189,7 +203,7 @@ def check_short_policy(weights: pd.Series, allow_short: bool, strategy_name: str
     |weight|). Replaces the old undeclared check_long_only: the constraint is now a hashed contract
     field, not an invisible convention (#135)."""
     if not allow_short and len(weights) and bool((weights < 0).any()):
-        negative = sorted(weights[weights < 0].index)
+        negative = sorted(weights[weights < 0].index, key=str)
         raise RiskBreach(
             "long_only",
             f"long-only: strategy '{strategy_name}' returned negative target weight(s) "

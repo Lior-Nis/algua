@@ -191,6 +191,80 @@ def test_validate_decision_weights_universe_after_finite_before_value_checks():
     assert ei_fin.value.kind == "non_finite_weight"
 
 
+def test_empty_symbol_label_raises_non_finite_weight():
+    from algua.contracts.types import ExecutionContract
+    from algua.risk.limits import RiskBreach, validate_decision_weights
+
+    with pytest.raises(RiskBreach) as ei:
+        validate_decision_weights(
+            pd.Series({"": 0.1}),
+            ExecutionContract(rebalance_frequency="1d"),
+            "s",
+            allowed_symbols={""},
+        )
+    assert ei.value.kind == "non_finite_weight"
+    assert "non-string symbol label" in ei.value.detail
+
+
+def test_non_string_symbol_label_raises_non_finite_weight():
+    from algua.risk.limits import RiskBreach, check_finite_weights
+
+    with pytest.raises(RiskBreach) as ei:
+        check_finite_weights(pd.Series({1: 0.0, "AAPL": 0.5}), "s")
+    assert ei.value.kind == "non_finite_weight"
+    assert "non-string symbol label" in ei.value.detail
+    # Two incomparable non-str labels must still render; a bare sorted() TypeErrors.
+    with pytest.raises(RiskBreach) as ei_mixed:
+        check_finite_weights(pd.Series({1: 0.2, b"ZZ": 0.2}), "s")
+    assert ei_mixed.value.kind == "non_finite_weight"
+    assert "non-string symbol label" in ei_mixed.value.detail
+
+
+@pytest.mark.parametrize(
+    ("rail", "detail"),
+    [
+        ("finite", "non-string symbol label"),
+        ("duplicate", "non-string symbol label"),
+        ("cap", "max_weight_per_symbol"),
+        ("long_only", "long-only"),
+        ("universe", "out-of-universe"),
+    ],
+)
+def test_mixed_labels_breaching_a_rail_raise_risk_breach(rail, detail):
+    # Mixed int/str labels must raise RiskBreach, not TypeError. check_finite_weights names a
+    # non-string symbol label before its value sorts; cap and long-only render their own kind
+    # with key=str. A bare sorted() used to escape the breach -> kill-switch routing.
+    from algua.risk.limits import (
+        RiskBreach,
+        check_finite_weights,
+        check_max_weight_per_symbol,
+        check_short_policy,
+        check_universe_membership,
+    )
+
+    with pytest.raises(RiskBreach) as ei:
+        if rail == "finite":
+            check_finite_weights(pd.Series({1: float("nan"), "A": float("nan")}), "s")
+        elif rail == "duplicate":
+            check_finite_weights(pd.Series([0.1, 0.2, 0.1, 0.2], index=[1, "A", 1, "A"]), "s")
+        elif rail == "cap":
+            check_max_weight_per_symbol(pd.Series({1: 0.9, "A": 0.9}), 0.5)
+        elif rail == "long_only":
+            check_short_policy(
+                pd.Series({1: -0.1, "A": -0.1}), allow_short=False, strategy_name="s",
+            )
+        else:
+            check_universe_membership(pd.Series({1: 0.5, "A": 0.5}), {"ZZZ"}, "s")
+    assert ei.value.kind == {
+        "finite": "non_finite_weight",
+        "duplicate": "non_finite_weight",
+        "cap": "max_weight_per_symbol",
+        "long_only": "long_only",
+        "universe": "out_of_universe",
+    }[rail]
+    assert detail in ei.value.detail
+
+
 def test_finite_weights_rejects_bool_dtype_and_null_labels():
     import numpy as np
 

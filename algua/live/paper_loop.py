@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -33,6 +34,36 @@ class PaperRunResult:
     final_cash: float
     final_equity: float
     reconcile_ok: bool
+
+
+def _require_held_marks(positions: pd.Series, bar_closes: pd.Series) -> None:
+    """Fail closed before sizing when a held symbol has no positive finite close on this bar.
+
+    A NaN close used to surface as ``non_positive_equity`` because it poisoned the equity
+    denominator. A symbol absent from the close panel used to be valued at 0.0. Both are
+    unvaluable marks. Non-positive closes follow the live lane's ``assert_marks_usable`` rule.
+    """
+    unvaluable: list[object] = []
+    for symbol, qty in positions.items():
+        if qty == 0.0:
+            continue
+        if symbol not in bar_closes.index:
+            unvaluable.append(symbol)
+            continue
+        try:
+            mark = float(bar_closes[symbol])
+        except (TypeError, ValueError):
+            unvaluable.append(symbol)
+            continue
+        if not (math.isfinite(mark) and mark > 0.0):
+            unvaluable.append(symbol)
+    if unvaluable:
+        raise RiskBreach(
+            "unvaluable_marks",
+            "held symbols have a missing or unvaluable mark: "
+            f"{sorted(unvaluable, key=str)} - "
+            "refusing to value/size the book off an unvaluable feed",
+        )
 
 
 def run_paper(
@@ -80,6 +111,11 @@ def run_paper(
         # loop's `if i < warmup: continue` (#1: reconcile the historical off-by-one).
         if bars_seen <= warmup:
             continue  # warm-up: observe only — no signal evaluation, validation, or orders
+        positions = broker.get_positions()
+        bar_closes = closes.loc[t]
+        # Held marks before the equity guard: a NaN close poisons equity and would otherwise be
+        # reported as non_positive_equity, and a missing close must not be sized at 0.0.
+        _require_held_marks(positions, bar_closes)
         # Equity is the sizing denominator; a value that is not a positive finite number would
         # ZeroDivision (== 0), flip every weight's sign (< 0), or NaN-poison every weight to a
         # silent no-op (NaN). The drawdown breaker should have halted long before, so this is a
@@ -91,10 +127,8 @@ def run_paper(
                 f"run_paper sizing equity {equity} is not a usable (positive, finite) "
                 f"denominator - refusing to size against it (sign-flip / divide-by-zero / NaN)",
             )
-        positions = broker.get_positions()
-        bar_closes = closes.loc[t]
         current_weights = {
-            s: float(positions.get(s, 0.0)) * float(bar_closes.get(s, 0.0)) / equity
+            s: float(positions.get(s, 0.0)) * float(bar_closes[s]) / equity
             for s in positions.index
         }
         weights, intents = decide(strategy, bars.loc[:t], current_weights, t)
