@@ -312,7 +312,7 @@ staggered grid, each on its own cadence, all kept off the **paper tick's** minut
 
 | unit | schedule | does |
 |---|---|---|
-| `algua-research.timer` | every 6h at `:00` UTC (00/06/12/18) | claims ideas from the pool, authors/backtests/gates them (unchanged) |
+| `algua-research.timer` | every 6h at `:00` UTC (`OnCalendar=*-*-* 00/6:00:00 UTC`, 00/06/12/18) | claims ideas from the pool, authors/backtests/gates them |
 | `algua-leap.timer` | every 2h at `:30`, between research runs | inspirations → structured hypotheses, but only when `research idea depth` is below its refill trigger AND the vault still holds a non-exhausted note (either gate exits fast, no worktree) |
 | `algua-forage.timer` | daily `03:00 UTC` | web search → inspiration notes under `kb/inspirations/`, rotating `FORAGE_SLICES` categories per run so every category is foraged at least weekly |
 
