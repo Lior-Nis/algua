@@ -1,5 +1,5 @@
 # generated: 2026-09-25
-# last_updated: 2026-09-30
+# last_updated: 2026-10-22
 # project: Algua
 # project_key: NOKEY
 # tracking_system: file-system
@@ -30,12 +30,12 @@
 # WORKFLOW NOTES:
 # ===============
 # - Story 1.3 is a decomposed parent traceability record, not an executable work item.
-# - Stories 1.3a-1.3c are done; Story 1.3d passed readiness.
+# - Stories 1.3a-1.3d are done; Story 1.4's code is merged (PR #686) and only its AC7 evidence is open.
 # - A ready story is not merged, deployed, qualified, or authorized to trade.
 # - Move a story through in-progress and review before done.
 
 generated: 2026-09-25
-last_updated: 2026-09-30
+last_updated: 2026-10-22
 project: Algua
 project_key: NOKEY
 tracking_system: file-system
@@ -50,20 +50,28 @@ development_status:
   1-3b-materialize-and-verify-recoverable-planner-artifacts: done
   1-3c-execute-frozen-planners-in-paper: done
   1-3d-bind-operational-evidence-and-qualification: done
+  # 1-4: code merged in PR #686 (2026-10-03). Only AC7 (retire the last legacy tenant,
+  # liquidity_stable_quality_momentum, flat account, paper timer restarted) is unconfirmed.
   1-4-controlled-exit-of-the-legacy-paper-cohort: review
   epic-1-retrospective: done
   epic-2: in-progress
-  # 2-1 and 2-2 are design-complete with no Epic 2 predecessor; each still runs its contract-first
-  # readiness check ("Contract and readiness first", docs/agent/story-delivery.md) before code.
+  # 2-1 and 2-2 had no Epic 2 predecessor; each ran its contract-first readiness check
+  # ("Contract and readiness first", docs/agent/story-delivery.md) before code.
   # Later stories wait on the predecessor named in their story file.
-  2-1-refuse-live-qualification-on-relaxed-gates: ready-for-dev  # merges after 2.2
-  2-2-drain-resting-paper-orders-on-lane-exit: review
+  # 2-1: AC10 (refuse the raw forward_tested/candidate edges for every actor) shipped outside the
+  # story via PR #700 (closes #682); the rest of the story is not implemented.
+  2-1-refuse-live-qualification-on-relaxed-gates: ready-for-dev  # next; 2.2 has merged
+  2-2-drain-resting-paper-orders-on-lane-exit: done  # merged PR #693; #685 closed
   2-3-bind-live-authorization-to-the-frozen-deployment: backlog  # after 2-1 and 2-2
   2-4-hand-off-and-execute-frozen-deployments-live: backlog  # after 2-3
   2-5-enforce-the-experimental-capital-envelope: backlog  # after 2-4; activation needs owner inputs
   2-6-pause-live-trading-at-ten-percent-drawdown: backlog  # after 2-5
   2-7-trace-orders-from-deployment-to-position: backlog  # after 2-6
-  2-8-validate-releases-in-paper-before-live: backlog  # owner decision + after 2-7
+  2-8-validate-releases-in-paper-before-live: backlog  # after 2-7 (owner decision made 2026-10-04)
   2-9-define-safe-states-and-incident-evidence: backlog  # after 2-8
   2-10-run-the-72-hour-unattended-acceptance: backlog  # after 2-1..2-9 deployed + preconditions
   epic-2-retrospective: optional
+  # Work outside Epics 1-2, tracked here for visibility. Status words as defined above.
+  strategy-board: done  # PR #705; docs/development/stories/spec-strategy-board.md
+  dashboard-decision-layer: done  # PR #706; docs/development/stories/spec-dashboard-decision-layer.md
+  planner-nan-and-label-contract: review  # contract PR #711 merged; implementation PR #712 open, unmerged

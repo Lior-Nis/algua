@@ -4,7 +4,7 @@ baseline_commit: e875b6d
 
 # Story 2.2: Drain a strategy's resting paper orders on every paper-lane exit
 
-Status: review
+Status: done
 
 Prepared: 2026-10-04. Baseline: `e875b6d` (main after PR #686). Epic: 2.
 Requirements: FR13 (safe unattended paper operation), FR1 (the `forward_tested -> live` edge is a
@@ -262,3 +262,4 @@ test_module_size_ratchet.py.
 ### Change Log
 
 - 2026-10-05: Contract and readiness (PR #692); implemented; review round 1 applied; moved to review.
+- 2026-10-22: Merged in PR #693 (2026-10-05); #685 closed 2026-10-19. Status set to done.

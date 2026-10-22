@@ -163,7 +163,8 @@ which records the calls the acceptance criteria left open.
       envelope docs (AC5–AC7).
 - [ ] Regression proof that exploration is unchanged (AC8).
 - [ ] Rehearse the migration on a copy of the production registry; record the result (AC4).
-- [ ] Refuse the raw forward_tested and candidate edges for every actor (AC10).
+- [x] Refuse the raw forward_tested and candidate edges for every actor (AC10). Shipped outside
+      the story in PR #700 (closes #682, merged 2026-10-17); the other tasks remain open.
 - [ ] Protection, mutation checks, full gate, independent review (AC9).
 
 ## Dev notes

@@ -189,7 +189,7 @@ done
 systemctl --user daemon-reload
 echo
 echo "Units installed and user daemon reloaded. To enable (printed, NOT executed by this script):"
-echo "  systemctl --user enable --now algua-research.timer          # research producer, every 2h"
+echo "  systemctl --user enable --now algua-research.timer          # research producer, every 6h"
 echo "  systemctl --user enable --now algua-paper.timer             # paper tick, every 20m at :07 (session-gated)"
 echo "  systemctl --user enable --now algua-mergeback-drain.timer   # merge-back consumer, every 30m"
 echo "  systemctl --user enable --now algua-forage.timer            # web inspiration foraging, daily 03:00 UTC"

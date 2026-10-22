@@ -15,7 +15,7 @@ sibling all no-op cleanly.
   drainer's `:00/:30` grid. **Daily on purpose, NOT weekdays-only**: the operator wrapper's XNYS
   calendar gate no-ops non-session firings, so the timer never re-encodes the exchange calendar.
 - `algua-research.{service,timer}` — the autonomous **research producer** cycle at **factory
-  cadence: every 2 hours** (12/day; see
+  cadence: every 6 hours** (4/day since #649; see
   `docs/superpowers/specs/2026-08-10-strategy-factory-design.md`): an agent ideates → authors
   → backtests/walk-forwards/sweeps → gates (preview `research promote`) up to `candidate` in an
   explore-isolated worktree. See "Autonomous research loop" below.
@@ -92,7 +92,7 @@ live unit set is never left half-updated, and the installed units can never drif
 templates for longer than one re-run. Use `loginctl enable-linger <user>` so user timers fire without an active login, and
 inspect with `systemctl --user list-timers 'algua-*'` / `journalctl --user -u algua-research.service`.
 
-**Factory cadence (slice 1).** Research fires **every 2h** (`OnCalendar=*-*-* 00/2:00:00 UTC`,
+**Factory cadence (slice 1).** Research fires **every 6h** (`OnCalendar=*-*-* 00/6:00:00 UTC`,
 overlaps skip via the launcher's non-blocking flock); paper fires **every 20 minutes at :07/:27/:47
 UTC** and trades at most once per session (the calendar gate no-ops non-sessions and the marker
 no-ops repeats — do NOT make it weekdays-only, and do NOT collapse it back to a single daily fire:
@@ -235,8 +235,8 @@ integrity files. A human can still force one through immediately instead of wait
 drain cycle: `uv run algua paper merge-back --branch <b> --strategy <s> --universe <u> --start D
 --end D` (see "Direct-invocation residual risk" above for why that bypasses the shared lock).
 
-**Cadence and the FDR budget.** The timer runs at **factory cadence: every 2h, 12 runs/day**
-(`OnCalendar=*-*-* 00/2:00:00 UTC`). That rate is safe for the funnel *because* exploration is
+**Cadence and the FDR budget.** The timer runs at **factory cadence: every 6h, 4 runs/day**
+(`OnCalendar=*-*-* 00/6:00:00 UTC`; sized from paper-book turnover, #649). That rate is safe for the funnel *because* exploration is
 scratch: a cycle's `research promote` is a preview that records NO breadth and burns NO holdout on
 the authoritative funnel, so it never consumes the FDR budget (**≤16 promotion-eligible binding
 tests / rolling 365 days**). That budget is spent only by an actual `paper merge-back` run — which
@@ -282,9 +282,9 @@ launcher claims ideas from the pool per run (`--category` restricts), it no long
 thesis.
 
 **Contention.** The driver holds a non-blocking `data/research-loop.lock` for the whole cycle and skips
-(no-op) rather than queue if another research cycle holds it — so the 2h cadence can never stack
-overlapping cycles (with `TIMEOUT=45m` + `SYNC_TIMEOUT=5m` under `TimeoutStartSec=4200`, each slot has
-~50m of headroom anyway). It does **not** contend with the paper operator (research writes only
+(no-op) rather than queue if another research cycle holds it — so the 6h cadence can never stack
+overlapping cycles (with `TIMEOUT=45m` + `SYNC_TIMEOUT=5m` under `TimeoutStartSec=4200`, each 6h slot
+has ample headroom anyway). It does **not** contend with the paper operator (research writes only
 scratch; the sole authoritative writer, `paper merge-back`, has its own `merge_back.lock` + operator
 policy), and research fires on the hour while paper fires at `:07/:27/:47`, so the two grids never
 coincide either.
@@ -312,7 +312,7 @@ staggered grid, each on its own cadence, all kept off the **paper tick's** minut
 
 | unit | schedule | does |
 |---|---|---|
-| `algua-research.timer` | every 2h at `:00` | claims ideas from the pool, authors/backtests/gates them (unchanged) |
+| `algua-research.timer` | every 6h at `:00` UTC (00/06/12/18) | claims ideas from the pool, authors/backtests/gates them (unchanged) |
 | `algua-leap.timer` | every 2h at `:30`, between research runs | inspirations → structured hypotheses, but only when `research idea depth` is below its refill trigger AND the vault still holds a non-exhausted note (either gate exits fast, no worktree) |
 | `algua-forage.timer` | daily `03:00 UTC` | web search → inspiration notes under `kb/inspirations/`, rotating `FORAGE_SLICES` categories per run so every category is foraged at least weekly |
 

@@ -76,7 +76,7 @@ and working-tree tick paths now that the cohort is empty.
 - [x] Accept sub-minimum paper residuals in the bench flatness check (AC3).
 - [x] Protection, mutation checks, full gate (AC4).
 - [x] Independent review round and fixes (AC5–AC6).
-- [ ] Merge and deploy.
+- [x] Merge and deploy. Code merged in PR #686 (2026-10-03).
 - [ ] Flatten and retire the cohort; resume the paper operator (AC7).
 
 ### Review Findings
