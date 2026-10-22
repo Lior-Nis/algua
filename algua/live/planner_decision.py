@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -33,8 +34,8 @@ class PlannerResult:
     protocol_version: int = PLANNER_PROTOCOL_VERSION
 
 
-def _finite_number(value: object, label: str) -> float:
-    """The shared finite-number contract for captured state and current holding weights."""
+def finite_number(value: object, label: str) -> float:
+    """Shared finite-number contract. Public because ``planner_late`` imports it."""
     if type(value) not in (int, float):
         raise ValueError(f"{label} must be a finite number")
     assert isinstance(value, (int, float))
@@ -43,20 +44,26 @@ def _finite_number(value: object, label: str) -> float:
     return float(value)
 
 
-def _numeric_mapping(value: object, label: str) -> dict[str, float]:
-    """Non-empty NFC string keys and finite values. One copy, shared with the late planner."""
-    from collections.abc import Mapping
+def numeric_mapping(
+    value: object, label: str, *, normalize: bool = True
+) -> dict[str, float]:
+    """Non-empty string keys and finite values. Public because ``planner_late`` imports it.
 
+    ``normalize=True`` (captured late-planner state) NFC-normalizes keys and rejects a
+    collision after that. ``build_intents`` passes ``normalize=False`` so a valid holding
+    label is checked and kept byte-for-byte. Renaming it would disagree with the strategy
+    label, which this contract does not NFC-normalize.
+    """
     if not isinstance(value, Mapping):
         raise ValueError(f"{label} must be a mapping")
     result: dict[str, float] = {}
     for symbol, number in value.items():
         if not isinstance(symbol, str) or not symbol:
             raise ValueError(f"{label} keys must be non-empty strings")
-        normalized = unicodedata.normalize("NFC", symbol)
-        if normalized in result:
+        key = unicodedata.normalize("NFC", symbol) if normalize else symbol
+        if normalize and key in result:
             raise ValueError(f"{label} keys collide after Unicode normalization")
-        result[normalized] = _finite_number(number, f"{label}[{symbol!r}]")
+        result[key] = finite_number(number, f"{label}[{symbol!r}]")
     return result
 
 
@@ -65,10 +72,11 @@ def build_intents(
 ) -> list[OrderIntent]:
     """Emit sorted target-weight deltas, including zero targets for dropped holdings.
 
-    ``current_weights`` uses the same contract as captured late-planner mappings: non-empty
-    string keys and finite values. A violation raises before any intent is built.
+    ``current_weights`` must have non-empty string keys and finite values. Keys are validated
+    and not renamed: strategy labels are outside NFC normalization. A violation raises before
+    any intent is built.
     """
-    holdings = _numeric_mapping(current_weights, "current_weights")
+    holdings = numeric_mapping(current_weights, "current_weights", normalize=False)
     intents: list[OrderIntent] = []
     for symbol in sorted(set(weights.index) | set(holdings)):
         target = float(weights.get(symbol, 0.0))

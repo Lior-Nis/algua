@@ -148,6 +148,15 @@ def test_valid_inputs_keep_sorted_delta_intents():
     ]
 
 
+def test_non_nfc_held_symbol_at_target_emits_no_intent():
+    # NFD "E" + combining acute equals the target weight. Validating current keys must not
+    # rename the holding, or the same symbol becomes a BUY of the raw label and a SELL of NFC.
+    from algua.live.planner import build_intents
+
+    ts = datetime(2023, 1, 4, tzinfo=UTC)
+    assert build_intents(pd.Series({"E\u0301": 0.5}), {"E\u0301": 0.5}, ts) == []
+
+
 def test_planner_dependency_closure_has_no_operational_authority():
     # Reuse the installed import-linter graph engine. Include TYPE_CHECKING edges so
     # importing a ledger-coupled DTO only for annotations cannot sneak across this seam.

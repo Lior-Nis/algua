@@ -110,6 +110,17 @@ class _HoldingBroker(SimBroker):
         return super().submit(intent)
 
 
+@pytest.mark.parametrize("close", [0.0, -1.0])
+def test_run_paper_non_positive_close_for_held_symbol_is_unvaluable_marks(close):
+    # Matches live assert_marks_usable: a held close must be finite and strictly positive.
+    broker = _HoldingBroker("AAA", 10.0)
+    bars = _bars({"AAA": [close, 100.0, 100.0, 100.0]})
+    with pytest.raises(RiskBreach) as ei:
+        run_paper(_all_in("AAA"), broker, _FakeProvider(bars), DATES[0], DATES[-1])
+    assert ei.value.kind == "unvaluable_marks"
+    assert broker.submitted == []
+
+
 def test_run_paper_nan_close_for_held_symbol_is_unvaluable_marks():
     broker = _HoldingBroker("AAA", 10.0)
     bars = _bars({"AAA": [float("nan"), 100.0, 100.0, 100.0]})

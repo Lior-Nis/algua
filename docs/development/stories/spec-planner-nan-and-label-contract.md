@@ -213,7 +213,7 @@ Lior approved on 2026-10-22:
 - [x] Tests first: one failing test per I/O-matrix row.
 - [x] Implement N1/L1 (or the chosen options) and the `run_paper` mark check.
 - [x] Mutation-check each new guard (break it, confirm a test fails, restore it).
-- [ ] Independent review round (story-delivery §4); record findings here.
+- [x] Independent review round (story-delivery §4); record findings here.
 
 **Acceptance Criteria:**
 - Given a NaN, +inf or -inf current weight for any symbol, when `plan()` or `build_intents` runs,
@@ -269,14 +269,19 @@ proceeded.
   `RiskBreach("non_finite_weight")` naming a non-string symbol label. The check runs before the
   duplicate and value checks, so a non-finite weight on a bad label is still named as a label
   defect. Cap, long-only, finite-value, and duplicate messages sort with `key=str`.
-- `planner_late._finite_number` and `_numeric_mapping` moved into `planner_decision` and are
-  imported back. `build_intents` (and therefore `plan`) runs current weights through that one
-  helper: non-empty string keys, finite values, `ValueError` before any intent. Keys are
-  NFC-normalized, as captured quantities already were. Strategy target labels are not normalized.
+- `planner_late._finite_number` and `_numeric_mapping` moved into `planner_decision` as the
+  public helpers `finite_number` and `numeric_mapping` (the late planner imports them) and are
+  imported back. `build_intents` (and therefore `plan`) validates current weights through that
+  helper with `normalize=False`: non-empty string keys, finite values, `ValueError` before any
+  intent, and the key text is left unchanged. The late planner keeps the default
+  `normalize=True` for captured quantities and market values. Strategy target labels are not
+  normalized.
 - `run_paper` checks held-symbol closes after warm-up and before the equity guard. A missing,
   non-finite, or non-positive close raises `RiskBreach("unvaluable_marks")` and is not sized at
-  `0.0`. A missing close is `unvaluable_marks` here; the live lane's `assert_marks_usable` reports
-  absence as `stale_marks`.
+  `0.0`. A close must be strictly positive (`mark > 0.0`), the same rule as the live lane's
+  `assert_marks_usable`. Held closes of `0.0` and `-1.0` are `unvaluable_marks` and submit no
+  orders. A missing close is `unvaluable_marks` here; the live lane reports absence as
+  `stale_marks`.
 
 **Mutation check** (each break restored the original bytes; the named test failed):
 - label-type check: `test_non_string_symbol_label_raises_non_finite_weight` and
@@ -301,8 +306,25 @@ abort in `threadpoolctl` after `fork` (`parallel sweep failed`), except
 pool and still aborts. `test_unregistered_strategy_full_cycle_registers_produces_evidence_and_promotes`
 fails the same JSON decode on unmodified `main` under that budget. Not caused by this diff.
 
-**Not done here.** The independent review round (story-delivery §4) is still open. No merge, no
-deploy, no broker or trading-config change.
+**Review round (PR #712, head `292ba5f`).** Findings and resolutions:
+
+1. Medium, parity. `build_intents` NFC-normalized current-weight keys and left strategy target
+   labels raw. A non-NFC held symbol already at target (`E` + combining acute, weight 0.5 on
+   both sides) emitted `[BUY raw, SELL normalised]` instead of `[]`. The spec requires
+   byte-identical intents for valid inputs and lists NFC of strategy labels as out of scope.
+   Resolution: `numeric_mapping(..., normalize=False)` in `build_intents` validates keys and
+   values without renaming. The late planner still NFC-normalizes captured state (default
+   `normalize=True`). Failing test added first:
+   `build_intents(Series({'E\u0301': 0.5}), {'E\u0301': 0.5}) == []`. Dropping `normalize=False`
+   fails that test.
+2. Low. `run_paper` rejects `close <= 0` as `unvaluable_marks`. Kept: it matches live
+   `assert_marks_usable`. Tests added for a held symbol with close `0.0` and `-1.0`: kind
+   `unvaluable_marks`, no orders submitted. The positive-close rule is recorded above.
+3. Nits. `finite_number` and `numeric_mapping` are public names, because `planner_late` imports
+   them across modules. `from collections.abc import Mapping` sits at the top of
+   `planner_decision.py`.
+
+No merge, no deploy, no broker or trading-config change.
 
 ## Spec Change Log
 
@@ -310,6 +332,10 @@ deploy, no broker or trading-config change.
 - 2026-10-22: owner approved N1 + L1; status ready-for-dev.
 - 2026-10-22: implemented N1 + L1 and the `run_paper` mark check on
   `fix/planner-nan-and-label-contract`. See the implementation record. Review round still open.
+- 2026-10-22: review round on PR #712. `build_intents` no longer NFC-renames current-weight
+  keys (`normalize=False`). Held closes of `0.0` and `-1.0` stay `unvaluable_marks` (positive
+  close required, matching live). Helpers renamed `finite_number` / `numeric_mapping`; `Mapping`
+  import moved to module top.
 
 ## Verification
 

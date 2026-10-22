@@ -40,8 +40,8 @@ from algua.live.planner_contract import (
 from algua.live.planner_decision import (
     PlannerInput,
     PlannerResult,
-    _finite_number,
-    _numeric_mapping,
+    finite_number,
+    numeric_mapping,
 )
 from algua.live.planner_early import (
     assert_marks_usable,
@@ -83,14 +83,14 @@ def _late_state(
             "denominator - refusing to trade before it divides by zero, inverts weights, or "
             "NaN-poisons",
         )
-    drawdown_equity = _finite_number(captured.drawdown_equity, "drawdown_equity")
+    drawdown_equity = finite_number(captured.drawdown_equity, "drawdown_equity")
     persisted_peak = (
         None
         if captured.persisted_peak_equity is None
-        else _finite_number(captured.persisted_peak_equity, "persisted_peak_equity")
+        else finite_number(captured.persisted_peak_equity, "persisted_peak_equity")
     )
-    quantities = _numeric_mapping(captured.quantities, "quantities")
-    market_values = _numeric_mapping(captured.market_values, "market_values")
+    quantities = numeric_mapping(captured.quantities, "quantities")
+    market_values = numeric_mapping(captured.market_values, "market_values")
     quantity_symbols = {symbol for symbol, value in quantities.items() if value != 0.0}
     value_symbols = {symbol for symbol, value in market_values.items() if value != 0.0}
     if quantity_symbols != value_symbols:
@@ -169,7 +169,7 @@ def late_verdict(
                 return input_failure("invalid_venue_belief", "enabled belief has an invalid tag")
             belief = {
                 symbol: qty
-                for symbol, qty in _numeric_mapping(
+                for symbol, qty in numeric_mapping(
                     captured.venue_belief.quantities, "venue_belief.quantities"
                 ).items()
                 if qty != 0.0
