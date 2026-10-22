@@ -2,7 +2,7 @@
 title: 'Planner input contract: non-finite current weights and symbol labels'
 type: 'correctness'
 created: '2026-10-22'
-status: 'ready-for-dev'
+status: 'in-review'
 baseline_commit: 'a3c71fa'
 context:
   - 'docs/development/stories/deferred-work.md'
@@ -208,12 +208,12 @@ Lior approved on 2026-10-22:
 ## Tasks & Acceptance
 
 **Execution (after owner approval):**
-- [ ] Readiness: scan registered strategies and `algua/strategies/` for non-`str` weight labels;
+- [x] Readiness: scan registered strategies and `algua/strategies/` for non-`str` weight labels;
   rerun readiness if any exist.
-- [ ] Tests first: one failing test per I/O-matrix row.
-- [ ] Implement N1/L1 (or the chosen options) and the `run_paper` mark check.
-- [ ] Mutation-check each new guard (break it, confirm a test fails, restore it).
-- [ ] Independent review round (story-delivery §4); record findings here.
+- [x] Tests first: one failing test per I/O-matrix row.
+- [x] Implement N1/L1 (or the chosen options) and the `run_paper` mark check.
+- [x] Mutation-check each new guard (break it, confirm a test fails, restore it).
+- [x] Independent review round (story-delivery §4); record findings here.
 
 **Acceptance Criteria:**
 - Given a NaN, +inf or -inf current weight for any symbol, when `plan()` or `build_intents` runs,
@@ -251,12 +251,98 @@ Lior approved on 2026-10-22:
 - Broker or ledger valuation changes outside `run_paper`'s held-symbol mark check.
 - Any live-activation, capital or authority-boundary change.
 
+## Implementation record
+
+Branch `fix/planner-nan-and-label-contract` from `db68600` (PR #711). Options N1 + L1 and the
+`run_paper` held-symbol mark check. No new `RiskBreach` kind. `DECISION_BREACH_KINDS` and
+`RISK_BREACH_KINDS` are unchanged.
+
+**Readiness.** `uv run algua registry list` on an empty local registry returned `[]` (this checkout
+has no `data/algua.db`). All 26 bundled strategies were executed on synthetic string-symbol bars.
+The two model strategies have no manifest here, so their signals were called with the pinned
+artifact bytes. Every non-empty weight index was `str`. Four mean-reversion strategies returned an
+empty series on a monotonic path (no labels). No non-`str` weight label, so implementation
+proceeded.
+
+**What landed.**
+- `check_finite_weights` rejects a label that is not a non-empty `str` as
+  `RiskBreach("non_finite_weight")` naming a non-string symbol label. The check runs before the
+  duplicate and value checks, so a non-finite weight on a bad label is still named as a label
+  defect. Cap, long-only, finite-value, and duplicate messages sort with `key=str`.
+- `planner_late._finite_number` and `_numeric_mapping` moved into `planner_decision` as the
+  public helpers `finite_number` and `numeric_mapping` (the late planner imports them) and are
+  imported back. `build_intents` (and therefore `plan`) validates current weights through that
+  helper with `normalize=False`: non-empty string keys, finite values, `ValueError` before any
+  intent, and the key text is left unchanged. The late planner keeps the default
+  `normalize=True` for captured quantities and market values. Strategy target labels are not
+  normalized.
+- `run_paper` checks held-symbol closes after warm-up and before the equity guard. A missing,
+  non-finite, or non-positive close raises `RiskBreach("unvaluable_marks")` and is not sized at
+  `0.0`. A close must be strictly positive (`mark > 0.0`), the same rule as the live lane's
+  `assert_marks_usable`. Held closes of `0.0` and `-1.0` are `unvaluable_marks` and submit no
+  orders. A missing close is `unvaluable_marks` here; the live lane reports absence as
+  `stale_marks`.
+
+**Mutation check** (each break restored the original bytes; the named test failed):
+- label-type check: `test_non_string_symbol_label_raises_non_finite_weight` and
+  `test_empty_symbol_label_raises_non_finite_weight`
+- label-list `key=str`: the same non-string test, on `{1: 0.2, b"ZZ": 0.2}`
+- cap `key=str` and long-only `key=str`: the mixed-label rail test
+- current-weight finite check: NaN and ±inf cases on `plan` and `build_intents`
+- current-weight key check: non-`str` and empty keys
+- held-mark call, the finite/positive branch, and the missing-close branch: the two `run_paper`
+  tests
+
+Removing `key=str` from the duplicate-symbol and non-finite-value messages did not fail a test.
+Those sorts are only reached after every label is a non-empty `str`, and string labels sort the
+same either way. The `key=str` calls stay so a later reorder cannot bring the `TypeError` back.
+Universe membership already sorted with `key=str`.
+
+**Gate, this sandbox.** `uv run ruff check .`, `uv run mypy algua`, and `uv run lint-imports` pass.
+`uv run pytest -q` was 6273 passed, 7 skipped, 39 failed. Every failure is a process-pool worker
+abort in `threadpoolctl` after `fork` (`parallel sweep failed`), except
+`test_transactional_failed_import_preserves_prior_registry`, which passes alone. With
+`ALGUA_SWEEP_CPU_BUDGET=1`, 36 of the 39 pass. `test_run_combos_pool_preserves_order` forces the
+pool and still aborts. `test_unregistered_strategy_full_cycle_registers_produces_evidence_and_promotes`
+fails the same JSON decode on unmodified `main` under that budget. Not caused by this diff.
+
+**Review round (PR #712, head `292ba5f`).** Findings and resolutions:
+
+1. Medium, parity. `build_intents` NFC-normalized current-weight keys and left strategy target
+   labels raw. A non-NFC held symbol already at target (`E` + combining acute, weight 0.5 on
+   both sides) emitted `[BUY raw, SELL normalised]` instead of `[]`. The spec requires
+   byte-identical intents for valid inputs and lists NFC of strategy labels as out of scope.
+   Resolution: `numeric_mapping(..., normalize=False)` in `build_intents` validates keys and
+   values without renaming. The late planner still NFC-normalizes captured state (default
+   `normalize=True`). Failing test added first:
+   `build_intents(Series({'E\u0301': 0.5}), {'E\u0301': 0.5}) == []`. Dropping `normalize=False`
+   fails that test.
+2. Low. `run_paper` rejects `close <= 0` as `unvaluable_marks`. Kept: it matches live
+   `assert_marks_usable`. Tests added for a held symbol with close `0.0` and `-1.0`: kind
+   `unvaluable_marks`, no orders submitted. The positive-close rule is recorded above.
+3. Nits. `finite_number` and `numeric_mapping` are public names, because `planner_late` imports
+   them across modules. `from collections.abc import Mapping` sits at the top of
+   `planner_decision.py`.
+
+**Review-round gate, this sandbox.** `uv run ruff check .`, `uv run mypy algua`, and `uv run lint-imports` pass. `uv run pytest -q` with `ALGUA_SWEEP_CPU_BUDGET=1` (the worker pool aborts in this sandbox): 6317 passed, 7 skipped, 2 failed. The failures are pre-existing: `test_run_combos_pool_preserves_order` forces the pool and still aborts, and `test_transactional_failed_import_preserves_prior_registry` (`ModuleNotFoundError: algua.features.tmp_bad_mod`) is the known flake.
+
+No merge, no deploy, no broker or trading-config change.
+
 ## Spec Change Log
 
 - 2026-10-22: drafted from the Story 1.1 deferred-work entries; awaiting owner decision.
 - 2026-10-22: owner approved N1 + L1; status ready-for-dev.
+- 2026-10-22: implemented N1 + L1 and the `run_paper` mark check on
+  `fix/planner-nan-and-label-contract`. See the implementation record. Review round still open.
+- 2026-10-22: review round on PR #712. `build_intents` no longer NFC-renames current-weight
+  keys (`normalize=False`). Held closes of `0.0` and `-1.0` stay `unvaluable_marks` (positive
+  close required, matching live). Helpers renamed `finite_number` / `numeric_mapping`; `Mapping`
+  import moved to module top.
 
 ## Verification
 
 **Commands:**
 - `uv run pytest -q && uv run ruff check . && uv run mypy algua && uv run lint-imports`
+- This sandbox: ruff, mypy, and lint-imports exit 0. The first pytest run exits 1 on 39
+  process-pool worker aborts described in the implementation record. The review-round pytest,
+  with `ALGUA_SWEEP_CPU_BUDGET=1`, exits 1 on the two pre-existing failures recorded above.

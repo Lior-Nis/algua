@@ -74,6 +74,89 @@ def test_planner_retains_shared_weight_rails(weights, kind):
     assert exc.value.kind == kind
 
 
+def _run_planner_entry(entry: str, current: dict, target: float) -> None:
+    """Call ``build_intents`` or ``plan`` with one finite string target and ``current`` holdings."""
+    from algua.live.planner import PlannerInput, build_intents, plan
+
+    ts = datetime(2023, 1, 4, tzinfo=UTC)
+    if entry == "build_intents":
+        build_intents(pd.Series({"AAPL": target}), current, ts)
+        return
+    strategy = SimpleNamespace(
+        name="test", universe=["AAPL"],
+        execution=ExecutionContract(rebalance_frequency="1d"),
+        target_weights=lambda view: pd.Series({"AAPL": target}),
+    )
+    plan(strategy, PlannerInput(pd.DataFrame(), current, ts))
+
+
+@pytest.mark.parametrize("entry", ["build_intents", "plan"])
+def test_nan_current_weight_with_nonzero_target_fails_before_intents(entry):
+    # A NaN holding must not compare equal to every target and silently emit no order.
+    with pytest.raises(ValueError, match="must be a finite number"):
+        _run_planner_entry(entry, {"AAPL": float("nan")}, 0.5)
+
+
+@pytest.mark.parametrize("entry", ["build_intents", "plan"])
+def test_nan_current_weight_on_exit_fails_before_intents(entry):
+    # An exit (target 0) against a NaN holding is the same contract error, not a skipped symbol.
+    with pytest.raises(ValueError, match="must be a finite number"):
+        _run_planner_entry(entry, {"AAPL": float("nan")}, 0.0)
+
+
+@pytest.mark.parametrize("entry", ["build_intents", "plan"])
+@pytest.mark.parametrize("holding", [float("inf"), float("-inf")])
+@pytest.mark.parametrize("target", [0.0, 0.5])
+def test_infinite_current_weight_fails_before_intents(entry, holding, target):
+    with pytest.raises(ValueError, match="must be a finite number"):
+        _run_planner_entry(entry, {"AAPL": holding}, target)
+
+
+@pytest.mark.parametrize("entry", ["build_intents", "plan"])
+@pytest.mark.parametrize("current", [{1: 0.1}, {"": 0.1}])
+def test_non_str_or_empty_current_weight_key_fails_before_intents(entry, current):
+    with pytest.raises(ValueError, match="non-empty strings"):
+        _run_planner_entry(entry, current, 0.5)
+
+
+def test_mixed_target_labels_raise_non_finite_weight():
+    # A zero-weight non-string label used to pass the rails and TypeError inside build_intents.
+    from algua.live.planner import PlannerInput, plan
+
+    strategy = SimpleNamespace(
+        name="test", universe=["AAPL"],
+        execution=ExecutionContract(rebalance_frequency="1d"),
+        target_weights=lambda view: pd.Series({1: 0.0, "AAPL": 0.5}),
+    )
+    with pytest.raises(RiskBreach) as exc:
+        plan(strategy, PlannerInput(pd.DataFrame(), {}, datetime(2023, 1, 4, tzinfo=UTC)))
+    assert exc.value.kind == "non_finite_weight"
+    assert "non-string symbol label" in exc.value.detail
+
+
+def test_valid_inputs_keep_sorted_delta_intents():
+    # Legal string labels and finite weights stay the sorted delta intents from baseline a3c71fa.
+    from algua.live.planner import build_intents
+
+    ts = datetime(2023, 1, 4, tzinfo=UTC)
+    intents = build_intents(
+        pd.Series({"BBB": 0.25, "AAA": 0.5}), {"OLD": 0.2, "AAA": 0.5}, ts,
+    )
+    assert intents == [
+        OrderIntent("BBB", Side.BUY, 0.25, ts),
+        OrderIntent("OLD", Side.SELL, 0.0, ts),
+    ]
+
+
+def test_non_nfc_held_symbol_at_target_emits_no_intent():
+    # NFD "E" + combining acute equals the target weight. Validating current keys must not
+    # rename the holding, or the same symbol becomes a BUY of the raw label and a SELL of NFC.
+    from algua.live.planner import build_intents
+
+    ts = datetime(2023, 1, 4, tzinfo=UTC)
+    assert build_intents(pd.Series({"E\u0301": 0.5}), {"E\u0301": 0.5}, ts) == []
+
+
 def test_planner_dependency_closure_has_no_operational_authority():
     # Reuse the installed import-linter graph engine. Include TYPE_CHECKING edges so
     # importing a ledger-coupled DTO only for annotations cannot sneak across this seam.

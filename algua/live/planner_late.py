@@ -11,7 +11,6 @@ from __future__ import annotations
 import hmac
 import math
 import re
-import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -38,7 +37,12 @@ from algua.live.planner_contract import (
     VenueBeliefPending,
     VenueBeliefRequired,
 )
-from algua.live.planner_decision import PlannerInput, PlannerResult
+from algua.live.planner_decision import (
+    PlannerInput,
+    PlannerResult,
+    finite_number,
+    numeric_mapping,
+)
 from algua.live.planner_early import (
     assert_marks_usable,
     closed_universe_bars,
@@ -79,14 +83,14 @@ def _late_state(
             "denominator - refusing to trade before it divides by zero, inverts weights, or "
             "NaN-poisons",
         )
-    drawdown_equity = _finite_number(captured.drawdown_equity, "drawdown_equity")
+    drawdown_equity = finite_number(captured.drawdown_equity, "drawdown_equity")
     persisted_peak = (
         None
         if captured.persisted_peak_equity is None
-        else _finite_number(captured.persisted_peak_equity, "persisted_peak_equity")
+        else finite_number(captured.persisted_peak_equity, "persisted_peak_equity")
     )
-    quantities = _numeric_mapping(captured.quantities, "quantities")
-    market_values = _numeric_mapping(captured.market_values, "market_values")
+    quantities = numeric_mapping(captured.quantities, "quantities")
+    market_values = numeric_mapping(captured.market_values, "market_values")
     quantity_symbols = {symbol for symbol, value in quantities.items() if value != 0.0}
     value_symbols = {symbol for symbol, value in market_values.items() if value != 0.0}
     if quantity_symbols != value_symbols:
@@ -107,31 +111,6 @@ def _late_state(
         # sorted, while captured values arrive in broker order (Story 1.3c parity).
         sum(abs(current_weights[symbol]) for symbol in sorted(current_weights)),
     ), current_weights
-
-
-def _finite_number(value: object, label: str) -> float:
-    if type(value) not in (int, float):
-        raise ValueError(f"{label} must be a finite number")
-    assert isinstance(value, (int, float))
-    if not math.isfinite(float(value)):
-        raise ValueError(f"{label} must be a finite number")
-    return float(value)
-
-
-def _numeric_mapping(value: object, label: str) -> dict[str, float]:
-    from collections.abc import Mapping
-
-    if not isinstance(value, Mapping):
-        raise ValueError(f"{label} must be a mapping")
-    result: dict[str, float] = {}
-    for symbol, number in value.items():
-        if not isinstance(symbol, str) or not symbol:
-            raise ValueError(f"{label} keys must be non-empty strings")
-        normalized = unicodedata.normalize("NFC", symbol)
-        if normalized in result:
-            raise ValueError(f"{label} keys collide after Unicode normalization")
-        result[normalized] = _finite_number(number, f"{label}[{symbol!r}]")
-    return result
 
 
 @dataclass(frozen=True)
@@ -190,7 +169,7 @@ def late_verdict(
                 return input_failure("invalid_venue_belief", "enabled belief has an invalid tag")
             belief = {
                 symbol: qty
-                for symbol, qty in _numeric_mapping(
+                for symbol, qty in numeric_mapping(
                     captured.venue_belief.quantities, "venue_belief.quantities"
                 ).items()
                 if qty != 0.0
