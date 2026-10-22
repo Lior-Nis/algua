@@ -1,0 +1,7 @@
+{
+  "name": "algua-acceptance-report",
+  "private": true,
+  "devDependencies": {
+    "allure": "3.21.0"
+  }
+}

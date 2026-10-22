@@ -1,0 +1,47 @@
+{
+  "submitted_order": {
+    "strategy": "acceptance_reconciliation",
+    "symbol": "AAPL",
+    "side": "buy",
+    "intended_notional": 1000.0,
+    "client_order_id": "acceptance-recon-AAPL",
+    "broker_order_id": "venue-order-AAPL"
+  },
+  "venue_activities": [
+    {
+      "id": "fill-001",
+      "activity_type": "FILL",
+      "side": "buy",
+      "qty": "4.0",
+      "price": "100.00",
+      "symbol": "AAPL",
+      "order_id": "venue-order-AAPL",
+      "transaction_time": "2026-03-27T14:31:00Z"
+    },
+    {
+      "id": "fill-002",
+      "activity_type": "FILL",
+      "side": "buy",
+      "qty": "6.0",
+      "price": "100.00",
+      "symbol": "AAPL",
+      "order_id": "venue-order-AAPL",
+      "transaction_time": "2026-03-27T14:32:00Z"
+    }
+  ],
+  "after_partial_fill": {
+    "believed_positions": {"AAPL": 4.0},
+    "fill_cursor": "2026-03-27T14:31:30+00:00",
+    "reconciliation": {"clean": true, "halt": false, "mismatches": []}
+  },
+  "after_restart_replay": {
+    "believed_positions": {"AAPL": 4.0},
+    "fill_cursor": "2026-03-27T14:32:00+00:00",
+    "reconciliation": {"clean": true, "halt": false, "mismatches": []}
+  },
+  "after_final_fill": {
+    "believed_positions": {"AAPL": 10.0},
+    "fill_cursor": "2026-03-27T14:33:00+00:00",
+    "reconciliation": {"clean": true, "halt": false, "mismatches": []}
+  }
+}

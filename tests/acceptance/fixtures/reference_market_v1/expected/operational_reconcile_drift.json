@@ -1,0 +1,30 @@
+{
+  "first_observation": {
+    "cycle": 1,
+    "clean": false,
+    "halt": false,
+    "trading_allowed": false,
+    "mismatches": [
+      {
+        "symbol": "AAPL",
+        "expected": 0.0,
+        "broker": 5.0,
+        "status": "pending"
+      }
+    ]
+  },
+  "after_restart_and_grace": {
+    "cycle": 4,
+    "clean": false,
+    "halt": true,
+    "trading_allowed": false,
+    "mismatches": [
+      {
+        "symbol": "AAPL",
+        "expected": 0.0,
+        "broker": 5.0,
+        "status": "unexplained"
+      }
+    ]
+  }
+}

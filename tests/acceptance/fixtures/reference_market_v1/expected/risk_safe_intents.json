@@ -1,0 +1,44 @@
+{
+  "risk_limits": {
+    "max_gross_exposure": 1.0,
+    "max_weight_per_symbol": 0.5,
+    "allow_short": false
+  },
+  "current_weights": {
+    "AAPL": 0.2,
+    "GOOGL": 0.05,
+    "MSFT": 0.2
+  },
+  "approved_target_weights": {
+    "AAPL": 0.4,
+    "MSFT": 0.1,
+    "NVDA": 0.3
+  },
+  "approved_target_gross": 0.8,
+  "order_intents": [
+    {
+      "symbol": "AAPL",
+      "side": "buy",
+      "target_weight": 0.4,
+      "decision_session": "2026-03-27T00:00:00+00:00"
+    },
+    {
+      "symbol": "GOOGL",
+      "side": "sell",
+      "target_weight": 0.0,
+      "decision_session": "2026-03-27T00:00:00+00:00"
+    },
+    {
+      "symbol": "MSFT",
+      "side": "sell",
+      "target_weight": 0.1,
+      "decision_session": "2026-03-27T00:00:00+00:00"
+    },
+    {
+      "symbol": "NVDA",
+      "side": "buy",
+      "target_weight": 0.3,
+      "decision_session": "2026-03-27T00:00:00+00:00"
+    }
+  ]
+}

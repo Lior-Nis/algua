@@ -1,0 +1,13 @@
+{
+  "after_restart": {
+    "strategy": "cross_sectional_momentum",
+    "reason": "acceptance risk breach",
+    "actor": "system",
+    "is_tripped": true
+  },
+  "next_tick": {
+    "status": "blocked",
+    "reason": "kill-switch tripped before submit phase",
+    "submitted_symbols": []
+  }
+}

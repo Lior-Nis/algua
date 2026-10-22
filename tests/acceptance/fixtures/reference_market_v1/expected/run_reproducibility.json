@@ -1,0 +1,37 @@
+{
+  "requested": {
+    "snapshot_id": "b6736b451e3b5939",
+    "seed": 1729
+  },
+  "run_identity": {
+    "snapshot_id": "b6736b451e3b5939",
+    "seed": 1729,
+    "config_hash": "5e4f08591d72dcf08117abaa75a87bb0",
+    "code_hash_present": true,
+    "dependency_hash_present": true,
+    "timeframe": "1d",
+    "period": {
+      "start": "2026-01-02",
+      "end": "2026-03-31"
+    }
+  },
+  "selected_metrics": {
+    "total_return": -0.0009502375000000063,
+    "sharpe": -2.0160645150967413,
+    "max_drawdown": -0.0009502375000000063
+  },
+  "replay_checks": {
+    "identity_equal": true,
+    "metrics_equal": true,
+    "returns_equal": true
+  },
+  "ledger_checks": {
+    "first_snapshot_id": "b6736b451e3b5939",
+    "replay_snapshot_id": "b6736b451e3b5939",
+    "first_seed": 1729,
+    "replay_seed": 1729,
+    "config_hash_equal": true,
+    "code_hash_equal": true,
+    "dependency_hash_equal": true
+  }
+}

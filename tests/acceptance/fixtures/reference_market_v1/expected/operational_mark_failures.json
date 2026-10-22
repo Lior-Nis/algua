@@ -1,0 +1,14 @@
+{
+  "stale_feed": {
+    "status": "blocked",
+    "breach_kind": "stale_marks",
+    "detail": "marks unusable beyond 2 completed sessions: {'AAPL': 'stale(15)', 'AMZN': 'stale(15)', 'GOOGL': 'stale(15)', 'MSFT': 'stale(15)', 'NVDA': 'stale(15)'} - refusing to value/size/decide off an unreliable feed",
+    "submitted_symbols": []
+  },
+  "missing_held_symbol": {
+    "status": "blocked",
+    "breach_kind": "stale_marks",
+    "detail": "marks unusable beyond 2 completed sessions: {'ORPHAN': 'no_mark'} - refusing to value/size/decide off an unreliable feed",
+    "submitted_symbols": []
+  }
+}

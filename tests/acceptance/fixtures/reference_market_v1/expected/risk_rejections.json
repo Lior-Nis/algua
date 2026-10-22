@@ -1,0 +1,14 @@
+{
+  "concentration": {
+    "status": "rejected",
+    "breach_kind": "max_weight_per_symbol",
+    "detail": "single-name weight(s) for ['AAPL'] exceed max_weight_per_symbol 0.5000",
+    "order_intents": []
+  },
+  "gross_exposure": {
+    "status": "rejected",
+    "breach_kind": "gross_exposure",
+    "detail": "gross exposure 1.1000 exceeds max_gross_exposure 1.0000",
+    "order_intents": []
+  }
+}

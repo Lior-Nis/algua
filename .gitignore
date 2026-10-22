@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+node_modules/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/

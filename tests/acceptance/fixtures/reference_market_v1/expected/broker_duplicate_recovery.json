@@ -1,0 +1,40 @@
+{
+  "active_duplicate": {
+    "existing_order": {
+      "id": "venue-order-accepted",
+      "client_order_id": "acceptance-20260327-AAPL-accepted",
+      "symbol": "AAPL",
+      "side": "buy",
+      "status": "accepted"
+    },
+    "submitted_order": {
+      "symbol": "AAPL",
+      "notional": "5000.00",
+      "side": "buy",
+      "type": "market",
+      "time_in_force": "day",
+      "client_order_id": "acceptance-20260327-AAPL-accepted"
+    },
+    "lookup": "orders:by_client_order_id?client_order_id=acceptance-20260327-AAPL-accepted",
+    "adapter_result": "venue-order-accepted"
+  },
+  "dead_duplicate": {
+    "existing_order": {
+      "id": "venue-order-rejected",
+      "client_order_id": "acceptance-20260327-AAPL-rejected",
+      "symbol": "AAPL",
+      "side": "buy",
+      "status": "rejected"
+    },
+    "submitted_order": {
+      "symbol": "AAPL",
+      "notional": "5000.00",
+      "side": "buy",
+      "type": "market",
+      "time_in_force": "day",
+      "client_order_id": "acceptance-20260327-AAPL-rejected"
+    },
+    "lookup": "orders:by_client_order_id?client_order_id=acceptance-20260327-AAPL-rejected",
+    "adapter_result": "skipped"
+  }
+}

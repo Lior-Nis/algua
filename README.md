@@ -14,6 +14,22 @@ uv sync
 uv run algua doctor
 ```
 
+## Human-reviewable acceptance dashboard
+
+The focused acceptance suite presents fixed inputs, actual outputs, and expected-versus-actual
+evidence for data ingestion, strategy decisions, delayed backtest execution, and backtest/paper
+decision parity. It also presents approved and rejected risk decisions plus kill-switch evidence:
+
+```bash
+npm install
+scripts/acceptance-report.sh
+```
+
+Open the reported local HTML path, or use the persistent
+[acceptance dashboard](https://lior-nis.github.io/algua/) built from the latest passing `main`.
+See [the acceptance guide](tests/acceptance/README.md) for the scenario inventory, refresh behavior,
+and review protocol.
+
 ## Data snapshots
 ```
 # Register a local file snapshot.
