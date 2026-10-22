@@ -324,6 +324,8 @@ fails the same JSON decode on unmodified `main` under that budget. Not caused by
    them across modules. `from collections.abc import Mapping` sits at the top of
    `planner_decision.py`.
 
+**Review-round gate, this sandbox.** `uv run ruff check .`, `uv run mypy algua`, and `uv run lint-imports` pass. `uv run pytest -q` with `ALGUA_SWEEP_CPU_BUDGET=1` (the worker pool aborts in this sandbox): 6317 passed, 7 skipped, 2 failed. The failures are pre-existing: `test_run_combos_pool_preserves_order` forces the pool and still aborts, and `test_transactional_failed_import_preserves_prior_registry` (`ModuleNotFoundError: algua.features.tmp_bad_mod`) is the known flake.
+
 No merge, no deploy, no broker or trading-config change.
 
 ## Spec Change Log
@@ -341,5 +343,6 @@ No merge, no deploy, no broker or trading-config change.
 
 **Commands:**
 - `uv run pytest -q && uv run ruff check . && uv run mypy algua && uv run lint-imports`
-- This sandbox: ruff, mypy, and lint-imports exit 0. pytest exits 1 on 39 process-pool worker
-  aborts described in the implementation record.
+- This sandbox: ruff, mypy, and lint-imports exit 0. The first pytest run exits 1 on 39
+  process-pool worker aborts described in the implementation record. The review-round pytest,
+  with `ALGUA_SWEEP_CPU_BUDGET=1`, exits 1 on the two pre-existing failures recorded above.
