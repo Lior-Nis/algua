@@ -273,6 +273,9 @@ exiting tenants on the shared account, then retires them. Full acceptance criter
 [Story 1.4](stories/1-4-controlled-exit-of-the-legacy-paper-cohort.md) and its normative
 [contract](specs/spec-story-1-4-legacy-cohort-exit/SPEC.md).
 
+Status: `review`. The code merged in PR #686 (2026-10-03). Only AC7 is unconfirmed: retire the last
+legacy tenant, confirm the paper account is flat and restart the paper timer.
+
 **Epic 2 stories, prepared 2026-10-04** from FR1, FR8 and FR11–FR14, the two owner decisions
 recorded on #624, and the current code at `e875b6d`. They are dependency-ordered. Stories 2.1 and
 2.2 are independent and design-complete; every later story waits for its predecessor. Each still
@@ -287,14 +290,14 @@ rows once at migration, and refuses go-live, at challenge issuance and at comple
 the deployment's research gate and its forward certificate are unrelaxed. No flag or signature
 waives it, and exploration keeps every signed relaxation. It goes first because rows minted before
 it carry no recorded set. [Story 2.1](stories/2-1-refuse-live-qualification-on-relaxed-gates.md):
-`ready-for-dev`.
+`ready-for-dev`; only AC10 has shipped (PR #700).
 
 ### Story 2.2: Drain a strategy's resting paper orders on every paper-lane exit
 
 Fixes #685: every paper-source book exit, including `forward_tested -> live`, cancels the strategy's
 own resting paper orders, ingests fills, and refuses while an order remains, failing closed without
 the venue. Needed before the signed go-live and the unattended paper run.
-[Story 2.2](stories/2-2-drain-resting-paper-orders-on-lane-exit.md): `ready-for-dev`.
+[Story 2.2](stories/2-2-drain-resting-paper-orders-on-lane-exit.md): `done` (PR #693).
 
 ### Story 2.3: Bind the signed live authorization to the exact frozen deployment
 
@@ -340,8 +343,8 @@ becomes crash-safe at parity with paper; `trace order` and `trace audit` read th
 Records the supervisor release identity on every paper and live cycle and refuses live strategy
 ticks on a release that paper has not validated, while every risk-reducing step still runs. Ships
 the live operator job and units disabled; enabling them is part of activation.
-[Story 2.8](stories/2-8-validate-releases-in-paper-before-live.md): `backlog` until the owner
-decides the minimum paper validation and 2.7 merges.
+[Story 2.8](stories/2-8-validate-releases-in-paper-before-live.md): `backlog` until 2.7 merges
+(the owner decided the minimum paper validation on 2026-10-04; see above).
 
 ### Story 2.9: Define the safe states and assemble incident evidence
 
@@ -354,10 +357,13 @@ operator alerts recorded in the registry; `fleet incidents`; and a fleet-health 
 A planned, drill-based 72-hour paper run with controlled restart, data outage and halt drills,
 judged against the Story 2.9 catalogue, with an evidence report. No real-money acceptance.
 [Story 2.10](stories/2-10-run-the-72-hour-unattended-acceptance.md): `backlog` until 2.1–2.9 are
-deployed, a frozen tenant is ticking in paper and the owner has chosen the alert destination.
+deployed and a frozen tenant is ticking in paper. The alert destination is decided (email; see
+above).
 
-Outside Epic 2, with reasons: #682 (unauthenticated raw human edges) does not widen live authority,
-because go-live independently requires a fresh certificate and a signature and frozen deployments
-refuse the raw edge. #647 (paper whole-account breaker and lane unification) limits what paper can
-validate for live-only code; Story 2.8 records that limit. #648 (GitHub enforces code-owner review
-on three paths) belongs to the open prerequisites task.
+Outside Epic 2, with reasons: #682 (unauthenticated raw human edges) is closed; PR #700 removed the
+raw edges for every actor, which is Story 2.1's AC10. #647 (paper whole-account breaker and lane
+unification) remains open: step 1, the paper-lane whole-account breaker, merged in PR #698; the
+lane-parity work still limits what paper can validate for live-only code, and Story 2.8 records that
+limit. #648 (GitHub enforces code-owner review on three paths) is closed by PR #695, which makes one
+CODEOWNERS file serve both GitHub review and the runtime denylist; confirming the effective
+protected-path settings stays in the open prerequisites task.

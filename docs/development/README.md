@@ -33,23 +33,39 @@ reports must distinguish tests passing, code merged, deployment verified and cap
 
 ## Current handoff
 
-[Story 1.1 — planner extraction](stories/1-1-extract-in-process-decision-planner.md),
-[Story 1.2 — explicit deployment epochs](stories/1-2-record-working-tree-deployments.md) and
-[Story 1.3a — two-phase planner boundary](stories/1-3a-complete-two-phase-planner-boundary-in-process.md)
-are implemented, independently reviewed and merged. None of those merges is a deployment.
-[Story 1.3 — frozen planner artifacts](stories/1-3-materialize-and-execute-frozen-planner-artifacts.md)
-is the `decomposed` parent outcome. The
-[2026-09-25 readiness assessment](implementation-readiness-report-2026-09-25.md) found it too large
-for one implementation/review cycle, and the approved
-[Sprint Change Proposal](sprint-change-proposal-2026-09-25.md) divides it into Stories 1.3a–1.3d.
-[Story 1.3b](stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md) is done
-(PR #676). [Story 1.3c](stories/1-3c-execute-frozen-planners-in-paper.md) is done (PR #680).
-[Story 1.3d](stories/1-3d-bind-operational-evidence-and-qualification.md) is `ready-for-dev` after its
-[targeted readiness review](implementation-readiness-report-2026-09-30-story-1-3d.md) and adopted
-[normative evidence contract](specs/spec-story-1-3d-frozen-evidence-and-qualification/SPEC.md). The older
-[readiness assessment](implementation-readiness-report-2026-09-24.md) covers only Story 1.1, not
-either whole epic. [Deferred findings](stories/deferred-work.md) retain pre-existing issues outside
-the active story boundary.
+As of 2026-10-22. Merged code is not a deployment, and nothing below authorizes live trading or
+capital.
+
+**Epic 1 (immutable paper operating kernel): done, pending one piece of evidence.** Stories 1.1,
+1.2 and 1.3a–1.3d are done; [Story 1.3](stories/1-3-materialize-and-execute-frozen-planner-artifacts.md)
+is the decomposed parent (see the
+[Sprint Change Proposal](sprint-change-proposal-2026-09-25.md)).
+[Story 1.4 — legacy cohort exit](stories/1-4-controlled-exit-of-the-legacy-paper-cohort.md) stays
+`review`: its code merged in PR #686, and only AC7 (retire the last legacy tenant, confirm the paper
+account is flat, restart the paper timer) still needs recorded evidence. The
+[Epic 1 retrospective](epic-1-retrospective-2026-10-04.md) is done; its action items A1–A13 remain
+the follow-up list.
+
+**Epic 2 (approved deployment within the personal-capital envelope): in progress.** Stories are in
+[epics.md](epics.md) and `stories/2-*.md`.
+- [Story 2.2 — paper exit drain](stories/2-2-drain-resting-paper-orders-on-lane-exit.md) is done
+  (PR #693; contract and readiness in PR #692).
+- [Story 2.1 — refuse live qualification on relaxed gates](stories/2-1-refuse-live-qualification-on-relaxed-gates.md)
+  is next and `ready-for-dev`
+  ([readiness report](implementation-readiness-report-2026-10-05-story-2-1.md),
+  [contract](specs/spec-story-2-1-unrelaxed-live-qualification/SPEC.md)). Only AC10 has shipped,
+  via PR #700 (#682).
+- Stories 2.3–2.10 are `backlog`. Each has a story file but no contract under `specs/` and no
+  readiness report yet; each waits for its predecessor, then its own contract and readiness review.
+
+**Shipped outside the epics:** the [research strategy board](stories/spec-strategy-board.md)
+(PR #705) and the [dashboard decision layer](stories/spec-dashboard-decision-layer.md) (PR #706).
+The [planner NaN-weight and symbol-label contract](stories/spec-planner-nan-and-label-contract.md)
+merged in PR #711; its implementation is in review (PR #712).
+
+[Deferred findings](stories/deferred-work.md) keep pre-existing issues that fall outside the active
+story boundary. Open owner decisions are listed in [epics.md](epics.md) ("Human decisions and board
+links").
 
 Workflow path bindings: `planning_artifacts = docs/development`,
 `implementation_artifacts = docs/development/stories`; use `docs/PRD.md` and

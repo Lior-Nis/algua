@@ -10,7 +10,8 @@ Prepared: 2026-10-04. Baseline: `e875b6d` (main after PR #686). Epic: 2.
 Requirements: FR13 (predefined safe state, incident evidence), NFR6, NFR8. PRD §§15, 20, 24.
 Depends on: Stories 2.5, 2.6 and 2.8, whose refusals and halts join the catalogue.
 Gated by: Story 2.8 merged, then contract and readiness review. No owner decision is needed to build
-it; the owner must choose where alerts go before Story 2.10 runs.
+it. Alert destination: decided 2026-10-04 as email to the owner through the existing SMTP sender
+(see [epics.md](../epics.md), "Alerts (Story 2.10)").
 
 ## Story
 
@@ -85,8 +86,10 @@ issues or repair anything automatically (PRD Phase 4); treat log text as authori
 
 ## Owner decisions
 
-None to build. Before Story 2.10: choose the alert destination for `ALGUA_ALERT_CMD` (human access;
-keep credentials out of the repository and task comments).
+None to build. The alert destination for `ALGUA_ALERT_CMD` was decided on 2026-10-04: email to the
+owner through the existing SMTP sender, driven by systemd `OnFailure=` hooks and the `fleet health`
+watchdog ([epics.md](../epics.md)). Wiring it remains a human-access step; keep credentials out of the
+repository and task comments.
 
 ## Verification
 
